@@ -27,10 +27,8 @@ Step 1: 判断清单所属工种类别
   土方 / 砌筑 / 混凝土 / 钢筋 / 模板 / 屋面防水 / 脚手架 / 垂直运输 / 装饰 / 其他
 
 Step 2: 检查定额库是否有对应章节
-  当前定额库章节：砌筑工程(010001) / 混凝土及钢筋混凝土工程(010002) /
-  木结构(010003) / 屋面及防水(010004) / 防腐保温隔热(010005) /
-  模板工程(010006) / 脚手架(010007) / 垂直运输(010008) / 超高施工(010009)
-  → 若工种不在上述章节（如土方、装饰等），直接返回空数组
+  当前定额库章节：__CHAPTER_LIST__
+  → 若工种不在上述章节（如装饰等），直接返回空数组
 
 Step 3: 将清单项目特征还原为施工工序序列（1-3条工序）
 
@@ -113,8 +111,8 @@ Step 6: 输出结果，调用 submit_matches
     ]
 
 ▶ 示例3：定额库无对应章节
-  清单：挖一般土方，m3，综合考虑土类别
-  正确输出：matches: []  （原因：当前定额库无土方工程章节）
+  清单：外墙涂料，m2，水性外墙乳胶漆两遍
+  正确输出：matches: []  （原因：当前定额库无装饰工程章节）
 
 ▶ 示例4：模板需组合支撑架
   清单：柱面模板，m2，矩形柱，木模，支模高度3.6<H≤4.8m
@@ -205,8 +203,17 @@ def build_system_prompt(conn, standard_id: int) -> str:
     """
     构建含全量定额的 system prompt。
     同一 standard_id 内容完全固定，DeepSeek 会自动缓存此前缀。
+    章节列表从数据库动态获取，支持多套定额标准。
     """
     with conn.cursor() as cur:
+        # 获取章节列表
+        cur.execute("""
+            SELECT code, name FROM quota_chapters
+            WHERE standard_id = %s ORDER BY sort_order
+        """, (standard_id,))
+        chapters = cur.fetchall()
+
+        # 获取全量子目
         cur.execute("""
             SELECT id, item_code, item_name, variant_desc, unit, work_content
             FROM quota_items
@@ -214,6 +221,9 @@ def build_system_prompt(conn, standard_id: int) -> str:
             ORDER BY item_code
         """, (standard_id,))
         rows = cur.fetchall()
+
+    # 动态生成章节说明
+    chapter_lines = " / ".join(f"{name}({code})" for code, name in chapters)
 
     quota_list = [
         {
@@ -228,9 +238,12 @@ def build_system_prompt(conn, standard_id: int) -> str:
     ]
     quota_json = json.dumps(quota_list, ensure_ascii=False, separators=(',', ':'))
 
-    return f"""{_ROLE_DESC}
+    # 把动态章节注入到 _ROLE_DESC 的占位符
+    role_desc = _ROLE_DESC.replace("__CHAPTER_LIST__", chapter_lines)
 
-## 定额子目库（共 {len(rows)} 条，SJG 171-2024）
+    return f"""{role_desc}
+
+## 定额子目库（共 {len(rows)} 条）
 
 {quota_json}"""
 
