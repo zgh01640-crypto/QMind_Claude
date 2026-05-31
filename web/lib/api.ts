@@ -317,6 +317,10 @@ export interface BoqMatchResult {
   status: string  // ai / confirmed / rejected
   confirmed_at: string | null
 
+  // 工序和换算说明
+  work_procedure: string | null
+  factor_explanation: string | null
+
   // 定额基本信息
   quota_item_code: string
   quota_item_name: string

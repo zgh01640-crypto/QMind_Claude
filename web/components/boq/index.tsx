@@ -261,6 +261,26 @@ export function MatchCard({
 
       {open && (
         <div className="px-2.5 pb-2.5 border-t border-gray-100 space-y-3 pt-2.5">
+          {/* 施工工序 + 换算说明 */}
+          {(m.work_procedure || m.factor_explanation) && (
+            <div className="flex flex-wrap gap-3 text-xs">
+              {m.work_procedure && (
+                <span className="flex items-center gap-1 text-gray-600">
+                  <span>🔨</span>
+                  <span className="font-medium">施工工序：</span>
+                  <span>{m.work_procedure}</span>
+                </span>
+              )}
+              {m.factor_explanation && (
+                <span className="flex items-center gap-1 text-gray-500">
+                  <span>📐</span>
+                  <span className="font-medium">换算说明：</span>
+                  <span>{m.factor_explanation}</span>
+                </span>
+              )}
+            </div>
+          )}
+
           {m.reasoning_chain && (
             <div>
               <div className="text-xs font-medium text-indigo-700 mb-1">🧠 AI 推理过程</div>

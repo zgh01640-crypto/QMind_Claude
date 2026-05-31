@@ -301,19 +301,23 @@ def _run_match_for_item(conn, boq_item_id: int, standard_id: int, system_prompt:
                 cur.execute("""
                     INSERT INTO boq_quota_matches
                         (project_id, boq_item_id, quota_item_id, standard_id,
-                         qty_factor, ai_reasoning, reasoning_chain, confidence, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai')
+                         qty_factor, ai_reasoning, reasoning_chain, confidence, status,
+                         work_procedure, factor_explanation)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s, %s)
                     ON CONFLICT (boq_item_id, quota_item_id)
                     DO UPDATE SET
                         qty_factor = EXCLUDED.qty_factor,
                         ai_reasoning = EXCLUDED.ai_reasoning,
                         reasoning_chain = EXCLUDED.reasoning_chain,
                         confidence = EXCLUDED.confidence,
+                        work_procedure = EXCLUDED.work_procedure,
+                        factor_explanation = EXCLUDED.factor_explanation,
                         status = 'ai',
                         created_at = NOW()
                     RETURNING id
                 """, (project_id, boq_item_id, m.quota_item_id, standard_id,
-                      m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence))
+                      m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence,
+                      m.work_procedure, m.factor_explanation))
                 match_id = cur.fetchone()[0]
                 results.append(BoqMatchResult(
                     id=match_id,
@@ -328,6 +332,8 @@ def _run_match_for_item(conn, boq_item_id: int, standard_id: int, system_prompt:
                     reasoning_chain=m.reasoning_chain,
                     confidence=m.confidence,
                     status="ai",
+                    work_procedure=m.work_procedure,
+                    factor_explanation=m.factor_explanation,
                 ))
         else:
             # 批量匹配：带 run_id，直接 INSERT，不做 upsert
@@ -344,12 +350,14 @@ def _run_match_for_item(conn, boq_item_id: int, standard_id: int, system_prompt:
                 cur.execute("""
                     INSERT INTO boq_quota_matches
                         (project_id, boq_item_id, quota_item_id, standard_id,
-                         qty_factor, ai_reasoning, reasoning_chain, confidence, status, run_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s)
+                         qty_factor, ai_reasoning, reasoning_chain, confidence, status, run_id,
+                         work_procedure, factor_explanation)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s, %s, %s)
                     ON CONFLICT (run_id, boq_item_id, quota_item_id) DO NOTHING
                     RETURNING id
                 """, (project_id, boq_item_id, m.quota_item_id, standard_id,
-                      m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id))
+                      m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id,
+                      m.work_procedure, m.factor_explanation))
                 row = cur.fetchone()
                 if not row:
                     continue
@@ -502,6 +510,7 @@ def get_boq_matches(run_id: int = Query(...)):
                 SELECT m.id, m.boq_item_id, m.quota_item_id,
                        m.qty_factor, m.ai_reasoning, m.reasoning_chain,
                        m.confidence, m.status, m.confirmed_at,
+                       m.work_procedure, m.factor_explanation,
                        q.item_code, q.item_name, q.variant_desc, q.unit,
                        q.work_content,
                        q.total_unit_price, q.unit_price,
@@ -543,14 +552,15 @@ def get_boq_matches(run_id: int = Query(...)):
                 qty_factor=float(r[3]),
                 ai_reasoning=r[4], reasoning_chain=r[5],
                 confidence=r[6], status=r[7], confirmed_at=r[8],
-                quota_item_code=r[9], quota_item_name=r[10],
-                quota_variant_desc=r[11], quota_unit=r[12],
-                quota_work_content=r[13],
-                quota_total_unit_price=_f(r[14]), quota_unit_price=_f(r[15]),
-                quota_labor_cost=_f(r[16]), quota_material_cost=_f(r[17]),
-                quota_machine_cost=_f(r[18]), quota_management_fee=_f(r[19]),
-                quota_profit=_f(r[20]), quota_safety_fee=_f(r[21]),
-                quota_statutory_fee=_f(r[22]), quota_tax=_f(r[23]),
+                work_procedure=r[9], factor_explanation=r[10],
+                quota_item_code=r[11], quota_item_name=r[12],
+                quota_variant_desc=r[13], quota_unit=r[14],
+                quota_work_content=r[15],
+                quota_total_unit_price=_f(r[16]), quota_unit_price=_f(r[17]),
+                quota_labor_cost=_f(r[18]), quota_material_cost=_f(r[19]),
+                quota_machine_cost=_f(r[20]), quota_management_fee=_f(r[21]),
+                quota_profit=_f(r[22]), quota_safety_fee=_f(r[23]),
+                quota_statutory_fee=_f(r[24]), quota_tax=_f(r[25]),
                 quota_resources=resources_map.get(r[2], []),
             )
             for r in rows
@@ -779,12 +789,14 @@ def match_project_stream(req: MatchProjectRequest):
                         cur.execute("""
                             INSERT INTO boq_quota_matches
                                 (project_id, boq_item_id, quota_item_id, standard_id,
-                                 qty_factor, ai_reasoning, reasoning_chain, confidence, status, run_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s)
+                                 qty_factor, ai_reasoning, reasoning_chain, confidence, status, run_id,
+                                 work_procedure, factor_explanation)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s, %s, %s)
                             ON CONFLICT (run_id, boq_item_id, quota_item_id) DO NOTHING
                             RETURNING id
                         """, (req.project_id, item_id, m.quota_item_id, req.standard_id,
-                              m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id))
+                              m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id,
+                              m.work_procedure, m.factor_explanation))
                         row = cur.fetchone()
                         if row:
                             matched_count += 1

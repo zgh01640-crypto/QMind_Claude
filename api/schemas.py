@@ -221,6 +221,10 @@ class BoqMatchResult(BaseModel):
     quota_statutory_fee: Optional[float] = None
     quota_tax: Optional[float] = None
 
+    # 工序和换算说明（新增）
+    work_procedure: Optional[str] = None
+    factor_explanation: Optional[str] = None
+
     # 工料机消耗量
     quota_resources: list[QuotaResource] = []
 

@@ -57,6 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_bqm_boq_item ON boq_quota_matches(boq_item_id);
 
 -- 追加 reasoning_chain 列（idempotent）
 ALTER TABLE boq_quota_matches ADD COLUMN IF NOT EXISTS reasoning_chain TEXT;
+ALTER TABLE boq_quota_matches ADD COLUMN IF NOT EXISTS work_procedure VARCHAR(100);
+ALTER TABLE boq_quota_matches ADD COLUMN IF NOT EXISTS factor_explanation TEXT;
 
 -- 套定额批次记录
 CREATE TABLE IF NOT EXISTS boq_match_runs (
