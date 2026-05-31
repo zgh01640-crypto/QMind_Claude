@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# 环境变量（含密钥，不提交）
+.env
+.env.local
+
+# Next.js
+web/.next/
+web/node_modules/
+web/.env.local
+
+# 临时文件
+*.log
+*.tmp
+/tmp/
+
+# 大文件（Excel/PDF 源数据）
+mydoc/*.xlsx
+mydoc/*.pdf
+mydoc/*.swz
+mydoc/*.docx
+
+# IDE
+.vscode/
+.idea/
