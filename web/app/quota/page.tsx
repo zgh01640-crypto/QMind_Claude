@@ -1,22 +1,6 @@
 'use client'
 import { useState, useEffect, useCallback, Fragment } from 'react'
-import { fetchQuotaStandards, fetchAllQuotaItems, QuotaStandard, QuotaItem, QuotaResource } from '@/lib/api'
-
-// ── 章节元数据 ─────────────────────────────────────────────────────────────
-
-const CHAPTER_META: Record<string, { num: string; name: string }> = {
-  '010001': { num: '一', name: '砌筑工程' },
-  '010002': { num: '二', name: '混凝土及钢筋混凝土工程' },
-  '010003': { num: '三', name: '木结构工程' },
-  '010004': { num: '四', name: '屋面及防水工程' },
-  '010005': { num: '五', name: '防腐、保温与隔热工程' },
-  '010006': { num: '六', name: '模板工程' },
-  '010007': { num: '七', name: '脚手架工程' },
-  '010008': { num: '八', name: '垂直运输工程' },
-  '010009': { num: '九', name: '建筑物超高施工增加费' },
-}
-
-const CHAPTER_PREFIXES = Object.keys(CHAPTER_META).sort()
+import { fetchQuotaStandards, fetchQuotaChapters, fetchAllQuotaItems, QuotaStandard, QuotaChapter, QuotaItem, QuotaResource } from '@/lib/api'
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -34,7 +18,7 @@ function fmt(v: number | null | undefined) {
 interface GroupNode { name: string; key: string; items: QuotaItem[] }
 interface ChapterNode { prefix: string; label: string; groups: GroupNode[]; count: number }
 
-function buildTree(items: QuotaItem[], filter: string): ChapterNode[] {
+function buildTree(items: QuotaItem[], filter: string, chapterMap: Map<string, string>): ChapterNode[] {
   const q = filter.trim().toLowerCase()
   const filtered = q
     ? items.filter(it =>
@@ -44,27 +28,37 @@ function buildTree(items: QuotaItem[], filter: string): ChapterNode[] {
       )
     : items
 
-  return CHAPTER_PREFIXES.map(prefix => {
-    const chItems = filtered.filter(it => getPrefix(it.item_code) === prefix)
-    const groupMap = new Map<string, QuotaItem[]>()
-    for (const it of chItems) {
-      const existing = groupMap.get(it.item_name) ?? []
-      existing.push(it)
-      groupMap.set(it.item_name, existing)
-    }
-    const groups: GroupNode[] = Array.from(groupMap.entries()).map(([name, its]) => ({
-      name,
-      key: `${prefix}|${name}`,
-      items: its,
-    }))
-    const meta = CHAPTER_META[prefix]
-    return {
-      prefix,
-      label: `第${meta.num}章  ${meta.name}`,
-      groups,
-      count: chItems.length,
-    }
-  }).filter(ch => ch.count > 0)
+  // 按 item_code 前缀分组（如 010001、120001 等），再按子目名称聚合变体
+  const prefixMap = new Map<string, QuotaItem[]>()
+  for (const it of filtered) {
+    const prefix = getPrefix(it.item_code)
+    if (!prefixMap.has(prefix)) prefixMap.set(prefix, [])
+    prefixMap.get(prefix)!.push(it)
+  }
+
+  return Array.from(prefixMap.entries())
+    .map(([prefix, chItems]) => {
+      const groupMap = new Map<string, QuotaItem[]>()
+      for (const it of chItems) {
+        const existing = groupMap.get(it.item_name) ?? []
+        existing.push(it)
+        groupMap.set(it.item_name, existing)
+      }
+      const groups: GroupNode[] = Array.from(groupMap.entries()).map(([name, its]) => ({
+        name,
+        key: `${prefix}|${name}`,
+        items: its,
+      }))
+      const chapterName = chapterMap.get(prefix) ?? prefix
+      return {
+        prefix,
+        label: chapterName,
+        groups,
+        count: chItems.length,
+      }
+    })
+    .filter(ch => ch.count > 0)
+    .sort((a, b) => a.prefix.localeCompare(b.prefix))
 }
 
 // ── 价格卡片 ─────────────────────────────────────────────────────────────
@@ -164,6 +158,7 @@ function DetailPanel({ item }: { item: QuotaItem }) {
 export default function QuotaPage() {
   const [standards, setStandards] = useState<QuotaStandard[]>([])
   const [standardId, setStandardId] = useState<number | null>(null)
+  const [chapterMap, setChapterMap] = useState<Map<string, string>>(new Map())
   const [allItems, setAllItems] = useState<QuotaItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -182,18 +177,27 @@ export default function QuotaPage() {
       .catch(() => setError('加载标准列表失败'))
   }, [])
 
-  // 加载全量子目
+  // 加载全量子目 + 章节
   useEffect(() => {
     if (!standardId) return
     setLoading(true); setError('')
-    fetchAllQuotaItems(standardId)
-      .then(items => { setAllItems(items); setExpandedChapters(new Set()); setExpandedGroups(new Set()); setExpandedItemId(null) })
+    Promise.all([fetchAllQuotaItems(standardId), fetchQuotaChapters(standardId)])
+      .then(([items, chapters]) => {
+        setAllItems(items)
+        // 建立 prefix → name 映射（章节 code 即为 item_code 前缀）
+        const map = new Map<string, string>()
+        for (const ch of chapters) {
+          if (ch.code) map.set(ch.code, ch.name)
+        }
+        setChapterMap(map)
+        setExpandedChapters(new Set()); setExpandedGroups(new Set()); setExpandedItemId(null)
+      })
       .catch(e => setError(e instanceof Error ? e.message : '加载失败'))
       .finally(() => setLoading(false))
   }, [standardId])
 
   // 构建树
-  const tree = buildTree(allItems, appliedSearch)
+  const tree = buildTree(allItems, appliedSearch, chapterMap)
 
   // 搜索时自动展开有结果的节点
   useEffect(() => {
