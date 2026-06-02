@@ -11,7 +11,7 @@ from db.connection import get_connection
 from api.schemas import (
     BoqProject, BoqSection, BoqItem, BoqItemList,
     BoqMatchResult, BoqSummaryItem, BoqResourceSummary, QuotaResource,
-    BoqMatchRun,
+    BoqMatchRun, CompareResult, CompareRunInfo, CompareQuota, CompareBoqItem, CompareSummary,
 )
 from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item
 
@@ -715,6 +715,111 @@ def get_boq_summary(run_id: int = Query(...)):
         ]
 
         return {"items": summary_items, "resources": resource_summary}
+    finally:
+        conn.close()
+
+
+# ── 定额比较端点 ──────────────────────────────────────────────────────────────
+
+@router.get("/boq/compare", response_model=CompareResult)
+def compare_runs(run_a: int = Query(...), run_b: int = Query(...)):
+    """对比两个套定额批次，返回逐清单项的定额匹配对比。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.id, r.run_name, r.standard_code, p.id, p.project_name
+                FROM boq_match_runs r
+                JOIN boq_projects p ON p.id = r.project_id
+                WHERE r.id IN (%s, %s)
+            """, (run_a, run_b))
+            runs = {r[0]: r for r in cur.fetchall()}
+
+        if run_a not in runs or run_b not in runs:
+            raise HTTPException(status_code=404, detail="批次不存在")
+
+        def fetch_matches(run_id: int):
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT i.item_code, i.item_name, i.unit, i.quantity,
+                           q.item_code, q.item_name, m.quota_item_id,
+                           m.qty_factor, m.confidence, m.work_procedure
+                    FROM boq_quota_matches m
+                    JOIN boq_items i ON i.id = m.boq_item_id
+                    JOIN quota_items q ON q.id = m.quota_item_id
+                    WHERE m.run_id = %s AND m.status != 'rejected'
+                    ORDER BY i.item_seq, i.item_code, m.id
+                """, (run_id,))
+                return cur.fetchall()
+
+        def group_by_code(rows):
+            result: dict = {}
+            for row in rows:
+                code = row[0]
+                if code not in result:
+                    result[code] = {
+                        "item_name": row[1], "unit": row[2],
+                        "quantity": float(row[3]) if row[3] else None,
+                        "quotas": [],
+                    }
+                result[code]["quotas"].append({
+                    "quota_item_id": row[6],
+                    "quota_item_code": row[4],
+                    "quota_item_name": row[5],
+                    "qty_factor": float(row[7]) if row[7] is not None else 1.0,
+                    "confidence": row[8],
+                    "work_procedure": row[9],
+                })
+            return result
+
+        map_a = group_by_code(fetch_matches(run_a))
+        map_b = group_by_code(fetch_matches(run_b))
+
+        all_codes = sorted(set(map_a.keys()) | set(map_b.keys()))
+        items = []
+        consistent_count = only_a = only_b = both_empty = 0
+
+        for code in all_codes:
+            a = map_a.get(code, {"item_name": "", "unit": None, "quantity": None, "quotas": []})
+            b = map_b.get(code, {"item_name": "", "unit": None, "quantity": None, "quotas": []})
+            codes_a = sorted(q["quota_item_code"] for q in a["quotas"])
+            codes_b = sorted(q["quota_item_code"] for q in b["quotas"])
+            consistent = bool(codes_a) and bool(codes_b) and codes_a == codes_b
+
+            if consistent:
+                consistent_count += 1
+            elif not codes_a and not codes_b:
+                both_empty += 1
+            elif codes_a and not codes_b:
+                only_a += 1
+            elif not codes_a and codes_b:
+                only_b += 1
+
+            items.append(CompareBoqItem(
+                item_code=code,
+                item_name=a["item_name"] or b["item_name"],
+                unit=a["unit"] or b["unit"],
+                quantity=a["quantity"] or b["quantity"],
+                quotas_a=[CompareQuota(**q) for q in a["quotas"]],
+                quotas_b=[CompareQuota(**q) for q in b["quotas"]],
+                consistent=consistent,
+            ))
+
+        different = len(items) - consistent_count - only_a - only_b - both_empty
+        ra, rb = runs[run_a], runs[run_b]
+        return CompareResult(
+            run_a=CompareRunInfo(run_id=ra[0], run_name=ra[1], standard_code=ra[2], project_id=ra[3], project_name=ra[4]),
+            run_b=CompareRunInfo(run_id=rb[0], run_name=rb[1], standard_code=rb[2], project_id=rb[3], project_name=rb[4]),
+            items=items,
+            summary=CompareSummary(
+                total=len(items),
+                consistent=consistent_count,
+                different=different,
+                only_a=only_a,
+                only_b=only_b,
+                both_empty=both_empty,
+            ),
+        )
     finally:
         conn.close()
 

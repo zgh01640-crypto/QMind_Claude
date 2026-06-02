@@ -556,3 +556,52 @@ export const uploadManualBoqFile = (file: File, force = false, tag?: string): Pr
 
 export const deleteManualBoqProject = (id: number) =>
   req<{ ok: boolean }>(`/api/manual-boq/projects/${id}`, { method: 'DELETE' })
+
+// ── 定额比较 ──────────────────────────────────────────
+
+export interface CompareRunInfo {
+  run_id: number
+  run_name: string | null
+  standard_code: string | null
+  project_id: number
+  project_name: string
+}
+
+export interface CompareQuota {
+  quota_item_id: number
+  quota_item_code: string
+  quota_item_name: string
+  qty_factor: number
+  confidence: string | null
+  work_procedure: string | null
+}
+
+export interface CompareBoqItem {
+  item_code: string
+  item_name: string
+  unit: string | null
+  quantity: number | null
+  quotas_a: CompareQuota[]
+  quotas_b: CompareQuota[]
+  consistent: boolean
+}
+
+export interface CompareSummary {
+  total: number
+  consistent: number
+  different: number
+  only_a: number
+  only_b: number
+  both_empty: number
+}
+
+export interface CompareResult {
+  run_a: CompareRunInfo
+  run_b: CompareRunInfo
+  items: CompareBoqItem[]
+  summary: CompareSummary
+}
+
+export const fetchBoqCompare = (run_a: number, run_b: number) =>
+  req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}`)
+

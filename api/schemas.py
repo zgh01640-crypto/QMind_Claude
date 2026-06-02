@@ -328,3 +328,48 @@ class BoqMatchRun(BaseModel):
     created_at: datetime
     finished_at: Optional[datetime] = None
 
+
+# ── 定额比较 ──────────────────────────────────────────
+
+class CompareRunInfo(BaseModel):
+    run_id: int
+    run_name: Optional[str]
+    standard_code: Optional[str]
+    project_id: int
+    project_name: str
+
+
+class CompareQuota(BaseModel):
+    quota_item_id: int
+    quota_item_code: str
+    quota_item_name: str
+    qty_factor: float
+    confidence: Optional[str]
+    work_procedure: Optional[str]
+
+
+class CompareBoqItem(BaseModel):
+    item_code: str
+    item_name: str
+    unit: Optional[str]
+    quantity: Optional[float]
+    quotas_a: list[CompareQuota]
+    quotas_b: list[CompareQuota]
+    consistent: bool   # 两侧定额编码集合相同（均非空）
+
+
+class CompareSummary(BaseModel):
+    total: int
+    consistent: int
+    different: int
+    only_a: int
+    only_b: int
+    both_empty: int
+
+
+class CompareResult(BaseModel):
+    run_a: CompareRunInfo
+    run_b: CompareRunInfo
+    items: list[CompareBoqItem]
+    summary: CompareSummary
+

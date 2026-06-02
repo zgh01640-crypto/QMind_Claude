@@ -8,6 +8,7 @@ const links = [
   { href: '/measure', label: '国标清单' },
   { href: '/boq', label: '工程管理' },
   { href: '/manual-boq', label: '工程管理（人工）' },
+  { href: '/compare', label: '定额比较' },
   { href: '/import', label: '导入管理' },
 ]
 
