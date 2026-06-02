@@ -64,8 +64,10 @@ ALTER TABLE boq_quota_matches ADD COLUMN IF NOT EXISTS factor_explanation TEXT;
 CREATE TABLE IF NOT EXISTS boq_match_runs (
     id            SERIAL PRIMARY KEY,
     project_id    INT NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
-    standard_id   INT NOT NULL REFERENCES quota_standards(id),
+    standard_id   INT REFERENCES quota_standards(id),   -- 单标准时使用；多标准时为第一个
+    standard_ids  TEXT,                                 -- JSON数组，如 [1,2]，多标准时使用
     standard_code VARCHAR(50),
+    run_name      VARCHAR(200),                         -- 用户自定义批次名称
     status        VARCHAR(20) DEFAULT 'running',
     total_items   INT DEFAULT 0,
     matched_items INT DEFAULT 0,

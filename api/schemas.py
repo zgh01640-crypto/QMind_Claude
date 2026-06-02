@@ -320,6 +320,8 @@ class BoqMatchRun(BaseModel):
     project_id: int
     standard_id: int
     standard_code: Optional[str]
+    run_name: Optional[str] = None
+    standard_ids: Optional[str] = None   # JSON 数组字符串，如 "[1,2]"
     status: str  # running / done / error
     total_items: int
     matched_items: int

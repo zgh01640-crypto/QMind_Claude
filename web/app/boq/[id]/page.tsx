@@ -176,7 +176,8 @@ export default function BoqDetailPage() {
   const [items, setItems] = useState<BoqItem[]>([])
   const [runs, setRuns] = useState<BoqMatchRun[]>([])
   const [standards, setStandards] = useState<QuotaStandard[]>([])
-  const [standardId, setStandardId] = useState<number | null>(null)
+  const [selectedStdIds, setSelectedStdIds] = useState<number[]>([])
+  const [runName, setRunName] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [matching, setMatching] = useState(false)
@@ -196,7 +197,7 @@ export default function BoqDetailPage() {
       setItems(its)
       setRuns(rs)
       setStandards(stds)
-      if (stds.length) setStandardId(stds[0].id)
+      setSelectedStdIds(stds.map(s => s.id))
     }).catch(e => setError(e instanceof Error ? e.message : '加载失败'))
       .finally(() => setLoading(false))
   }, [projectId])
@@ -209,7 +210,9 @@ export default function BoqDetailPage() {
   }, [streamState?.reasoningBuffer])
 
   const handleNewRun = async () => {
-    if (!standardId) return
+    if (!selectedStdIds.length) { setError('请至少选择一个定额标准'); return }
+    if (!runName.trim()) { setError('请填写本次套定额的名称'); return }
+    setError('')
     setMatching(true)
     setStreamState({
       runId: null, total: items.length, currentIndex: 0,
@@ -221,7 +224,7 @@ export default function BoqDetailPage() {
       let finalRunId: number | null = null
     let itemStartTime = 0
 
-    await streamMatchBoqProject(projectId, standardId, (evt) => {
+      await streamMatchBoqProject(projectId, selectedStdIds, runName.trim(), (evt) => {
         if (evt.type === 'run_start') {
           finalRunId = evt.run_id
           setStreamState(s => s ? { ...s, runId: evt.run_id, total: evt.total } : s)
@@ -292,40 +295,100 @@ export default function BoqDetailPage() {
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 text-sm">{error}</div>}
 
-      {/* 第一行：定额选择 + 套定额按钮 */}
-      <div className="bg-white rounded-lg shadow p-4 mb-4 flex flex-wrap gap-3 items-center">
-        <label className="text-sm text-gray-600 shrink-0">定额标准</label>
-        <select
-          value={standardId ?? ''}
-          onChange={e => setStandardId(Number(e.target.value))}
-          disabled={matching}
-          className="flex-1 min-w-[200px] border rounded px-2 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400 disabled:opacity-50"
-        >
-          {standards.map(s => (
-            <option key={s.id} value={s.id}>{s.region ? `[${s.region}] ` : ''}{s.name}（{s.standard_code}）</option>
-          ))}
-        </select>
-        <button
-          onClick={handleNewRun}
-          disabled={matching || !standardId}
-          className="px-5 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2 shrink-0"
-        >
-          {matching
-            ? <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />运行中</>
-            : '🤖 开始套定额'}
-        </button>
+      {/* 第一行：定额选择 + 命名 + 套定额按钮 */}
+      <div className="bg-white rounded-lg shadow p-4 mb-4 space-y-3">
+        {/* 区域/定额标准选择 */}
+        <div className="flex flex-wrap gap-3 items-center">
+          <label className="text-sm text-gray-600 shrink-0">定额标准</label>
+          {/* 按 region 分组，支持"全选此区域" */}
+          {(() => {
+            const byRegion = standards.reduce<Record<string, QuotaStandard[]>>((acc, s) => {
+              const r = s.region || '其他'
+              ;(acc[r] = acc[r] || []).push(s)
+              return acc
+            }, {})
+            return Object.entries(byRegion).map(([region, stds]) => {
+              const regionIds = stds.map(s => s.id)
+              const allSelected = regionIds.every(id => selectedStdIds.includes(id))
+              const toggleRegion = () => {
+                if (allSelected) {
+                  setSelectedStdIds(prev => prev.filter(id => !regionIds.includes(id)))
+                } else {
+                  setSelectedStdIds(prev => [...new Set([...prev, ...regionIds])])
+                }
+              }
+              return (
+                <div key={region} className="flex items-center gap-2 border rounded-lg px-3 py-1.5">
+                  <button
+                    onClick={toggleRegion}
+                    disabled={matching}
+                    className={`text-xs font-semibold px-2 py-0.5 rounded border transition-colors ${
+                      allSelected
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'
+                    }`}
+                  >
+                    {region}（全部）
+                  </button>
+                  {stds.map(s => {
+                    const checked = selectedStdIds.includes(s.id)
+                    return (
+                      <label key={s.id} className={`flex items-center gap-1 text-xs cursor-pointer ${matching ? 'opacity-50' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={matching}
+                          onChange={() => {
+                            setSelectedStdIds(prev =>
+                              checked ? prev.filter(id => id !== s.id) : [...prev, s.id]
+                            )
+                          }}
+                          className="accent-indigo-600"
+                        />
+                        <span className="text-gray-700">{s.name}</span>
+                        <span className="text-gray-400">（{s.standard_code}）</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )
+            })
+          })()}
+        </div>
 
-        {/* 历史记录摘要（不在运行时显示） */}
-        {!matching && runs.length > 0 && (
-          <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
-            <span>历史 {runs.length} 次</span>
-            {runs[0] && (
-              <Link href={`/boq/${projectId}/run/${runs[0].id}`} className="text-blue-600 hover:underline">
-                最近记录 →
-              </Link>
-            )}
-          </div>
-        )}
+        {/* 本次命名 + 开始按钮 */}
+        <div className="flex flex-wrap gap-3 items-center">
+          <label className="text-sm text-gray-600 shrink-0">本次名称</label>
+          <input
+            type="text"
+            value={runName}
+            onChange={e => setRunName(e.target.value)}
+            disabled={matching}
+            placeholder="例：深圳全定额第1轮、结构工程套定额…"
+            className="flex-1 min-w-[240px] border rounded px-2 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:opacity-50"
+          />
+          <button
+            onClick={handleNewRun}
+            disabled={matching || !selectedStdIds.length || !runName.trim()}
+            className="px-5 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2 shrink-0"
+          >
+            {matching
+              ? <><span className="animate-spin inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full" />运行中</>
+              : '🤖 开始套定额'}
+          </button>
+
+          {/* 历史记录摘要 */}
+          {!matching && runs.length > 0 && (
+            <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
+              <span>历史 {runs.length} 次</span>
+              {runs[0] && (
+                <Link href={`/boq/${projectId}/run/${runs[0].id}`} className="text-blue-600 hover:underline">
+                  最近记录 →
+                </Link>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 第二行：清单概览 */}
@@ -353,12 +416,15 @@ export default function BoqDetailPage() {
               <div key={run.id} className="px-4 py-3 hover:bg-gray-50 flex items-center gap-3">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-sm font-medium text-gray-700">{run.standard_code ?? `标准 #${run.standard_id}`}</span>
+                    <span className="text-sm font-medium text-gray-700">
+                      {run.run_name || run.standard_code || `批次 #${run.id}`}
+                    </span>
                     <RunStatus status={run.status} />
                   </div>
                   <div className="flex items-center gap-3 text-xs text-gray-400">
                     <span>{new Date(run.created_at).toLocaleString('zh-CN')}</span>
                     <span>{run.matched_items} / {run.total_items} 项已匹配</span>
+                    {run.standard_code && <span>{run.standard_code}</span>}
                   </div>
                 </div>
                 <Link

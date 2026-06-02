@@ -199,31 +199,42 @@ _MATCH_TOOL = {
 
 # ── System prompt 构建（KV Cache 核心）──────────────────────────────────────
 
-def build_system_prompt(conn, standard_id: int) -> str:
+def build_system_prompt(conn, standard_id: int | list[int]) -> str:
     """
     构建含全量定额的 system prompt。
-    同一 standard_id 内容完全固定，DeepSeek 会自动缓存此前缀。
+    standard_id 可以是单个 int 或 int 列表（多标准合并）。
+    同一组 standard_id 内容完全固定，DeepSeek 会自动缓存此前缀。
     章节列表从数据库动态获取，支持多套定额标准。
     """
+    if isinstance(standard_id, int):
+        standard_ids = [standard_id]
+    else:
+        standard_ids = list(standard_id)
+
+    placeholders = ','.join(['%s'] * len(standard_ids))
+
     with conn.cursor() as cur:
-        # 获取章节列表
-        cur.execute("""
-            SELECT code, name FROM quota_chapters
-            WHERE standard_id = %s ORDER BY sort_order
-        """, (standard_id,))
+        # 获取所有章节（按标准顺序）
+        cur.execute(f"""
+            SELECT qc.code, qc.name, qs.name AS std_name
+            FROM quota_chapters qc
+            JOIN quota_standards qs ON qs.id = qc.standard_id
+            WHERE qc.standard_id IN ({placeholders})
+            ORDER BY qc.standard_id, qc.sort_order
+        """, standard_ids)
         chapters = cur.fetchall()
 
         # 获取全量子目
-        cur.execute("""
+        cur.execute(f"""
             SELECT id, item_code, item_name, variant_desc, unit, work_content
             FROM quota_items
-            WHERE standard_id = %s
-            ORDER BY item_code
-        """, (standard_id,))
+            WHERE standard_id IN ({placeholders})
+            ORDER BY standard_id, item_code
+        """, standard_ids)
         rows = cur.fetchall()
 
-    # 动态生成章节说明
-    chapter_lines = " / ".join(f"{name}({code})" for code, name in chapters)
+    # 动态生成章节说明（多标准时按标准分组）
+    chapter_lines = " / ".join(f"{name}({code})" for code, name, _ in chapters)
 
     quota_list = [
         {

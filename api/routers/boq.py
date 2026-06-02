@@ -228,7 +228,7 @@ def get_boq_runs(project_id: int = Query(...)):
             cur.execute("""
                 SELECT r.id, r.project_id, r.standard_id, s.standard_code,
                        r.status, r.total_items, r.matched_items,
-                       r.created_at, r.finished_at
+                       r.created_at, r.finished_at, r.run_name, r.standard_ids
                 FROM boq_match_runs r
                 LEFT JOIN quota_standards s ON s.id = r.standard_id
                 WHERE r.project_id = %s
@@ -237,10 +237,11 @@ def get_boq_runs(project_id: int = Query(...)):
             rows = cur.fetchall()
         return [
             BoqMatchRun(
-                id=r[0], project_id=r[1], standard_id=r[2],
+                id=r[0], project_id=r[1], standard_id=r[2] or 0,
                 standard_code=r[3], status=r[4],
                 total_items=r[5], matched_items=r[6],
                 created_at=r[7], finished_at=r[8],
+                run_name=r[9], standard_ids=r[10],
             )
             for r in rows
         ]
@@ -390,7 +391,9 @@ class MatchItemRequest(BaseModel):
 
 class MatchProjectRequest(BaseModel):
     project_id: int
-    standard_id: int
+    standard_id: int = 0           # 向后兼容（单标准时使用）
+    standard_ids: list[int] = []   # 多标准时使用，为空则回退到 standard_id
+    run_name: str = ""
 
 
 @router.post("/boq/match-item", response_model=list[BoqMatchResult])
@@ -726,35 +729,51 @@ def match_project_stream(req: MatchProjectRequest):
     """
     def generate():
         conn = get_connection()
+        run_id = None
         try:
             _ensure_match_schema(conn)
 
-            # 获取清单项和 standard_code
+            # 解析 standard_ids
+            std_ids = req.standard_ids if req.standard_ids else ([req.standard_id] if req.standard_id else [])
+            if not std_ids:
+                yield f"data: {json.dumps({'type':'run_error','error':'未选择定额标准'})}\n\n"
+                return
+
+            # 获取清单项
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, item_code, item_name, item_description, unit, quantity
                     FROM boq_items WHERE project_id = %s ORDER BY item_seq
                 """, (req.project_id,))
                 items = cur.fetchall()
-                cur.execute("SELECT standard_code FROM quota_standards WHERE id = %s", (req.standard_id,))
-                sc_row = cur.fetchone()
-            standard_code = sc_row[0] if sc_row else None
+
+                # 获取 standard_code（多标准时拼接）
+                placeholders = ','.join(['%s'] * len(std_ids))
+                cur.execute(f"SELECT standard_code FROM quota_standards WHERE id IN ({placeholders}) ORDER BY id", std_ids)
+                codes = [r[0] for r in cur.fetchall() if r[0]]
+            standard_code = ' + '.join(codes) if codes else None
             total = len(items)
 
             # 创建 run 记录
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO boq_match_runs
-                        (project_id, standard_id, standard_code, status, total_items, matched_items)
-                    VALUES (%s, %s, %s, 'running', %s, 0) RETURNING id
-                """, (req.project_id, req.standard_id, standard_code, total))
+                        (project_id, standard_id, standard_ids, standard_code,
+                         run_name, status, total_items, matched_items)
+                    VALUES (%s, %s, %s, %s, %s, 'running', %s, 0) RETURNING id
+                """, (req.project_id,
+                      std_ids[0],
+                      json.dumps(std_ids),
+                      standard_code,
+                      req.run_name or None,
+                      total))
                 run_id = cur.fetchone()[0]
             conn.commit()
 
             yield f"data: {json.dumps({'type':'run_start','run_id':run_id,'total':total}, ensure_ascii=False)}\n\n"
 
             # 构建 system_prompt（含全量定额，触发 KV Cache）
-            sp = build_system_prompt(conn, req.standard_id)
+            sp = build_system_prompt(conn, std_ids)
 
             matched_count = 0
             for idx, (item_id, item_code, item_name, item_desc, unit, quantity) in enumerate(items):
@@ -782,10 +801,11 @@ def match_project_stream(req: MatchProjectRequest):
                 saved_matches = []
                 with conn.cursor() as cur:
                     for m in raw_results:
-                        cur.execute("SELECT item_code, item_name, variant_desc, unit FROM quota_items WHERE id = %s", (m.quota_item_id,))
+                        cur.execute("SELECT item_code, item_name, variant_desc, unit, standard_id FROM quota_items WHERE id = %s", (m.quota_item_id,))
                         q = cur.fetchone()
                         if not q:
                             continue
+                        match_std_id = q[4]  # 定额子目所属的标准
                         cur.execute("""
                             INSERT INTO boq_quota_matches
                                 (project_id, boq_item_id, quota_item_id, standard_id,
@@ -794,7 +814,7 @@ def match_project_stream(req: MatchProjectRequest):
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s, %s, %s)
                             ON CONFLICT (run_id, boq_item_id, quota_item_id) DO NOTHING
                             RETURNING id
-                        """, (req.project_id, item_id, m.quota_item_id, req.standard_id,
+                        """, (req.project_id, item_id, m.quota_item_id, match_std_id,
                               m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id,
                               m.work_procedure, m.factor_explanation))
                         row = cur.fetchone()
@@ -830,9 +850,10 @@ def match_project_stream(req: MatchProjectRequest):
 
         except Exception as e:
             try:
-                with conn.cursor() as cur:
-                    cur.execute("UPDATE boq_match_runs SET status='error', finished_at=NOW() WHERE id=%s", (run_id,))
-                conn.commit()
+                if run_id:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE boq_match_runs SET status='error', finished_at=NOW() WHERE id=%s", (run_id,))
+                    conn.commit()
             except Exception:
                 pass
             yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"

@@ -374,6 +374,8 @@ export interface BoqMatchRun {
   project_id: number
   standard_id: number
   standard_code: string | null
+  run_name: string | null
+  standard_ids: string | null   // JSON 数组字符串如 "[1,2]"
   status: string  // running / done / error
   total_items: number
   matched_items: number
@@ -414,14 +416,15 @@ export type StreamEvent =
 
 export async function streamMatchBoqProject(
   project_id: number,
-  standard_id: number,
+  standard_ids: number[],
+  run_name: string,
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
   const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
   const res = await fetch(`${API}/api/boq/match-project-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_id, standard_id }),
+    body: JSON.stringify({ project_id, standard_ids, run_name }),
   })
   if (!res.ok) throw new Error(`请求失败 ${res.status}`)
   const reader = res.body!.getReader()
