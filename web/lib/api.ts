@@ -568,7 +568,7 @@ export interface CompareRunInfo {
 }
 
 export interface CompareQuota {
-  quota_item_id: number
+  quota_item_id: number | null
   quota_item_code: string
   quota_item_name: string
   qty_factor: number
@@ -602,6 +602,9 @@ export interface CompareResult {
   summary: CompareSummary
 }
 
-export const fetchBoqCompare = (run_a: number, run_b: number) =>
-  req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}`)
+export const fetchBoqCompare = (
+  run_a: number, run_b: number,
+  run_a_type = 'run', run_b_type = 'run',
+) =>
+  req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}&run_a_type=${run_a_type}&run_b_type=${run_b_type}`)
 

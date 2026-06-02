@@ -340,7 +340,7 @@ class CompareRunInfo(BaseModel):
 
 
 class CompareQuota(BaseModel):
-    quota_item_id: int
+    quota_item_id: Optional[int]    # 人工套定额的公式子目可为 NULL
     quota_item_code: str
     quota_item_name: str
     qty_factor: float

@@ -2,11 +2,14 @@
 import { useState, useEffect } from 'react'
 import {
   fetchBoqProjects, fetchBoqRuns, fetchBoqCompare,
-  BoqProject, BoqMatchRun, CompareResult, CompareBoqItem, CompareQuota,
+  fetchManualBoqProjects,
+  BoqProject, BoqMatchRun, ManualBoqProject,
+  CompareResult, CompareBoqItem, CompareQuota,
 } from '@/lib/api'
 
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
 
+type SrcType = 'run' | 'manual'
 type FilterKey = 'all' | 'consistent' | 'different' | 'only_a' | 'only_b' | 'both_empty'
 
 function filterItems(items: CompareBoqItem[], f: FilterKey) {
@@ -36,7 +39,7 @@ function QuotaLines({ quotas }: { quotas: CompareQuota[] }) {
   if (quotas.length === 0)
     return <span className="text-gray-400 text-xs italic">无匹配</span>
   return (
-    <div className="space-y-1">
+    <div className="space-y-2">
       {quotas.map((q, i) => (
         <div key={i} className="flex flex-col gap-0.5">
           <span className="font-mono text-xs text-blue-700 font-medium">{q.quota_item_code}</span>
@@ -80,7 +83,7 @@ function ItemRow({ item }: { item: CompareBoqItem }) {
         <span className="text-xs text-gray-500 flex-shrink-0">
           {item.unit} {item.quantity != null ? item.quantity.toLocaleString() : ''}
         </span>
-        <span className="text-xs text-gray-400 flex-shrink-0 w-12">
+        <span className="text-xs text-gray-400 flex-shrink-0 w-12 text-right">
           A:{item.quotas_a.length} / B:{item.quotas_b.length}
         </span>
       </button>
@@ -101,65 +104,111 @@ function ItemRow({ item }: { item: CompareBoqItem }) {
   )
 }
 
-// ── 批次选择器 ────────────────────────────────────────────────────────────────
+// ── 批次/工程选择器 ────────────────────────────────────────────────────────────
 
-function RunSelector({
-  label,
-  projects,
-  selectedProject, setSelectedProject,
-  runs, selectedRun, setSelectedRun,
-}: {
+interface SelectorProps {
   label: string
-  projects: BoqProject[]
+  srcType: SrcType
+  onSrcTypeChange: (t: SrcType) => void
+  // AI 批次用
+  boqProjects: BoqProject[]
   selectedProject: number | null
   setSelectedProject: (id: number | null) => void
   runs: BoqMatchRun[]
   selectedRun: number | null
   setSelectedRun: (id: number | null) => void
-}) {
+  // 人工套定额用
+  manualProjects: ManualBoqProject[]
+  selectedManual: number | null
+  setSelectedManual: (id: number | null) => void
+}
+
+function Selector(p: SelectorProps) {
   return (
     <div className="flex-1 bg-white rounded-lg border border-gray-200 p-4 space-y-3">
-      <div className="text-sm font-semibold text-gray-700">{label}</div>
-      <div>
-        <label className="block text-xs text-gray-500 mb-1">选择工程</label>
-        <select
-          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
-          value={selectedProject ?? ''}
-          onChange={e => {
-            const v = e.target.value ? Number(e.target.value) : null
-            setSelectedProject(v)
-            setSelectedRun(null)
-          }}
-        >
-          <option value="">-- 请选择工程 --</option>
-          {projects.map(p => (
-            <option key={p.id} value={p.id}>
-              {p.project_name}{p.bid_section ? ` · ${p.bid_section}` : ''}
-            </option>
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold text-gray-700">{p.label}</span>
+        <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
+          {(['run', 'manual'] as SrcType[]).map(t => (
+            <button
+              key={t}
+              onClick={() => p.onSrcTypeChange(t)}
+              className={`px-3 py-1 transition ${
+                p.srcType === t
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {t === 'run' ? 'AI 批次' : '人工套定额'}
+            </button>
           ))}
-        </select>
+        </div>
       </div>
-      <div>
-        <label className="block text-xs text-gray-500 mb-1">选择批次</label>
-        <select
-          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
-          value={selectedRun ?? ''}
-          onChange={e => setSelectedRun(e.target.value ? Number(e.target.value) : null)}
-          disabled={!selectedProject || runs.length === 0}
-        >
-          <option value="">-- 请选择批次 --</option>
-          {runs.map(r => (
-            <option key={r.id} value={r.id}>
-              {r.run_name || `批次 #${r.id}`}
-              {r.standard_code ? ` (${r.standard_code})` : ''}
-              {r.status !== 'done' ? ` [${r.status}]` : ''}
-            </option>
-          ))}
-        </select>
-        {selectedProject && runs.length === 0 && (
-          <p className="text-xs text-gray-400 mt-1">该工程暂无套定额批次</p>
-        )}
-      </div>
+
+      {p.srcType === 'run' ? (
+        <>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">选择工程</label>
+            <select
+              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
+              value={p.selectedProject ?? ''}
+              onChange={e => {
+                const v = e.target.value ? Number(e.target.value) : null
+                p.setSelectedProject(v)
+                p.setSelectedRun(null)
+              }}
+            >
+              <option value="">-- 请选择工程 --</option>
+              {p.boqProjects.map(proj => (
+                <option key={proj.id} value={proj.id}>
+                  {proj.project_name}{proj.bid_section ? ` · ${proj.bid_section}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">选择批次</label>
+            <select
+              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
+              value={p.selectedRun ?? ''}
+              onChange={e => p.setSelectedRun(e.target.value ? Number(e.target.value) : null)}
+              disabled={!p.selectedProject || p.runs.length === 0}
+            >
+              <option value="">-- 请选择批次 --</option>
+              {p.runs.map(r => (
+                <option key={r.id} value={r.id}>
+                  {r.run_name || `批次 #${r.id}`}
+                  {r.standard_code ? ` (${r.standard_code})` : ''}
+                  {r.status !== 'done' ? ` [${r.status}]` : ''}
+                </option>
+              ))}
+            </select>
+            {p.selectedProject && p.runs.length === 0 && (
+              <p className="text-xs text-gray-400 mt-1">该工程暂无套定额批次</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">选择人工套定额工程</label>
+          <select
+            className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
+            value={p.selectedManual ?? ''}
+            onChange={e => p.setSelectedManual(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">-- 请选择工程 --</option>
+            {p.manualProjects.map(proj => (
+              <option key={proj.id} value={proj.id}>
+                {proj.project_name}{proj.bid_section ? ` · ${proj.bid_section}` : ''}
+                {proj.item_count != null ? ` (${proj.item_count} 项)` : ''}
+              </option>
+            ))}
+          </select>
+          {p.manualProjects.length === 0 && (
+            <p className="text-xs text-gray-400 mt-1">暂无人工套定额工程，请先在"工程管理（人工）"中导入</p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -167,7 +216,11 @@ function RunSelector({
 // ── 主页面 ────────────────────────────────────────────────────────────────────
 
 export default function ComparePage() {
-  const [projects, setProjects] = useState<BoqProject[]>([])
+  const [boqProjects, setBoqProjects] = useState<BoqProject[]>([])
+  const [manualProjects, setManualProjects] = useState<ManualBoqProject[]>([])
+
+  const [typeA, setTypeA] = useState<SrcType>('run')
+  const [typeB, setTypeB] = useState<SrcType>('manual')
 
   const [projA, setProjA] = useState<number | null>(null)
   const [projB, setProjB] = useState<number | null>(null)
@@ -175,6 +228,8 @@ export default function ComparePage() {
   const [runsB, setRunsB] = useState<BoqMatchRun[]>([])
   const [runA, setRunA] = useState<number | null>(null)
   const [runB, setRunB] = useState<number | null>(null)
+  const [manualA, setManualA] = useState<number | null>(null)
+  const [manualB, setManualB] = useState<number | null>(null)
 
   const [result, setResult] = useState<CompareResult | null>(null)
   const [filter, setFilter] = useState<FilterKey>('all')
@@ -182,7 +237,8 @@ export default function ComparePage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    fetchBoqProjects().then(setProjects).catch(() => {})
+    fetchBoqProjects().then(setBoqProjects).catch(() => {})
+    fetchManualBoqProjects().then(setManualProjects).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -195,13 +251,19 @@ export default function ComparePage() {
     fetchBoqRuns(projB).then(setRunsB).catch(() => setRunsB([]))
   }, [projB])
 
+  function getSelection(type: SrcType, run: number | null, manual: number | null) {
+    return type === 'manual' ? manual : run
+  }
+
   async function doCompare() {
-    if (!runA || !runB) return
+    const idA = getSelection(typeA, runA, manualA)
+    const idB = getSelection(typeB, runB, manualB)
+    if (!idA || !idB) return
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      const r = await fetchBoqCompare(runA, runB)
+      const r = await fetchBoqCompare(idA, idB, typeA, typeB)
       setResult(r)
       setFilter('all')
     } catch (e: unknown) {
@@ -211,12 +273,19 @@ export default function ComparePage() {
     }
   }
 
+  const idA = getSelection(typeA, runA, manualA)
+  const idB = getSelection(typeB, runB, manualB)
+  const canCompare = Boolean(idA && idB)
+
   const displayed = result ? filterItems(result.items, filter) : []
 
-  const filterOptions: { key: FilterKey; label: string; count: (r: CompareResult) => number; color: string }[] = [
-    { key: 'all',        label: '全部',     count: r => r.summary.total,       color: 'bg-gray-100 text-gray-700 hover:bg-gray-200' },
-    { key: 'consistent', label: '一致',     count: r => r.summary.consistent,  color: 'bg-green-100 text-green-700 hover:bg-green-200' },
-    { key: 'different',  label: '不同',     count: r => r.summary.different,   color: 'bg-red-100 text-red-700 hover:bg-red-200' },
+  const filterOptions: {
+    key: FilterKey; label: string
+    count: (r: CompareResult) => number; color: string
+  }[] = [
+    { key: 'all',        label: '全部',      count: r => r.summary.total,       color: 'bg-gray-100 text-gray-700 hover:bg-gray-200' },
+    { key: 'consistent', label: '一致',      count: r => r.summary.consistent,  color: 'bg-green-100 text-green-700 hover:bg-green-200' },
+    { key: 'different',  label: '不同',      count: r => r.summary.different,   color: 'bg-red-100 text-red-700 hover:bg-red-200' },
     { key: 'only_a',     label: '仅A有结果', count: r => r.summary.only_a,      color: 'bg-amber-100 text-amber-700 hover:bg-amber-200' },
     { key: 'only_b',     label: '仅B有结果', count: r => r.summary.only_b,      color: 'bg-blue-100 text-blue-700 hover:bg-blue-200' },
     { key: 'both_empty', label: '均无结果',  count: r => r.summary.both_empty,  color: 'bg-gray-100 text-gray-500 hover:bg-gray-200' },
@@ -225,30 +294,39 @@ export default function ComparePage() {
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
       <h1 className="text-xl font-bold text-gray-800">定额比较</h1>
+      <p className="text-sm text-gray-500 -mt-4">
+        支持 AI 批次与人工套定额工程之间的交叉比较，按清单编码对齐后逐项对比定额结果。
+      </p>
 
-      {/* 批次选择区 */}
+      {/* 选择区 */}
       <div className="flex gap-4 items-stretch">
-        <RunSelector
+        <Selector
           label="批次 A"
-          projects={projects}
+          srcType={typeA} onSrcTypeChange={t => { setTypeA(t); setResult(null) }}
+          boqProjects={boqProjects}
           selectedProject={projA} setSelectedProject={setProjA}
           runs={runsA} selectedRun={runA} setSelectedRun={setRunA}
+          manualProjects={manualProjects}
+          selectedManual={manualA} setSelectedManual={setManualA}
         />
         <div className="flex items-center">
           <span className="text-2xl text-gray-300 select-none">⇄</span>
         </div>
-        <RunSelector
+        <Selector
           label="批次 B"
-          projects={projects}
+          srcType={typeB} onSrcTypeChange={t => { setTypeB(t); setResult(null) }}
+          boqProjects={boqProjects}
           selectedProject={projB} setSelectedProject={setProjB}
           runs={runsB} selectedRun={runB} setSelectedRun={setRunB}
+          manualProjects={manualProjects}
+          selectedManual={manualB} setSelectedManual={setManualB}
         />
       </div>
 
       <div className="flex justify-center">
         <button
           onClick={doCompare}
-          disabled={!runA || !runB || loading}
+          disabled={!canCompare || loading}
           className="px-8 py-2 bg-blue-600 text-white rounded-lg font-medium disabled:opacity-40 hover:bg-blue-700 transition"
         >
           {loading ? '比较中…' : '开始比较'}
@@ -262,27 +340,27 @@ export default function ComparePage() {
       {/* 比较结果 */}
       {result && (
         <div className="space-y-4">
-          {/* 批次信息标题 */}
+          {/* 信息卡片 */}
           <div className="grid grid-cols-2 gap-4">
-            <div className="bg-white rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-xs text-gray-500">批次 A</div>
-              <div className="font-semibold text-gray-800">{result.run_a.project_name}</div>
-              <div className="text-sm text-gray-600">{result.run_a.run_name || `批次 #${result.run_a.run_id}`}</div>
-              {result.run_a.standard_code && (
-                <div className="text-xs text-blue-600 mt-0.5">{result.run_a.standard_code}</div>
-              )}
-            </div>
-            <div className="bg-white rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-xs text-gray-500">批次 B</div>
-              <div className="font-semibold text-gray-800">{result.run_b.project_name}</div>
-              <div className="text-sm text-gray-600">{result.run_b.run_name || `批次 #${result.run_b.run_id}`}</div>
-              {result.run_b.standard_code && (
-                <div className="text-xs text-blue-600 mt-0.5">{result.run_b.standard_code}</div>
-              )}
-            </div>
+            {[result.run_a, result.run_b].map((info, idx) => (
+              <div key={idx} className="bg-white rounded-lg border border-gray-200 px-4 py-3">
+                <div className="text-xs text-gray-500 mb-0.5">批次 {idx === 0 ? 'A' : 'B'}</div>
+                <div className="font-semibold text-gray-800">{info.project_name}</div>
+                <div className="text-sm text-gray-600">
+                  {info.run_name || (info.standard_code === '人工套定额' ? '' : `批次 #${info.run_id}`)}
+                </div>
+                {info.standard_code && (
+                  <span className={`inline-block text-xs mt-1 px-2 py-0.5 rounded ${
+                    info.standard_code === '人工套定额'
+                      ? 'bg-green-100 text-green-700'
+                      : 'bg-blue-50 text-blue-600'
+                  }`}>{info.standard_code}</span>
+                )}
+              </div>
+            ))}
           </div>
 
-          {/* 筛选按钮 */}
+          {/* 筛选 */}
           <div className="flex flex-wrap gap-2">
             {filterOptions.map(opt => (
               <button
@@ -298,7 +376,7 @@ export default function ComparePage() {
             ))}
           </div>
 
-          {/* 列表表头 */}
+          {/* 列表 */}
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="flex items-center gap-3 px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs text-gray-500 font-medium">
               <span className="w-4" />
@@ -306,9 +384,8 @@ export default function ComparePage() {
               <span className="w-32">清单编码</span>
               <span className="flex-1">名称</span>
               <span className="w-28 text-right">单位 / 数量</span>
-              <span className="w-12 text-right">A/B 数量</span>
+              <span className="w-12 text-right">A/B</span>
             </div>
-
             {displayed.length === 0 ? (
               <div className="px-4 py-8 text-center text-gray-400 text-sm">无匹配数据</div>
             ) : (

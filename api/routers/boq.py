@@ -721,36 +721,72 @@ def get_boq_summary(run_id: int = Query(...)):
 
 # ── 定额比较端点 ──────────────────────────────────────────────────────────────
 
-@router.get("/boq/compare", response_model=CompareResult)
-def compare_runs(run_a: int = Query(...), run_b: int = Query(...)):
-    """对比两个套定额批次，返回逐清单项的定额匹配对比。"""
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
+def _compare_run_info(conn, id: int, src_type: str) -> tuple:
+    """返回 (run_id, run_name, standard_code, project_id, project_name)。"""
+    with conn.cursor() as cur:
+        if src_type == "manual":
+            cur.execute(
+                "SELECT id, project_name FROM manual_boq_projects WHERE id = %s", (id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"人工套定额工程 {id} 不存在")
+            return (id, None, "人工套定额", row[0], row[1])
+        else:
             cur.execute("""
                 SELECT r.id, r.run_name, r.standard_code, p.id, p.project_name
-                FROM boq_match_runs r
-                JOIN boq_projects p ON p.id = r.project_id
-                WHERE r.id IN (%s, %s)
-            """, (run_a, run_b))
-            runs = {r[0]: r for r in cur.fetchall()}
+                FROM boq_match_runs r JOIN boq_projects p ON p.id = r.project_id
+                WHERE r.id = %s
+            """, (id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"批次 {id} 不存在")
+            return row
 
-        if run_a not in runs or run_b not in runs:
-            raise HTTPException(status_code=404, detail="批次不存在")
 
-        def fetch_matches(run_id: int):
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT i.item_code, i.item_name, i.unit, i.quantity,
-                           q.item_code, q.item_name, m.quota_item_id,
-                           m.qty_factor, m.confidence, m.work_procedure
-                    FROM boq_quota_matches m
-                    JOIN boq_items i ON i.id = m.boq_item_id
-                    JOIN quota_items q ON q.id = m.quota_item_id
-                    WHERE m.run_id = %s AND m.status != 'rejected'
-                    ORDER BY i.item_seq, i.item_code, m.id
-                """, (run_id,))
-                return cur.fetchall()
+def _compare_fetch_matches(conn, id: int, src_type: str) -> list:
+    """返回行列表，每行: (item_code, item_name, unit, quantity,
+                          quota_code, quota_name, quota_item_id,
+                          qty_factor, confidence, work_procedure)"""
+    with conn.cursor() as cur:
+        if src_type == "manual":
+            cur.execute("""
+                SELECT i.item_code, i.item_name, i.unit, i.quantity,
+                       COALESCE(mq.quota_code, ''), COALESCE(mq.quota_name, ''),
+                       mq.quota_item_id,
+                       mq.qty_factor, NULL, NULL
+                FROM manual_boq_items i
+                JOIN manual_boq_quotas mq ON mq.boq_item_id = i.id
+                WHERE i.project_id = %s AND i.item_code IS NOT NULL
+                      AND mq.quota_code IS NOT NULL AND mq.quota_code != ''
+                ORDER BY i.item_seq, i.item_code, mq.id
+            """, (id,))
+        else:
+            cur.execute("""
+                SELECT i.item_code, i.item_name, i.unit, i.quantity,
+                       q.item_code, q.item_name, m.quota_item_id,
+                       m.qty_factor, m.confidence, m.work_procedure
+                FROM boq_quota_matches m
+                JOIN boq_items i ON i.id = m.boq_item_id
+                JOIN quota_items q ON q.id = m.quota_item_id
+                WHERE m.run_id = %s AND m.status != 'rejected'
+                ORDER BY i.item_seq, i.item_code, m.id
+            """, (id,))
+        return cur.fetchall()
+
+
+@router.get("/boq/compare", response_model=CompareResult)
+def compare_runs(
+    run_a: int = Query(...),
+    run_b: int = Query(...),
+    run_a_type: str = Query("run"),   # "run" | "manual"
+    run_b_type: str = Query("run"),
+):
+    """对比两个套定额来源（AI批次 或 人工套定额工程），返回逐清单项的定额对比。"""
+    conn = get_connection()
+    try:
+        ra = _compare_run_info(conn, run_a, run_a_type)
+        rb = _compare_run_info(conn, run_b, run_b_type)
 
         def group_by_code(rows):
             result: dict = {}
@@ -772,8 +808,8 @@ def compare_runs(run_a: int = Query(...), run_b: int = Query(...)):
                 })
             return result
 
-        map_a = group_by_code(fetch_matches(run_a))
-        map_b = group_by_code(fetch_matches(run_b))
+        map_a = group_by_code(_compare_fetch_matches(conn, run_a, run_a_type))
+        map_b = group_by_code(_compare_fetch_matches(conn, run_b, run_b_type))
 
         all_codes = sorted(set(map_a.keys()) | set(map_b.keys()))
         items = []
@@ -806,7 +842,6 @@ def compare_runs(run_a: int = Query(...), run_b: int = Query(...)):
             ))
 
         different = len(items) - consistent_count - only_a - only_b - both_empty
-        ra, rb = runs[run_a], runs[run_b]
         return CompareResult(
             run_a=CompareRunInfo(run_id=ra[0], run_name=ra[1], standard_code=ra[2], project_id=ra[3], project_name=ra[4]),
             run_b=CompareRunInfo(run_id=rb[0], run_name=rb[1], standard_code=rb[2], project_id=rb[3], project_name=rb[4]),
