@@ -229,6 +229,72 @@ class BoqMatchResult(BaseModel):
     quota_resources: list[QuotaResource] = []
 
 
+# ── 人工套定额工程 ──────────────────────────────────────
+
+class ManualBoqProject(BaseModel):
+    id: int
+    project_name: str
+    bid_section: Optional[str]
+    source_file: Optional[str]
+    tag: Optional[str]
+    imported_at: datetime
+    item_count: Optional[int] = None
+
+
+class ManualBoqSection(BaseModel):
+    id: int
+    seq: Optional[int]
+    section_name: str
+
+
+class ManualBoqQuota(BaseModel):
+    id: int
+    boq_item_id: int
+    quota_code: Optional[str]
+    quota_name: Optional[str]
+    quota_unit: Optional[str]
+    quantity: Optional[float]
+    unit_price: Optional[float]
+    total_price: Optional[float]
+    qty_factor: Optional[float]
+    quota_item_id: Optional[int]
+    # 关联定额库价格（可选）
+    qi_total_unit_price: Optional[float] = None
+    qi_unit_price: Optional[float] = None
+    qi_labor_cost: Optional[float] = None
+    qi_material_cost: Optional[float] = None
+    qi_machine_cost: Optional[float] = None
+    qi_management_fee: Optional[float] = None
+    qi_profit: Optional[float] = None
+    qi_safety_fee: Optional[float] = None
+    qi_statutory_fee: Optional[float] = None
+    qi_tax: Optional[float] = None
+    qi_work_content: Optional[str] = None
+    qi_variant_desc: Optional[str] = None
+    qi_unit: Optional[str] = None
+
+
+class ManualBoqItem(BaseModel):
+    id: int
+    section_id: Optional[int]
+    section_name: Optional[str]
+    item_seq: Optional[int]
+    item_code: Optional[str]
+    item_name: Optional[str]
+    item_description: Optional[str]
+    unit: Optional[str]
+    quantity: Optional[float]
+    unit_price: Optional[float]
+    total_price: Optional[float]
+    quotas: list[ManualBoqQuota] = []
+
+
+class ManualBoqProjectDetail(BaseModel):
+    project: ManualBoqProject
+    sections: list[ManualBoqSection]
+    items: list[ManualBoqItem]
+
+
 class BoqSummaryItem(BaseModel):
     boq_item_id: int
     item_seq: int

@@ -7,6 +7,7 @@ const links = [
   { href: '/quota', label: '消耗量标准' },
   { href: '/measure', label: '国标清单' },
   { href: '/boq', label: '工程管理' },
+  { href: '/manual-boq', label: '工程管理（人工）' },
   { href: '/import', label: '导入管理' },
 ]
 
@@ -21,7 +22,7 @@ export default function Navbar() {
             key={l.href}
             href={l.href}
             className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-              pathname === l.href
+              pathname === l.href || pathname.startsWith(l.href + '/')
                 ? 'bg-blue-700 text-white'
                 : 'text-blue-200 hover:bg-blue-800 hover:text-white'
             }`}

@@ -470,3 +470,86 @@ export const deleteBoqMatch = (id: number) =>
 
 export const fetchBoqSummary = (run_id: number) =>
   req<BoqSummaryResponse>(`/api/boq/summary?run_id=${run_id}`)
+
+// ── 人工套定额工程 ──────────────────────────────────────
+
+export interface ManualBoqProject {
+  id: number
+  project_name: string
+  bid_section: string | null
+  source_file: string | null
+  tag: string | null
+  imported_at: string
+  item_count: number | null
+}
+
+export interface ManualBoqQuota {
+  id: number
+  boq_item_id: number
+  quota_code: string | null
+  quota_name: string | null
+  quota_unit: string | null
+  quantity: number | null
+  unit_price: number | null
+  total_price: number | null
+  qty_factor: number | null
+  quota_item_id: number | null
+  // 关联定额库价格
+  qi_total_unit_price: number | null
+  qi_unit_price: number | null
+  qi_labor_cost: number | null
+  qi_material_cost: number | null
+  qi_machine_cost: number | null
+  qi_management_fee: number | null
+  qi_profit: number | null
+  qi_safety_fee: number | null
+  qi_statutory_fee: number | null
+  qi_tax: number | null
+  qi_work_content: string | null
+  qi_variant_desc: string | null
+  qi_unit: string | null
+}
+
+export interface ManualBoqItem {
+  id: number
+  section_id: number | null
+  section_name: string | null
+  item_seq: number | null
+  item_code: string | null
+  item_name: string | null
+  item_description: string | null
+  unit: string | null
+  quantity: number | null
+  unit_price: number | null
+  total_price: number | null
+  quotas: ManualBoqQuota[]
+}
+
+export interface ManualBoqSection {
+  id: number
+  seq: number | null
+  section_name: string
+}
+
+export interface ManualBoqProjectDetail {
+  project: ManualBoqProject
+  sections: ManualBoqSection[]
+  items: ManualBoqItem[]
+}
+
+export const fetchManualBoqProjects = () =>
+  req<ManualBoqProject[]>('/api/manual-boq/projects')
+
+export const fetchManualBoqProject = (id: number) =>
+  req<ManualBoqProjectDetail>(`/api/manual-boq/projects/${id}`)
+
+export const uploadManualBoqFile = (file: File, force = false, tag?: string): Promise<ManualBoqProject> => {
+  const form = new FormData()
+  form.append('file', file)
+  const q = new URLSearchParams({ force: String(force) })
+  if (tag) q.set('tag', tag)
+  return req<ManualBoqProject>(`/api/manual-boq/upload?${q}`, { method: 'POST', body: form })
+}
+
+export const deleteManualBoqProject = (id: number) =>
+  req<{ ok: boolean }>(`/api/manual-boq/projects/${id}`, { method: 'DELETE' })
