@@ -8,9 +8,17 @@ const links = [
   { href: '/measure', label: '国标清单' },
   { href: '/boq', label: '工程管理' },
   { href: '/manual-boq', label: '工程管理（人工）' },
+  { href: '/boq/debug', label: '套定额调试' },
   { href: '/compare', label: '定额比较' },
   { href: '/import', label: '导入管理' },
 ]
+
+function isActive(pathname: string, href: string) {
+  if (pathname === href) return true
+  // /boq 只匹配 /boq/[数字]（项目详情），不匹配 /boq/debug 等具名子路由
+  if (href === '/boq') return /^\/boq\/\d/.test(pathname)
+  return pathname.startsWith(href + '/')
+}
 
 export default function Navbar() {
   const pathname = usePathname()
@@ -23,7 +31,7 @@ export default function Navbar() {
             key={l.href}
             href={l.href}
             className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-              pathname === l.href || pathname.startsWith(l.href + '/')
+              isActive(pathname, l.href)
                 ? 'bg-blue-700 text-white'
                 : 'text-blue-200 hover:bg-blue-800 hover:text-white'
             }`}
