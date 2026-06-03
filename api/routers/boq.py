@@ -1005,3 +1005,134 @@ def match_project_stream(req: MatchProjectRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── 单条调试端点（不写库，流式推理 + 人工标准对比）─────────────────────────────
+
+class DebugMatchRequest(BaseModel):
+    boq_item_id: int
+    standard_ids: list[int]
+    manual_project_id: Optional[int] = None   # 提供则同步返回人工标准答案
+
+
+@router.post("/boq/match-item-debug")
+def match_item_debug(req: DebugMatchRequest):
+    """
+    单条清单项调试套定额：流式推理，不写库，可附带人工标准答案对比。
+    SSE 事件: item_info / reasoning_token / result / done / error
+    """
+    def generate():
+        conn = get_connection()
+        try:
+            # ── 1. 获取清单项完整信息 ─────────────────────────────────────────
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, item_code, item_name, item_description, unit, quantity
+                    FROM boq_items WHERE id = %s
+                """, (req.boq_item_id,))
+                row = cur.fetchone()
+            if not row:
+                yield f"data: {json.dumps({'type':'error','error':'清单项不存在'})}\n\n"
+                return
+
+            boq_item = {
+                "id": row[0], "item_code": row[1], "item_name": row[2],
+                "item_description": row[3], "unit": row[4],
+                "quantity": float(row[5]) if row[5] else None,
+            }
+
+            # ── 2. 获取人工标准答案（按 item_code 匹配） ─────────────────────
+            manual_quotas: list[dict] = []
+            if req.manual_project_id and row[1]:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT mq.quota_code, mq.quota_name, mq.quota_unit,
+                               mq.quantity, mq.qty_factor, mq.quota_item_id
+                        FROM manual_boq_quotas mq
+                        JOIN manual_boq_items mi ON mi.id = mq.boq_item_id
+                        WHERE mi.project_id = %s AND mi.item_code = %s
+                              AND mq.quota_code IS NOT NULL AND mq.quota_code != ''
+                        ORDER BY mq.id
+                    """, (req.manual_project_id, row[1]))
+                    for r in cur.fetchall():
+                        manual_quotas.append({
+                            "quota_code": r[0],
+                            "quota_name": r[1],
+                            "quota_unit": r[2],
+                            "quantity": float(r[3]) if r[3] else None,
+                            "qty_factor": float(r[4]) if r[4] else None,
+                            "quota_item_id": r[5],
+                            "is_formula": bool(r[5] is None),  # 无法链接到库 = 公式或特殊码
+                        })
+
+            yield f"data: {json.dumps({'type':'item_info','item':boq_item,'manual_quotas':manual_quotas}, ensure_ascii=False)}\n\n"
+
+            # ── 3. 构建 system prompt ────────────────────────────────────────
+            if not req.standard_ids:
+                yield f"data: {json.dumps({'type':'error','error':'未选择定额标准'})}\n\n"
+                return
+            sp = build_system_prompt(conn, req.standard_ids)
+
+            # ── 4. 流式推理（不写库）────────────────────────────────────────
+            raw_results = []
+            for event_type, data in stream_match_boq_item(boq_item, sp):
+                if event_type == "reasoning_token":
+                    yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
+                elif event_type == "result":
+                    raw_results = data
+
+            # ── 5. 补全定额库信息，附加与人工标准的对比标记 ──────────────────
+            manual_codes = {q["quota_code"] for q in manual_quotas}
+            matches = []
+            ai_codes: set[str] = set()
+
+            with conn.cursor() as cur:
+                for m in raw_results:
+                    cur.execute("""
+                        SELECT item_code, item_name, variant_desc, unit,
+                               total_unit_price, labor_cost, material_cost, machine_cost
+                        FROM quota_items WHERE id = %s
+                    """, (m.quota_item_id,))
+                    q = cur.fetchone()
+                    if not q:
+                        continue
+                    ai_codes.add(q[0])
+                    in_manual = q[0] in manual_codes
+                    matches.append({
+                        "quota_item_id": m.quota_item_id,
+                        "quota_item_code": q[0],
+                        "quota_item_name": q[1],
+                        "quota_variant_desc": q[2],
+                        "quota_unit": q[3],
+                        "total_unit_price": float(q[4]) if q[4] else None,
+                        "labor_cost": float(q[5]) if q[5] else None,
+                        "material_cost": float(q[6]) if q[6] else None,
+                        "machine_cost": float(q[7]) if q[7] else None,
+                        "qty_factor": m.qty_factor,
+                        "confidence": m.confidence,
+                        "work_procedure": m.work_procedure,
+                        "factor_explanation": m.factor_explanation,
+                        "reasoning": m.reasoning,
+                        "in_manual": in_manual,       # AI 匹配 + 人工也有 → ✅
+                    })
+
+            # 人工有但 AI 漏套的定额
+            missed = [
+                {**q, "missed_by_ai": True}
+                for q in manual_quotas
+                if q["quota_code"] not in ai_codes
+            ]
+
+            yield f"data: {json.dumps({'type':'result','matches':matches,'missed':missed}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type':'done'})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','error':str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            conn.close()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

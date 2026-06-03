@@ -608,3 +608,70 @@ export const fetchBoqCompare = (
 ) =>
   req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}&run_a_type=${run_a_type}&run_b_type=${run_b_type}`)
 
+// ── 单条调试套定额 ────────────────────────────────────────────────────────────
+
+export interface DebugManualQuota {
+  quota_code: string
+  quota_name: string | null
+  quota_unit: string | null
+  quantity: number | null
+  qty_factor: number | null
+  quota_item_id: number | null
+  is_formula: boolean
+}
+
+export interface DebugMatchQuota {
+  quota_item_id: number
+  quota_item_code: string
+  quota_item_name: string
+  quota_variant_desc: string | null
+  quota_unit: string | null
+  total_unit_price: number | null
+  labor_cost: number | null
+  material_cost: number | null
+  machine_cost: number | null
+  qty_factor: number
+  confidence: string | null
+  work_procedure: string | null
+  factor_explanation: string | null
+  reasoning: string | null
+  in_manual: boolean    // AI 匹配的，人工也有 → ✅
+}
+
+export type DebugMatchEvent =
+  | { type: 'item_info'; item: BoqItem; manual_quotas: DebugManualQuota[] }
+  | { type: 'reasoning_token'; token: string }
+  | { type: 'result'; matches: DebugMatchQuota[]; missed: (DebugManualQuota & { missed_by_ai: boolean })[] }
+  | { type: 'done' }
+  | { type: 'error'; error: string }
+
+export async function streamDebugMatch(
+  boq_item_id: number,
+  standard_ids: number[],
+  manual_project_id: number | null,
+  onEvent: (e: DebugMatchEvent) => void,
+): Promise<void> {
+  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const res = await fetch(`${API}/api/boq/match-item-debug`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boq_item_id, standard_ids, manual_project_id }),
+  })
+  if (!res.ok) throw new Error(`请求失败 ${res.status}`)
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6)) as DebugMatchEvent) } catch { /* skip */ }
+      }
+    }
+  }
+}
+
