@@ -365,7 +365,7 @@ export default function BoqDebugPage() {
 
           {/* 推理文字 */}
           {(state.reasoning || state.phase === 'reasoning') && (
-            <div className="bg-white rounded-lg border border-gray-200 flex flex-col" style={{ maxHeight: '45vh' }}>
+            <div className="bg-white rounded-lg border border-gray-200 flex flex-col" style={{ maxHeight: '90vh' }}>
               <div className="px-4 py-2 border-b border-gray-100 text-xs font-medium text-gray-600 bg-gray-50 flex items-center gap-2">
                 <span>AI 推理过程</span>
                 {state.phase === 'reasoning' && <span className="text-indigo-500 animate-pulse">●</span>}
