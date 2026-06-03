@@ -154,6 +154,7 @@ export default function BoqDebugPage() {
 
   const [state, setState] = useState<DebugState>(IDLE)
   const [expandedIdx, setExpandedIdx] = useState<Set<number>>(new Set())
+  const [savedStates, setSavedStates] = useState<Map<number, DebugState>>(new Map())
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   // 初始加载
@@ -174,6 +175,7 @@ export default function BoqDebugPage() {
     if (!projId) { setItems([]); setSelectedItem(null); return }
     fetchAllBoqItems(projId).then(setItems).catch(() => setItems([]))
     setSelectedItem(null)
+    setSavedStates(new Map())
   }, [projId])
 
   // 推理文字自动滚动
@@ -181,6 +183,14 @@ export default function BoqDebugPage() {
     if (reasoningRef.current)
       reasoningRef.current.scrollTop = reasoningRef.current.scrollHeight
   }, [state.reasoning])
+
+  // 完成时保存结果到缓存
+  useEffect(() => {
+    if ((state.phase === 'done' || state.phase === 'error') && selectedItem) {
+      setSavedStates(prev => new Map(prev).set(selectedItem.id, state))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.phase])
 
   const filteredItems = items.filter(it =>
     !search || it.item_name.includes(search) || it.item_code.includes(search)
@@ -278,12 +288,19 @@ export default function BoqDebugPage() {
                 {filteredItems.map(item => (
                   <button
                     key={item.id}
-                    onClick={() => { setSelectedItem(item); setState(IDLE) }}
+                    onClick={() => {
+                      setSelectedItem(item)
+                      setState(savedStates.get(item.id) ?? IDLE)
+                      setExpandedIdx(new Set())
+                    }}
                     className={`w-full text-left px-3 py-2 border-b border-gray-50 hover:bg-blue-50 transition ${selectedItem?.id === item.id ? 'bg-blue-100' : ''}`}
                   >
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-xs text-gray-400 flex-shrink-0">{item.item_code}</span>
                       <span className="text-sm text-gray-800 truncate">{item.item_name}</span>
+                      {savedStates.has(item.id) && (
+                        <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0 ml-auto" title="已有推理结果" />
+                      )}
                     </div>
                     {!item.item_description && (
                       <span className="text-xs text-amber-500">⚠ 无项目特征</span>
