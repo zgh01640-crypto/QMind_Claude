@@ -13,7 +13,7 @@ from api.schemas import (
     BoqMatchResult, BoqSummaryItem, BoqResourceSummary, QuotaResource,
     BoqMatchRun, CompareResult, CompareRunInfo, CompareQuota, CompareBoqItem, CompareSummary,
 )
-from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item
+from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item, _build_user_msg
 
 router = APIRouter()
 
@@ -1007,18 +1007,165 @@ def match_project_stream(req: MatchProjectRequest):
     )
 
 
-# ── 单条调试端点（不写库，流式推理 + 人工标准对比）─────────────────────────────
+# ── 调试批次 CRUD ────────────────────────────────────────────────────────────
+
+class DebugBatchCreate(BaseModel):
+    name: str
+    boq_project_id: int
+    manual_project_id: Optional[int] = None
+    standard_ids: list[int]
+
+class DebugBatchRename(BaseModel):
+    name: str
+
+
+@router.get("/debug-batches")
+def list_debug_batches():
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT db.id, db.name, db.boq_project_id, bp.project_name,
+                       db.manual_project_id, db.standard_ids, db.created_at,
+                       COUNT(dir.id) AS result_count
+                FROM debug_batches db
+                JOIN boq_projects bp ON bp.id = db.boq_project_id
+                LEFT JOIN debug_item_results dir ON dir.batch_id = db.id
+                GROUP BY db.id, db.name, db.boq_project_id, bp.project_name,
+                         db.manual_project_id, db.standard_ids, db.created_at
+                ORDER BY db.created_at DESC
+            """)
+            rows = cur.fetchall()
+        result = []
+        for r in rows:
+            result.append({
+                "id": r[0], "name": r[1],
+                "boq_project_id": r[2], "project_name": r[3],
+                "manual_project_id": r[4],
+                "standard_ids": json.loads(r[5]),
+                "created_at": r[6].isoformat() if r[6] else None,
+                "result_count": r[7],
+            })
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/debug-batches", status_code=201)
+def create_debug_batch(body: DebugBatchCreate):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO debug_batches (name, boq_project_id, manual_project_id, standard_ids)
+                VALUES (%s, %s, %s, %s) RETURNING id, created_at
+            """, (body.name, body.boq_project_id, body.manual_project_id,
+                  json.dumps(body.standard_ids)))
+            row = cur.fetchone()
+            conn.commit()
+        return {"id": row[0], "created_at": row[1].isoformat()}
+    finally:
+        conn.close()
+
+
+@router.get("/debug-batches/{batch_id}")
+def get_debug_batch(batch_id: int):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT db.id, db.name, db.boq_project_id, bp.project_name,
+                       db.manual_project_id, db.standard_ids, db.created_at
+                FROM debug_batches db
+                JOIN boq_projects bp ON bp.id = db.boq_project_id
+                WHERE db.id = %s
+            """, (batch_id,))
+            r = cur.fetchone()
+        if not r:
+            raise HTTPException(404, "批次不存在")
+        # 解析 standard_ids → 查询定额标准名称
+        std_ids = json.loads(r[5])
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, standard_code, name FROM quota_standards WHERE id = ANY(%s)
+            """, (std_ids,))
+            stds = [{"id": s[0], "standard_code": s[1], "name": s[2]} for s in cur.fetchall()]
+        return {
+            "id": r[0], "name": r[1],
+            "boq_project_id": r[2], "project_name": r[3],
+            "manual_project_id": r[4],
+            "standard_ids": std_ids, "standards": stds,
+            "created_at": r[6].isoformat() if r[6] else None,
+        }
+    finally:
+        conn.close()
+
+
+@router.patch("/debug-batches/{batch_id}")
+def rename_debug_batch(batch_id: int, body: DebugBatchRename):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE debug_batches SET name=%s, updated_at=NOW()
+                WHERE id=%s RETURNING id
+            """, (body.name, batch_id))
+            if not cur.fetchone():
+                raise HTTPException(404, "批次不存在")
+            conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@router.delete("/debug-batches/{batch_id}", status_code=204)
+def delete_debug_batch(batch_id: int):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM debug_batches WHERE id=%s", (batch_id,))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+@router.get("/debug-batches/{batch_id}/results")
+def get_batch_results(batch_id: int):
+    """返回该批次所有已保存的推理结果，key 为 boq_item_id（字符串）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT boq_item_id, reasoning_chain, result_json, ran_at
+                FROM debug_item_results WHERE batch_id = %s
+            """, (batch_id,))
+            rows = cur.fetchall()
+        out = {}
+        for r in rows:
+            out[str(r[0])] = {
+                "reasoning_chain": r[1],
+                "result": r[2],   # JSONB 已经是 dict
+                "ran_at": r[3].isoformat() if r[3] else None,
+            }
+        return out
+    finally:
+        conn.close()
+
+
+# ── 单条调试端点（流式推理 + 可选写库）────────────────────────────────────────
 
 class DebugMatchRequest(BaseModel):
     boq_item_id: int
     standard_ids: list[int]
     manual_project_id: Optional[int] = None   # 提供则同步返回人工标准答案
+    batch_id: Optional[int] = None            # 提供则推理完成后持久化结果
 
 
 @router.post("/boq/match-item-debug")
 def match_item_debug(req: DebugMatchRequest):
     """
-    单条清单项调试套定额：流式推理，不写库，可附带人工标准答案对比。
+    单条清单项调试套定额：流式推理，可附带人工标准答案对比。
+    若提供 batch_id，推理完成后持久化结果到 debug_item_results。
     SSE 事件: item_info / reasoning_token / result / done / error
     """
     def generate():
@@ -1065,18 +1212,21 @@ def match_item_debug(req: DebugMatchRequest):
                             "is_formula": bool(r[5] is None),  # 无法链接到库 = 公式或特殊码
                         })
 
-            yield f"data: {json.dumps({'type':'item_info','item':boq_item,'manual_quotas':manual_quotas}, ensure_ascii=False)}\n\n"
-
-            # ── 3. 构建 system prompt ────────────────────────────────────────
+            # ── 3. 구축 system prompt ────────────────────────────────────────
             if not req.standard_ids:
                 yield f"data: {json.dumps({'type':'error','error':'未选择定额标准'})}\n\n"
                 return
             sp = build_system_prompt(conn, req.standard_ids)
+            user_msg = _build_user_msg(boq_item)
 
-            # ── 4. 流式推理（不写库）────────────────────────────────────────
+            yield f"data: {json.dumps({'type':'item_info','item':boq_item,'manual_quotas':manual_quotas,'system_prompt':sp[:2000],'system_prompt_len':len(sp),'user_message':user_msg}, ensure_ascii=False)}\n\n"
+
+            # ── 4. 流式推理 ──────────────────────────────────────────────────
             raw_results = []
+            full_reasoning = []
             for event_type, data in stream_match_boq_item(boq_item, sp):
                 if event_type == "reasoning_token":
+                    full_reasoning.append(data)
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
                 elif event_type == "result":
                     raw_results = data
@@ -1124,6 +1274,28 @@ def match_item_debug(req: DebugMatchRequest):
             ]
 
             yield f"data: {json.dumps({'type':'result','matches':matches,'missed':missed}, ensure_ascii=False)}\n\n"
+
+            # ── 6. 持久化（如果提供了 batch_id）────────────────────────────
+            if req.batch_id:
+                result_payload = {
+                    "matches": matches,
+                    "missed": missed,
+                    "manual_quotas": manual_quotas,
+                }
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO debug_item_results
+                            (batch_id, boq_item_id, reasoning_chain, result_json, ran_at)
+                        VALUES (%s, %s, %s, %s::jsonb, NOW())
+                        ON CONFLICT (batch_id, boq_item_id) DO UPDATE
+                            SET reasoning_chain = EXCLUDED.reasoning_chain,
+                                result_json     = EXCLUDED.result_json,
+                                ran_at          = EXCLUDED.ran_at
+                    """, (req.batch_id, req.boq_item_id,
+                          ''.join(full_reasoning),
+                          json.dumps(result_payload, ensure_ascii=False)))
+                    conn.commit()
+
             yield f"data: {json.dumps({'type':'done'})}\n\n"
 
         except Exception as e:

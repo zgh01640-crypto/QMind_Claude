@@ -608,6 +608,69 @@ export const fetchBoqCompare = (
 ) =>
   req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}&run_a_type=${run_a_type}&run_b_type=${run_b_type}`)
 
+// ── 调试批次 ──────────────────────────────────────────────────────────────────
+
+export interface DebugBatch {
+  id: number
+  name: string
+  boq_project_id: number
+  project_name: string
+  manual_project_id: number | null
+  standard_ids: number[]
+  created_at: string
+  result_count: number
+}
+
+export interface DebugBatchDetail extends DebugBatch {
+  standards: { id: number; standard_code: string; name: string }[]
+}
+
+export interface DebugItemResult {
+  reasoning_chain: string | null
+  result: {
+    matches: DebugMatchQuota[]
+    missed: (DebugManualQuota & { missed_by_ai: boolean })[]
+    manual_quotas: DebugManualQuota[]
+  }
+  ran_at: string
+}
+
+export const fetchDebugBatches = () => req<DebugBatch[]>('/api/debug-batches')
+
+export const fetchDebugBatch = (id: number) => req<DebugBatchDetail>(`/api/debug-batches/${id}`)
+
+export const fetchBatchResults = (batchId: number) =>
+  req<Record<string, DebugItemResult>>(`/api/debug-batches/${batchId}/results`)
+
+export async function createDebugBatch(body: {
+  name: string
+  boq_project_id: number
+  manual_project_id: number | null
+  standard_ids: number[]
+}): Promise<{ id: number; created_at: string }> {
+  const res = await fetch(`${API}/api/debug-batches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`创建失败 ${res.status}`)
+  return res.json()
+}
+
+export async function renameDebugBatch(id: number, name: string): Promise<void> {
+  const res = await fetch(`${API}/api/debug-batches/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(`重命名失败 ${res.status}`)
+}
+
+export async function deleteDebugBatch(id: number): Promise<void> {
+  const res = await fetch(`${API}/api/debug-batches/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`删除失败 ${res.status}`)
+}
+
 // ── 单条调试套定额 ────────────────────────────────────────────────────────────
 
 export interface DebugManualQuota {
@@ -639,7 +702,7 @@ export interface DebugMatchQuota {
 }
 
 export type DebugMatchEvent =
-  | { type: 'item_info'; item: BoqItem; manual_quotas: DebugManualQuota[] }
+  | { type: 'item_info'; item: BoqItem; manual_quotas: DebugManualQuota[]; system_prompt?: string; system_prompt_len?: number; user_message?: string }
   | { type: 'reasoning_token'; token: string }
   | { type: 'result'; matches: DebugMatchQuota[]; missed: (DebugManualQuota & { missed_by_ai: boolean })[] }
   | { type: 'done' }
@@ -650,12 +713,13 @@ export async function streamDebugMatch(
   standard_ids: number[],
   manual_project_id: number | null,
   onEvent: (e: DebugMatchEvent) => void,
+  batch_id?: number,
 ): Promise<void> {
   const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
   const res = await fetch(`${API}/api/boq/match-item-debug`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ boq_item_id, standard_ids, manual_project_id }),
+    body: JSON.stringify({ boq_item_id, standard_ids, manual_project_id, batch_id }),
   })
   if (!res.ok) throw new Error(`请求失败 ${res.status}`)
   const reader = res.body!.getReader()
