@@ -45,6 +45,7 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
     current_appendix_code: str | None = None   # e.g. "A"
     current_section_code:  str | None = None   # e.g. "A.1"
     pending_section_code:  str | None = None   # 表格前最近一次 "表 X.Y.Z" 的 X.Y 部分
+    section_num_code: dict[str, str] = {}      # alpha_code → 6位数字编码, e.g. "A.1" → "010101"
 
     # 附录→节 的父子关系在 sections 列表中按插入顺序体现
     # 用 dict 快速查父
@@ -105,9 +106,12 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
             m = _RE_TABLE_HDR.search(text)
             if m:
                 tbl_ref = m.group(1)         # "A.1.1"
+                num_code = m.group(2)        # "010101"
                 # section code = 前两段, e.g. "A.1"
                 parts = tbl_ref.split('.')
                 pending_section_code = f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else current_section_code
+                if pending_section_code:
+                    section_num_code[pending_section_code] = num_code
                 continue
 
         else:  # kind == 't'
@@ -159,6 +163,8 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
                     'work_content':  norm(work_content) or None,
                 })
 
+    for s in sections:
+        s['num_code'] = section_num_code.get(s['code'])
     return sections, items
 
 

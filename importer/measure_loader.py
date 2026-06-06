@@ -46,9 +46,9 @@ def load(conn, source_file: str, standard_name: str,
             parent_id = code_to_id.get(sec['parent_code']) if sec['parent_code'] else None
             sort_order = _sort_key(sec['code'])
             cur.execute(
-                """INSERT INTO measure_sections(standard_id, code, name, level, parent_id, sort_order)
-                   VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
-                (std_id, sec['code'], sec['name'], sec['level'], parent_id, sort_order)
+                """INSERT INTO measure_sections(standard_id, code, name, level, parent_id, sort_order, num_code)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (std_id, sec['code'], sec['name'], sec['level'], parent_id, sort_order, sec.get('num_code'))
             )
             code_to_id[sec['code']] = cur.fetchone()[0]
 

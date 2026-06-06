@@ -272,7 +272,7 @@ export default function MeasurePage() {
                             }`}>
                               {secOpen ? '−' : '+'}
                             </span>
-                            <span className="font-mono text-xs text-emerald-600 w-8 flex-shrink-0">{section.code}</span>
+                            <span className="font-mono text-xs text-emerald-600 w-16 flex-shrink-0">{section.num_code || section.code}</span>
                             <span className="text-sm text-gray-700 font-medium">{section.name}</span>
                             <span className="ml-auto text-xs text-gray-400 flex-shrink-0">{secItems.length} 条</span>
                           </button>
