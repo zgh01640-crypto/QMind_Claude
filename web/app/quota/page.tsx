@@ -49,7 +49,9 @@ function buildTree(items: QuotaItem[], filter: string, chapterMap: Map<string, s
         key: `${prefix}|${name}`,
         items: its,
       }))
-      const chapterName = chapterMap.get(prefix) ?? prefix
+      const chapterName = chItems[0]?.chapter_name
+        ? `${prefix} ${chItems[0].chapter_name}`
+        : (chapterMap.get(prefix) ?? prefix)
       return {
         prefix,
         label: chapterName,
