@@ -439,6 +439,10 @@ export async function streamMatchBoqProject(
     buf += decoder.decode(value, { stream: true })
     const lines = buf.split('\n')
     buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6)) as StreamEvent) } catch { /* skip */ }
+      }
     }
   }
 }
