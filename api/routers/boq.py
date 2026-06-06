@@ -1,6 +1,8 @@
 import os
 import tempfile
 import threading
+import time
+import queue
 
 from fastapi import APIRouter, Query, HTTPException, UploadFile, File as FastAPIFile
 from fastapi.responses import StreamingResponse
@@ -13,9 +15,14 @@ from api.schemas import (
     BoqMatchResult, BoqSummaryItem, BoqResourceSummary, QuotaResource,
     BoqMatchRun, CompareResult, CompareRunInfo, CompareQuota, CompareBoqItem, CompareSummary,
 )
-from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item, _build_user_msg
+from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item, _build_user_msg, _ROLE_DESC, _MATCH_TOOL
 
 router = APIRouter()
+
+
+@router.get("/boq/prompt-template")
+def get_prompt_template():
+    return {"role_desc": _ROLE_DESC, "tool_schema": _MATCH_TOOL}
 
 
 # ── 上传 BOQ ──────────────────────────────────────────────────────────────────
@@ -1007,6 +1014,183 @@ def match_project_stream(req: MatchProjectRequest):
     )
 
 
+# ── 并行套定额端点 ─────────────────────────────────────────────────────────────
+
+class MatchParallelRequest(BaseModel):
+    project_id: int
+    standard_ids: list[int]
+    run_name: str = ""
+    concurrency: int = 4
+
+
+@router.post("/boq/match-project-parallel")
+def match_project_parallel(req: MatchParallelRequest):
+    """
+    并行套定额：N 个工作槽各自独立跑，前端可看到每个槽当前处理哪条清单项。
+    SSE 事件：run_start / slot_start / slot_done / slot_error / run_done / run_error
+    """
+    def generate():
+        conn = get_connection()
+        run_id = None
+        try:
+            _ensure_match_schema(conn)
+
+            std_ids = req.standard_ids if req.standard_ids else []
+            if not std_ids:
+                yield f"data: {json.dumps({'type':'run_error','error':'未选择定额标准'})}\n\n"
+                return
+
+            n_slots = max(1, min(req.concurrency, 8))
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, item_code, item_name, item_description, unit, quantity
+                    FROM boq_items WHERE project_id = %s ORDER BY item_seq
+                """, (req.project_id,))
+                items = cur.fetchall()
+
+                placeholders = ','.join(['%s'] * len(std_ids))
+                cur.execute(f"SELECT standard_code FROM quota_standards WHERE id IN ({placeholders}) ORDER BY id", std_ids)
+                codes = [r[0] for r in cur.fetchall() if r[0]]
+            standard_code = ' + '.join(codes) if codes else None
+            total = len(items)
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO boq_match_runs
+                        (project_id, standard_id, standard_ids, standard_code,
+                         run_name, status, total_items, matched_items)
+                    VALUES (%s, %s, %s, %s, %s, 'running', %s, 0) RETURNING id
+                """, (req.project_id, std_ids[0], json.dumps(std_ids), standard_code,
+                      req.run_name or None, total))
+                run_id = cur.fetchone()[0]
+            conn.commit()
+
+            yield f"data: {json.dumps({'type':'run_start','run_id':run_id,'total':total,'slots':n_slots}, ensure_ascii=False)}\n\n"
+
+            sp = build_system_prompt(conn, std_ids)
+
+            boq_items_list = []
+            for item_id, item_code, item_name, item_desc, unit, quantity in items:
+                boq_items_list.append({
+                    "id": item_id, "item_code": item_code, "item_name": item_name,
+                    "item_description": item_desc, "unit": unit,
+                    "quantity": float(quantity) if quantity else None,
+                    "project_id": req.project_id,
+                })
+
+            work_q: queue.Queue = queue.Queue()
+            event_q: queue.Queue = queue.Queue()
+            for boq_item in boq_items_list:
+                work_q.put(boq_item)
+
+            def _worker(slot: int):
+                while True:
+                    try:
+                        boq_item = work_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    event_q.put({'_t': 'slot_start', 'slot': slot,
+                                 'id': boq_item['id'], 'name': boq_item['item_name']})
+                    t0 = time.monotonic()
+                    try:
+                        results = match_boq_item(boq_item, sp)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        event_q.put({'_t': 'slot_done', 'slot': slot,
+                                     'boq_item': boq_item, 'results': results, 'elapsed_ms': elapsed_ms})
+                    except Exception as exc:
+                        event_q.put({'_t': 'slot_error', 'slot': slot,
+                                     'id': boq_item['id'], 'name': boq_item['item_name'], 'error': str(exc)})
+                event_q.put({'_t': 'slot_finished', 'slot': slot})
+
+            for slot_idx in range(n_slots):
+                threading.Thread(target=_worker, args=(slot_idx,), daemon=True).start()
+
+            matched_count = 0
+            finished_slots = 0
+            while finished_slots < n_slots:
+                ev = event_q.get()
+                ev_type = ev['_t']
+
+                if ev_type == 'slot_start':
+                    yield f"data: {json.dumps({'type':'slot_start','slot':ev['slot'],'boq_item_id':ev['id'],'item_name':ev['name']}, ensure_ascii=False)}\n\n"
+
+                elif ev_type == 'slot_done':
+                    slot = ev['slot']
+                    boq_item = ev['boq_item']
+                    raw_results = ev['results']
+                    elapsed_ms = ev['elapsed_ms']
+                    item_id = boq_item['id']
+                    item_name = boq_item['item_name']
+
+                    saved_matches = []
+                    with conn.cursor() as cur:
+                        for m in raw_results:
+                            cur.execute("SELECT item_code, item_name, variant_desc, unit, standard_id FROM quota_items WHERE id = %s", (m.quota_item_id,))
+                            q = cur.fetchone()
+                            if not q:
+                                continue
+                            cur.execute("""
+                                INSERT INTO boq_quota_matches
+                                    (project_id, boq_item_id, quota_item_id, standard_id,
+                                     qty_factor, ai_reasoning, reasoning_chain, confidence, status, run_id,
+                                     work_procedure, factor_explanation)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ai', %s, %s, %s)
+                                ON CONFLICT (run_id, boq_item_id, quota_item_id) DO NOTHING
+                                RETURNING id
+                            """, (req.project_id, item_id, m.quota_item_id, q[4],
+                                  m.qty_factor, m.reasoning, m.reasoning_chain, m.confidence, run_id,
+                                  m.work_procedure, m.factor_explanation))
+                            row = cur.fetchone()
+                            if row:
+                                matched_count += 1
+                                saved_matches.append({
+                                    "quota_item_id": m.quota_item_id,
+                                    "quota_item_code": q[0],
+                                    "quota_item_name": q[1],
+                                    "quota_variant_desc": q[2],
+                                    "quota_unit": q[3],
+                                    "qty_factor": m.qty_factor,
+                                    "confidence": m.confidence,
+                                    "reasoning": m.reasoning,
+                                })
+                        cur.execute("UPDATE boq_match_runs SET matched_items=%s WHERE id=%s",
+                                    (matched_count, run_id))
+                    conn.commit()
+                    yield f"data: {json.dumps({'type':'slot_done','slot':slot,'boq_item_id':item_id,'item_name':item_name,'matches':saved_matches,'elapsed_ms':elapsed_ms}, ensure_ascii=False)}\n\n"
+
+                elif ev_type == 'slot_error':
+                    yield f"data: {json.dumps({'type':'slot_error','slot':ev['slot'],'boq_item_id':ev['id'],'item_name':ev['name'],'error':ev['error']}, ensure_ascii=False)}\n\n"
+
+                elif ev_type == 'slot_finished':
+                    finished_slots += 1
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE boq_match_runs SET status='done', matched_items=%s, finished_at=NOW() WHERE id=%s
+                """, (matched_count, run_id))
+            conn.commit()
+            yield f"data: {json.dumps({'type':'run_done','run_id':run_id,'total':total,'matched':matched_count}, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            try:
+                if run_id:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE boq_match_runs SET status='error', finished_at=NOW() WHERE id=%s", (run_id,))
+                    conn.commit()
+            except Exception:
+                pass
+            yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            conn.close()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── 调试批次 CRUD ────────────────────────────────────────────────────────────
 
 class DebugBatchCreate(BaseModel):
@@ -1159,6 +1343,7 @@ class DebugMatchRequest(BaseModel):
     standard_ids: list[int]
     manual_project_id: Optional[int] = None   # 提供则同步返回人工标准答案
     batch_id: Optional[int] = None            # 提供则推理完成后持久化结果
+    item_description_override: Optional[str] = None  # 前端临时覆盖项目特征描述
 
 
 @router.post("/boq/match-item-debug")
@@ -1187,6 +1372,9 @@ def match_item_debug(req: DebugMatchRequest):
                 "item_description": row[3], "unit": row[4],
                 "quantity": float(row[5]) if row[5] else None,
             }
+            # 前端临时覆盖项目特征描述（不写回 DB）
+            if req.item_description_override is not None:
+                boq_item["item_description"] = req.item_description_override
 
             # ── 2. 获取人工标准答案（按 item_code 匹配） ─────────────────────
             manual_quotas: list[dict] = []
@@ -1263,6 +1451,7 @@ def match_item_debug(req: DebugMatchRequest):
                         "work_procedure": m.work_procedure,
                         "factor_explanation": m.factor_explanation,
                         "reasoning": m.reasoning,
+                        "missing_info": m.missing_info,
                         "in_manual": in_manual,       # AI 匹配 + 人工也有 → ✅
                     })
 

@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { fetchBoqProjects, uploadBoqFile, BoqProject } from '@/lib/api'
 
 export default function BoqListPage() {
@@ -58,16 +59,21 @@ export default function BoqListPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">工程管理</h1>
-        <button
-          onClick={() => fileRef.current?.click()}
-          disabled={uploading}
-          className="px-4 py-2 bg-blue-700 text-white text-sm rounded hover:bg-blue-800 disabled:opacity-50 flex items-center gap-2"
-        >
-          {uploading
-            ? <><span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full" />上传中…</>
-            : '+ 上传工程清单'}
-        </button>
-        <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={onFile} />
+        <div className="flex items-center gap-2">
+          <Link href="/boq/prompt" className="px-3 py-2 border text-sm rounded text-gray-500 hover:bg-gray-50">
+            提示词模板
+          </Link>
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={uploading}
+            className="px-4 py-2 bg-blue-700 text-white text-sm rounded hover:bg-blue-800 disabled:opacity-50 flex items-center gap-2"
+          >
+            {uploading
+              ? <><span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full" />上传中…</>
+              : '+ 上传工程清单'}
+          </button>
+          <input ref={fileRef} type="file" accept=".xlsx" className="hidden" onChange={onFile} />
+        </div>
       </div>
 
       {/* 拖拽上传区（没有工程时显示大区域，有工程时只在顶部） */}

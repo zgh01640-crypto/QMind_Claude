@@ -82,6 +82,12 @@ function MatchRow({ m, expanded, onToggle }: {
         )}
         <span className="text-gray-400 text-xs">{expanded ? '▲' : '▼'}</span>
       </button>
+      {m.missing_info && (m.confidence === 'low' || m.confidence === 'medium') && (
+        <div className="px-3 py-1.5 bg-amber-50 border-t border-amber-100 flex items-start gap-1.5 text-xs text-amber-800">
+          <span className="flex-shrink-0">⚠️</span>
+          <span><span className="font-medium">缺少特征：</span>{m.missing_info}</span>
+        </div>
+      )}
       {expanded && (
         <div className="px-3 py-2 space-y-2 bg-white text-xs">
           {m.work_procedure && <p><span className="text-gray-500">🔨 工序：</span>{m.work_procedure}</p>}
@@ -202,6 +208,7 @@ export default function DebugWorkspacePage() {
 
   const [search, setSearch] = useState('')
   const [selectedItem, setSelectedItem] = useState<BoqItem | null>(null)
+  const [editedDescription, setEditedDescription] = useState<string | null>(null)
   const [state, setState] = useState<DebugState>(IDLE)
   const [expandedIdx, setExpandedIdx] = useState<Set<number>>(new Set())
   const [showReasoning, setShowReasoning] = useState(false)
@@ -279,13 +286,15 @@ export default function DebugWorkspacePage() {
           }
         },
         bid,
+        editedDescription,
       )
     } catch (e: unknown) {
       setState(s => ({ ...s, phase: 'error', error: e instanceof Error ? e.message : '匹配失败' }))
     }
   }
 
-  const descLen = selectedItem?.item_description?.length ?? 0
+  const activeDesc = editedDescription ?? selectedItem?.item_description ?? ''
+  const descLen = activeDesc.length
   const descWarning = descLen === 0 ? '⚠️ 无项目特征描述' : descLen < 30 ? '⚠️ 描述较短' : null
 
   if (!batch) {
@@ -334,6 +343,7 @@ export default function DebugWorkspacePage() {
                     onClick={() => {
                       setSelectedItem(item)
                       setState(savedStates.get(item.id) ?? IDLE)
+                      setEditedDescription(null)
                       setExpandedIdx(new Set())
                       setShowReasoning(false)
                     }}
@@ -342,9 +352,12 @@ export default function DebugWorkspacePage() {
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-xs text-gray-400 flex-shrink-0">{item.item_code}</span>
                       <span className="text-sm text-gray-800 truncate">{item.item_name}</span>
-                      {saved && (
-                        <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0 ml-auto" title={`已推理 ${saved.ranAt ? new Date(saved.ranAt).toLocaleString('zh-CN') : ''}`} />
-                      )}
+                      {saved && (() => {
+                        const hasLow = saved.matches.some(m => (m.confidence === 'low' || m.confidence === 'medium') && m.missing_info)
+                        return hasLow
+                          ? <span className="w-4 h-4 flex-shrink-0 ml-auto text-amber-500 text-xs leading-none" title="有低置信度匹配，缺少特征">⚠</span>
+                          : <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0 ml-auto" title={`已推理 ${saved.ranAt ? new Date(saved.ranAt).toLocaleString('zh-CN') : ''}`} />
+                      })()}
                     </div>
                     {!item.item_description && (
                       <span className="text-xs text-amber-500">⚠ 无项目特征</span>
@@ -372,10 +385,23 @@ export default function DebugWorkspacePage() {
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs text-gray-500 font-medium">项目特征描述</span>
                   {descWarning && <span className="text-xs text-amber-500">{descWarning}</span>}
+                  {editedDescription !== null && (
+                    <>
+                      <span className="text-xs bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded">已修改</span>
+                      <button
+                        onClick={() => setEditedDescription(null)}
+                        className="text-xs text-gray-400 hover:text-gray-600 underline"
+                      >还原</button>
+                    </>
+                  )}
                 </div>
-                <p className="text-xs text-gray-700 whitespace-pre-wrap border border-gray-100 rounded p-2 bg-gray-50">
-                  {selectedItem.item_description || '（无）'}
-                </p>
+                <textarea
+                  rows={5}
+                  value={editedDescription ?? (selectedItem.item_description || '')}
+                  onChange={e => setEditedDescription(e.target.value)}
+                  placeholder="（无项目特征，可在此补充后重新推理）"
+                  className="w-full text-xs text-gray-700 border border-gray-200 rounded p-2 bg-gray-50 resize-y focus:outline-none focus:border-indigo-300 focus:bg-white"
+                />
               </div>
 
               {state.phase === 'done' && state.manualQuotas.length > 0 && (

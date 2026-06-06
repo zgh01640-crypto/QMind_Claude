@@ -78,6 +78,23 @@ Step 6: 输出结果，调用 submit_matches
 4. 单位相同或可换算
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【置信度与缺失信息规则】
+
+■ confidence 赋值标准：
+  - high：项目特征完整，材料品种/规格/工艺与定额完全对应
+  - medium：主要特征匹配，但有1项次要特征未明确（如砂浆标号缺失）
+  - low：关键特征缺失或模糊，无法确定正确变体，只能猜测
+
+■ 当 confidence 为 low 或 medium 时，missing_info 字段必须填写：
+  - 明确说明缺少哪些项目特征，用简短词组
+  - 示例：
+    × 错误（太模糊）："信息不足"
+    √ 正确（具体）："未注明混凝土强度等级（C25/C30/C35）"
+    √ 正确（具体）："砌筑砂浆品种未说明（湿拌 vs 干混）"
+    √ 正确（具体）："钢筋直径范围不明（影响制作子目选择）"
+  - confidence 为 high 时 missing_info 填空字符串 ""
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【返回空数组的情形（宁缺毋滥）】
 
 - 定额库无对应章节（土方、装饰等）
@@ -141,6 +158,7 @@ class MatchResult:
     confidence: str           # high / medium / low
     work_procedure: str = ""  # 施工工序名称
     factor_explanation: str = ""  # qty_factor 换算说明
+    missing_info: str = ""    # 缺少的项目特征（low/medium 时必填）
     cache_hit_tokens: int = 0
 
 
@@ -182,11 +200,15 @@ _MATCH_TOOL = {
                             "confidence": {
                                 "type": "string",
                                 "enum": ["high", "medium", "low"],
-                                "description": "匹配置信度：high=特征完全吻合，medium=基本符合，low=勉强对应"
+                                "description": "匹配置信度：high=项目特征完整且与定额完全对应；medium=主要特征匹配但有次要特征未明确；low=关键特征缺失或模糊，只能猜测变体"
+                            },
+                            "missing_info": {
+                                "type": "string",
+                                "description": "confidence 为 low 或 medium 时，简明说明缺少哪些项目特征（如：未注明混凝土强度等级、砌筑砂浆品种不明）；confidence 为 high 时必须填空字符串"
                             },
                         },
                         "required": ["quota_item_id", "qty_factor", "work_procedure",
-                                     "factor_explanation", "reasoning", "confidence"],
+                                     "factor_explanation", "reasoning", "confidence", "missing_info"],
                         "additionalProperties": False,
                     },
                 }
@@ -293,6 +315,7 @@ def _parse_matches(raw_matches: list, reasoning_chain: str, cache_hit: int) -> l
             confidence=m.get("confidence", "medium"),
             work_procedure=m.get("work_procedure", ""),
             factor_explanation=m.get("factor_explanation", ""),
+            missing_info=m.get("missing_info", ""),
             cache_hit_tokens=cache_hit,
         ))
     return results

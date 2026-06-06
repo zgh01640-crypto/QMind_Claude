@@ -451,6 +451,47 @@ export const matchBoqItem = (boq_item_id: number, standard_id: number) =>
     body: JSON.stringify({ boq_item_id, standard_id }),
   })
 
+// ── 并行套定额 ──────────────────────────────────────────
+
+export type ParallelStreamEvent =
+  | { type: 'run_start'; run_id: number; total: number; slots: number }
+  | { type: 'slot_start'; slot: number; boq_item_id: number; item_name: string }
+  | { type: 'slot_done'; slot: number; boq_item_id: number; item_name: string; matches: StreamMatch[]; elapsed_ms: number }
+  | { type: 'slot_error'; slot: number; boq_item_id: number; item_name: string; error: string }
+  | { type: 'run_done'; run_id: number; total: number; matched: number }
+  | { type: 'run_error'; error: string }
+
+export async function streamMatchBoqProjectParallel(
+  project_id: number,
+  standard_ids: number[],
+  run_name: string,
+  concurrency: number,
+  onEvent: (e: ParallelStreamEvent) => void,
+): Promise<void> {
+  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const res = await fetch(`${API}/api/boq/match-project-parallel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id, standard_ids, run_name, concurrency }),
+  })
+  if (!res.ok) throw new Error(`请求失败 ${res.status}`)
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6)) as ParallelStreamEvent) } catch { /* skip */ }
+      }
+    }
+  }
+}
+
 export const startMatchBoqProject = (project_id: number, standard_id: number) =>
   req<{ run_id: number; status: string; total: number }>('/api/boq/match-project', {
     method: 'POST',
@@ -698,6 +739,7 @@ export interface DebugMatchQuota {
   work_procedure: string | null
   factor_explanation: string | null
   reasoning: string | null
+  missing_info: string | null  // 缺少的项目特征（low/medium 时非空）
   in_manual: boolean    // AI 匹配的，人工也有 → ✅
 }
 
@@ -714,12 +756,13 @@ export async function streamDebugMatch(
   manual_project_id: number | null,
   onEvent: (e: DebugMatchEvent) => void,
   batch_id?: number,
+  item_description_override?: string | null,
 ): Promise<void> {
   const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
   const res = await fetch(`${API}/api/boq/match-item-debug`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ boq_item_id, standard_ids, manual_project_id, batch_id }),
+    body: JSON.stringify({ boq_item_id, standard_ids, manual_project_id, batch_id, item_description_override: item_description_override ?? null }),
   })
   if (!res.ok) throw new Error(`请求失败 ${res.status}`)
   const reader = res.body!.getReader()

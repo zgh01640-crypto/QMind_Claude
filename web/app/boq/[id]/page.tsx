@@ -287,10 +287,18 @@ export default function BoqDetailPage() {
   return (
     <div>
       {/* 面包屑 */}
-      <div className="flex items-center gap-1.5 text-sm text-gray-500 mb-4">
-        <Link href="/boq" className="hover:text-blue-600">工程管理</Link>
-        <span>/</span>
-        <span className="text-gray-800 font-medium">{project.project_name}</span>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-1.5 text-sm text-gray-500">
+          <Link href="/boq" className="hover:text-blue-600">工程管理</Link>
+          <span>/</span>
+          <span className="text-gray-800 font-medium">{project.project_name}</span>
+        </div>
+        <Link
+          href={`/boq/${projectId}/parallel`}
+          className="px-3 py-1.5 border border-indigo-300 text-indigo-600 text-sm rounded hover:bg-indigo-50"
+        >
+          ⚡ 并行套定额
+        </Link>
       </div>
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 text-sm">{error}</div>}
