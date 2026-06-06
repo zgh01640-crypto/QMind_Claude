@@ -17,10 +17,15 @@ import argparse
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+import io
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 import os
+
+# 修复 Windows 编码问题
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # PyMuPDF 渲染
 try:

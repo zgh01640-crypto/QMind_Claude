@@ -87,12 +87,13 @@ class Quota2024Parser:
         return base64.standard_b64encode(img_bytes).decode('utf-8')
 
     def call_zhipu_api(self, img_b64: str, prompt: str, max_tokens: int = 2048) -> str:
-        """调用智谱 API"""
+        """调用智谱 API - GLM-5V-Turbo"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
 
+        # 智谱 GLM-5V-Turbo 的正确消息格式
         payload = {
             "model": self.model,
             "messages": [
@@ -118,16 +119,30 @@ class Quota2024Parser:
                 f"{self.api_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=60
+                timeout=120  # 图像处理需要更长的超时
             )
-            response.raise_for_status()
+
+            if response.status_code != 200:
+                error_text = response.text
+                print(f"[ERROR] 智谱 API 返回 {response.status_code}: {error_text[:500]}")
+                return None
+
             result = response.json()
 
+            # 检查是否有错误
+            if "error" in result:
+                print(f"[ERROR] 智谱 API 错误: {result['error']}")
+                return None
+
             if "choices" in result and len(result["choices"]) > 0:
-                return result["choices"][0]["message"]["content"].strip()
+                content = result["choices"][0]["message"]["content"]
+                return content.strip() if isinstance(content, str) else str(content).strip()
             else:
                 print(f"[ERROR] 智谱 API 响应异常: {result}")
                 return None
+        except requests.exceptions.Timeout:
+            print(f"[ERROR] 调用智谱 API 超时 (120秒)")
+            return None
         except Exception as e:
             print(f"[ERROR] 调用智谱 API 失败: {e}")
             return None
