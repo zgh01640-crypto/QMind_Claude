@@ -28,7 +28,7 @@ def get_prompt_template():
 # ── 上传 BOQ ──────────────────────────────────────────────────────────────────
 
 @router.post("/boq/upload", response_model=BoqProject)
-def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False):
+def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project_name: Optional[str] = None):
     """上传 .xlsx 文件，解析并入库，返回 BoqProject。"""
     from importer.boq_parser import parse_boq_workbook
     from importer import boq_loader
@@ -59,9 +59,12 @@ def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False):
         finally:
             os.unlink(tmp_path)
 
+        # 使用用户提供的项目名称，或使用文件中解析的名称
+        final_project_name = project_name if project_name else project_info["project_name"]
+
         project_id = boq_loader.insert_project(
             conn,
-            project_info["project_name"],
+            final_project_name,
             project_info.get("bid_section"),
             filename,
             None,  # tag

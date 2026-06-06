@@ -11,7 +11,11 @@ export default function BoqListPage() {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [drag, setDrag] = useState(false)
+  const [showUploadDialog, setShowUploadDialog] = useState(false)
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [projectName, setProjectName] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const nameInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     fetchBoqProjects()
@@ -19,21 +23,35 @@ export default function BoqListPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const doUpload = async (file: File, force = false) => {
+  const openUploadDialog = (file: File) => {
     if (!file.name.endsWith('.xlsx')) {
       setUploadError('请上传 .xlsx 格式的工程量清单文件')
       return
     }
+    // 以文件名作为默认项目名（去掉扩展名）
+    const defaultName = file.name.replace(/\.xlsx$/, '')
+    setProjectName(defaultName)
+    setPendingFile(file)
+    setShowUploadDialog(true)
+    setUploadError('')
+    setTimeout(() => nameInputRef.current?.select(), 0)
+  }
+
+  const doUpload = async (force = false) => {
+    if (!pendingFile) return
+
     setUploading(true); setUploadError('')
     try {
-      const proj = await uploadBoqFile(file, force)
+      const proj = await uploadBoqFile(pendingFile, force, projectName)
       setProjects(prev => [proj, ...prev.filter(p => p.id !== proj.id)])
+      setShowUploadDialog(false)
+      setPendingFile(null)
       router.push(`/boq/${proj.id}`)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       if (msg.includes('409') || msg.includes('已存在')) {
         if (confirm(`该文件已导入过，是否强制重新导入？`)) {
-          await doUpload(file, true)
+          await doUpload(true)
         }
       } else {
         setUploadError(msg)
@@ -45,14 +63,14 @@ export default function BoqListPage() {
 
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
-    if (f) doUpload(f)
+    if (f) openUploadDialog(f)
     e.target.value = ''
   }
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDrag(false)
     const f = e.dataTransfer.files?.[0]
-    if (f) doUpload(f)
+    if (f) openUploadDialog(f)
   }
 
   return (
@@ -137,6 +155,60 @@ export default function BoqListPage() {
           }`}
         >
           拖拽文件到此处导入新工程
+        </div>
+      )}
+
+      {/* 上传对话框 */}
+      {showUploadDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-lg max-w-md w-full mx-4 p-6">
+            <h2 className="text-lg font-semibold text-gray-800 mb-4">上传工程清单</h2>
+            <div className="mb-4">
+              <div className="text-sm text-gray-600 mb-2">文件：<span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded">{pendingFile?.name}</span></div>
+              <div className="mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-2">工程名称</label>
+                <input
+                  ref={nameInputRef}
+                  type="text"
+                  value={projectName}
+                  onChange={e => setProjectName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && projectName.trim()) {
+                      doUpload()
+                    }
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="输入工程名称"
+                />
+              </div>
+              {uploadError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">{uploadError}</div>
+              )}
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowUploadDialog(false)
+                  setPendingFile(null)
+                  setProjectName('')
+                  setUploadError('')
+                }}
+                disabled={uploading}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => doUpload()}
+                disabled={uploading || !projectName.trim()}
+                className="px-4 py-2 bg-blue-700 text-white rounded-lg hover:bg-blue-800 disabled:opacity-50 flex items-center gap-2"
+              >
+                {uploading
+                  ? <><span className="animate-spin inline-block w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full" />上传中…</>
+                  : '上传'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

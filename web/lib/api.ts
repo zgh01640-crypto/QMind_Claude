@@ -385,9 +385,10 @@ export interface BoqMatchRun {
   finished_at: string | null
 }
 
-export const uploadBoqFile = (file: File, force = false): Promise<BoqProject> => {
+export const uploadBoqFile = (file: File, force = false, projectName?: string): Promise<BoqProject> => {
   const form = new FormData()
   form.append('file', file)
+  if (projectName) form.append('project_name', projectName)
   return req<BoqProject>(`/api/boq/upload?force=${force}`, { method: 'POST', body: form })
 }
 
@@ -438,12 +439,110 @@ export async function streamMatchBoqProject(
     buf += decoder.decode(value, { stream: true })
     const lines = buf.split('\n')
     buf = lines.pop() ?? ''
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try { onEvent(JSON.parse(line.slice(6)) as StreamEvent) } catch { /* skip */ }
-      }
     }
   }
+}
+
+// ── 消耗量标准 2024 接口 ────────────────────────────────────────────
+
+export interface Quota2024Standard {
+  id: number
+  standard_code: string
+  name: string
+  region: string | null
+  base_date: string | null
+  source_file: string | null
+  imported_at: string
+}
+
+export interface Quota2024Chapter {
+  id: number
+  chapter_no: number
+  code: string | null
+  name: string
+  sort_order: number
+}
+
+export interface Quota2024Section {
+  id: number
+  section_type: 'intro' | 'rules' | 'items'
+  section_code: string | null
+  title: string
+  content_md: string | null
+  page_start: number | null
+  page_end: number | null
+}
+
+export interface Quota2024Resource {
+  id: number
+  resource_type: string
+  resource_name: string
+  unit: string | null
+  quantity: number | null
+  ref_price: number | null
+}
+
+export interface Quota2024SubItem {
+  id: number
+  subitem_code: string
+  subitem_name: string | null
+  variant_desc: string | null
+  total_unit_price: number | null
+  unit_price: number | null
+  labor_cost: number | null
+  material_cost: number | null
+  machine_cost: number | null
+  management_fee: number | null
+  profit: number | null
+  safety_fee: number | null
+  statutory_fee: number | null
+  tax: number | null
+  resources: Quota2024Resource[]
+}
+
+export interface Quota2024Item {
+  id: number
+  item_no: number | null
+  item_name: string
+  work_content: string | null
+  unit: string | null
+  subitems: Quota2024SubItem[]
+}
+
+export interface Quota2024Group {
+  id: number
+  group_code: string | null
+  group_name: string
+  sort_order: number
+  items: Quota2024Item[]
+}
+
+export interface Quota2024ChapterDetail {
+  chapter: Quota2024Chapter
+  sections: Quota2024Section[]
+}
+
+export const fetchQuota2024Standards = () => req<Quota2024Standard[]>('/api/quota2024/standards')
+
+export const fetchQuota2024Chapters = (standardId: number) =>
+  req<Quota2024Chapter[]>(`/api/quota2024/chapters?standard_id=${standardId}`)
+
+export const fetchQuota2024ChapterSections = (chapterId: number) =>
+  req<Quota2024ChapterDetail>(`/api/quota2024/chapters/${chapterId}/sections`)
+
+export const fetchQuota2024Groups = (sectionId: number) =>
+  req<Quota2024Group[]>(`/api/quota2024/sections/${sectionId}/groups`)
+
+export const fetchQuota2024Items = (groupId: number) =>
+  req<Quota2024Group>(`/api/quota2024/groups/${groupId}/items`)
+
+export const fetchQuota2024SubItem = (subitemId: number) =>
+  req<Quota2024SubItem>(`/api/quota2024/subitems/${subitemId}`)
+
+export function searchQuota2024(q: string, standardId: number) {
+  return req<Array<{ id: number; code: string; item_name: string; variant_desc: string | null }>>(
+    `/api/quota2024/search?q=${encodeURIComponent(q)}&standard_id=${standardId}`
+  )
 }
 
 export const matchBoqItem = (boq_item_id: number, standard_id: number) =>
