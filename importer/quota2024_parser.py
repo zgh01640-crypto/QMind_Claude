@@ -87,11 +87,17 @@ class Quota2024Parser:
         return base64.standard_b64encode(img_bytes).decode('utf-8')
 
     def call_zhipu_api(self, img_b64: str, prompt: str, max_tokens: int = 2048) -> str:
-        """调用智谱 API - GLM-5V-Turbo"""
+        """调用智谱 API - GLM-5V-Turbo
+
+        根据官方文档，使用 file_url 类型处理图像
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+
+        # 构建 data URL 格式
+        image_url = f"data:image/png;base64,{img_b64}"
 
         # 智谱 GLM-5V-Turbo 的正确消息格式
         payload = {
@@ -101,8 +107,10 @@ class Quota2024Parser:
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "image": img_b64
+                            "type": "file_url",  # 关键：用 file_url 而不是 image
+                            "file_url": {
+                                "url": image_url  # 套在 file_url 对象中
+                            }
                         },
                         {
                             "type": "text",
@@ -119,7 +127,7 @@ class Quota2024Parser:
                 f"{self.api_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=120  # 图像处理需要更长的超时
+                timeout=120
             )
 
             if response.status_code != 200:
