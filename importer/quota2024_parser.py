@@ -1,14 +1,14 @@
 """
 OCR 和数据提取逻辑 - 消耗量标准 2024
 
-使用 Claude Vision 进行 OCR 和结构化解析。
+使用智谱 GLM-5V-Turbo 进行 OCR 和结构化解析。
 """
 
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Literal
 import json
 import base64
-import anthropic
+import requests
 
 
 # ============ 数据结构 ============
@@ -72,18 +72,65 @@ class GroupBlock:
     items: list[ItemTable] = field(default_factory=list)
 
 
-# ============ Claude API 调用 ============
+# ============ 智谱 API 调用 ============
 
 class Quota2024Parser:
-    """使用 Claude 的 OCR 解析器"""
+    """使用智谱 GLM-5V-Turbo 的 OCR 解析器"""
 
-    def __init__(self):
-        self.client = anthropic.Anthropic()
-        self.model = "claude-haiku-4-5"
+    def __init__(self, api_key: str = None, api_url: str = None):
+        self.api_key = api_key or "3ff8bdb6f49c4be3b8adeae253bd6344.Fev0mhHjG5ZEghuY"
+        self.api_url = api_url or "https://open.bigmodel.cn/api/paas/v4"
+        self.model = "GLM-5V-Turbo"
 
     def img_to_base64(self, img_bytes: bytes) -> str:
         """图片字节转 base64"""
         return base64.standard_b64encode(img_bytes).decode('utf-8')
+
+    def call_zhipu_api(self, img_b64: str, prompt: str, max_tokens: int = 2048) -> str:
+        """调用智谱 API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": img_b64
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": max_tokens
+        }
+
+        try:
+            response = requests.post(
+                f"{self.api_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "choices" in result and len(result["choices"]) > 0:
+                return result["choices"][0]["message"]["content"].strip()
+            else:
+                print(f"[ERROR] 智谱 API 响应异常: {result}")
+                return None
+        except Exception as e:
+            print(f"[ERROR] 调用智谱 API 失败: {e}")
+            return None
 
     def detect_boundaries(self, img_bytes: bytes, page_no: int) -> Optional[PageMap]:
         """
@@ -110,33 +157,14 @@ class Quota2024Parser:
   "chapter_name": "章名" 或 null,
   "section_type": "intro" | "rules" | "items" | null,
   "section_code": "X.Y" 或 null,
-  "title": "节标题" 或 null,
-  "confidence": "high" | "medium" | "low"
-}
-
-如果无法确定某个字段，设为 null。"""
+  "title": "节标题" 或 null
+}"""
 
         try:
-            msg = self.client.messages.create(
-                model=self.model,
-                max_tokens=512,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": b64
-                            }
-                        },
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            )
+            text = self.call_zhipu_api(b64, prompt, max_tokens=512)
+            if not text:
+                return None
 
-            text = msg.content[0].text.strip()
             # 提取 JSON
             try:
                 data = json.loads(text)
@@ -195,26 +223,8 @@ class Quota2024Parser:
 | 值1 | 值2 | 值3 |"""
 
         try:
-            msg = self.client.messages.create(
-                model=self.model,
-                max_tokens=2048,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": b64
-                            }
-                        },
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            )
-
-            return msg.content[0].text.strip()
+            text = self.call_zhipu_api(b64, prompt, max_tokens=3000)
+            return text if text else None
 
         except Exception as e:
             print(f"[ERROR] 文本提取失败: {e}")
@@ -308,26 +318,11 @@ class Quota2024Parser:
 )
 
         try:
-            msg = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": b64
-                            }
-                        },
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            )
-
-            text = msg.content[0].text.strip()
+            text = self.call_zhipu_api(b64, prompt, max_tokens=4096)
+            if not text:
+                if retry_count < 2:
+                    return self.extract_table(img_bytes, retry_count + 1)
+                return None
 
             # 尝试解析 JSON
             try:
@@ -382,3 +377,4 @@ class Quota2024Parser:
             if retry_count < 2:
                 return self.extract_table(img_bytes, retry_count + 1)
             return None
+

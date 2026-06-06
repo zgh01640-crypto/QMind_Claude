@@ -7,4 +7,4 @@ python-multipart
 python-docx
 openai
 pymupdf
-anthropic
+requests
