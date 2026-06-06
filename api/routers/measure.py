@@ -35,7 +35,7 @@ def get_measure_sections(standard_id: int = Query(...)):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, code, name, level, parent_id, sort_order, num_code
+                SELECT id, code, name, level, parent_id, sort_order, num_code, description
                 FROM measure_sections
                 WHERE standard_id = %s
                 ORDER BY sort_order
@@ -43,7 +43,7 @@ def get_measure_sections(standard_id: int = Query(...)):
             rows = cur.fetchall()
         return [
             MeasureSection(id=r[0], code=r[1], name=r[2], level=r[3],
-                           parent_id=r[4], sort_order=r[5], num_code=r[6])
+                           parent_id=r[4], sort_order=r[5], num_code=r[6], description=r[7])
             for r in rows
         ]
     finally:

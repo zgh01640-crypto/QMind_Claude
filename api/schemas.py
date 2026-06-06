@@ -132,6 +132,7 @@ class MeasureSection(BaseModel):
     parent_id: Optional[int]
     sort_order: int
     num_code: Optional[str] = None
+    description: Optional[str] = None
 
 
 class MeasureItem(BaseModel):

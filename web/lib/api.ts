@@ -201,6 +201,7 @@ export interface MeasureSection {
   parent_id: number | null
   sort_order: number
   num_code?: string | null
+  description?: string | null
 }
 
 export interface MeasureItem {

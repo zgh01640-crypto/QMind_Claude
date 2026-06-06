@@ -277,6 +277,15 @@ export default function MeasurePage() {
                             <span className="ml-auto text-xs text-gray-400 flex-shrink-0">{secItems.length} 条</span>
                           </button>
 
+                          {/* ── 节描述文字（如：其他规定）──────────────── */}
+                          {secOpen && section.description && (
+                            <div className="pl-14 pr-4 py-3 bg-amber-50/40 border-b border-amber-100/60">
+                              <pre className="text-xs text-gray-600 whitespace-pre-wrap leading-relaxed font-sans">
+                                {section.description}
+                              </pre>
+                            </div>
+                          )}
+
                           {/* ── 清单项目行 ─────────────────────────────── */}
                           {secOpen && secItems.length > 0 && (
                             <div>

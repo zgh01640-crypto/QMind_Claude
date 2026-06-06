@@ -46,6 +46,9 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
     current_section_code:  str | None = None   # e.g. "A.1"
     pending_section_code:  str | None = None   # 表格前最近一次 "表 X.Y.Z" 的 X.Y 部分
     section_num_code: dict[str, str] = {}      # alpha_code → 6位数字编码, e.g. "A.1" → "010101"
+    section_descriptions: dict[str, str] = {} # alpha_code → 收集到的文字段落
+    desc_lines: list[str] = []                 # 当前节正在收集的段落行
+    desc_target: str | None = None             # 当前收集目标节的 code
 
     # 附录→节 的父子关系在 sections 列表中按插入顺序体现
     # 用 dict 快速查父
@@ -83,6 +86,9 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
 
             m = _RE_APPENDIX.match(text)
             if m:
+                if desc_target and desc_lines:
+                    section_descriptions[desc_target] = '\n'.join(desc_lines)
+                desc_lines = []; desc_target = None
                 code = m.group(1)
                 name = _clean(m.group(2))
                 current_appendix_code = code
@@ -93,11 +99,15 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
 
             m = _RE_SECTION.match(text)
             if m:
+                if desc_target and desc_lines:
+                    section_descriptions[desc_target] = '\n'.join(desc_lines)
+                desc_lines = []
                 code = m.group(1)
                 name = _clean(m.group(2))
                 # 父是对应附录（code 前缀字母）
                 parent = code.split('.')[0]
                 current_section_code = code
+                desc_target = code
                 sections.append({'code': code, 'name': name, 'level': 2, 'parent_code': parent})
                 section_by_code[code] = parent
                 continue
@@ -113,6 +123,10 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
                 if pending_section_code:
                     section_num_code[pending_section_code] = num_code
                 continue
+
+            # 普通文字段落 — 收集为所属节的描述
+            if desc_target:
+                desc_lines.append(text)
 
         else:  # kind == 't'
             table = node
@@ -163,8 +177,13 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
                     'work_content':  norm(work_content) or None,
                 })
 
+    # 收尾：flush 最后一个节的描述
+    if desc_target and desc_lines:
+        section_descriptions[desc_target] = '\n'.join(desc_lines)
+
     for s in sections:
         s['num_code'] = section_num_code.get(s['code'])
+        s['description'] = section_descriptions.get(s['code']) or None
     return sections, items
 
 
