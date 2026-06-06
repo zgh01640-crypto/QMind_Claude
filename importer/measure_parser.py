@@ -23,6 +23,19 @@ from docx import Document
 
 _RE_APPENDIX = re.compile(r'^附录\s*([A-Z])\s+(.+)$')
 _RE_SECTION  = re.compile(r'^([A-Z]\.\d+)\s+(.+)$')
+
+
+def _table_to_markdown(table) -> str:
+    """将 DOCX 表格转为 Markdown 表格格式，跳过全空行。"""
+    lines = []
+    for i, row in enumerate(table.rows):
+        cells = [_clean(c.text).replace('|', '｜') for c in row.cells]
+        if not any(cells):
+            continue
+        lines.append('| ' + ' | '.join(cells) + ' |')
+        if i == 0:
+            lines.append('|' + ' --- |' * len(cells))
+    return '\n'.join(lines)
 _RE_TABLE_HDR = re.compile(r'表\s*([A-Z]\.\d+\.\d+).*?编码[：:]\s*(\d{6})')
 _RE_ITEM_CODE = re.compile(r'^\d{9}$')
 
@@ -140,42 +153,38 @@ def parse_docx(filepath: str) -> tuple[list[dict], list[dict]]:
             # 判断是否是清单表（首行/列头含"项目编码"）
             header_row = rows[0]
             header_cells = [_clean(c.text) for c in header_row.cells]
-            is_header = any('项目编码' in hc or '项目名称' in hc for hc in header_cells)
+            is_boq = any('项目编码' in hc or '项目名称' in hc for hc in header_cells)
 
-            start_row = 1 if is_header else 0
-
-            for row in rows[start_row:]:
-                cells = [_clean(c.text) for c in row.cells]
-                if len(cells) < 2:
-                    continue
-                code_cell = cells[0] if len(cells) > 0 else ''
-                name_cell = cells[1] if len(cells) > 1 else ''
-
-                # 跳过合并行（code列为空 or 不是9位编码）
-                if not _RE_ITEM_CODE.match(code_cell.replace(' ', '')):
-                    continue
-
-                item_code = code_cell.replace(' ', '')
-                item_name = name_cell
-
-                item_features = cells[2] if len(cells) > 2 else ''
-                unit          = cells[3] if len(cells) > 3 else ''
-                calc_rule     = cells[4] if len(cells) > 4 else ''
-                work_content  = cells[5] if len(cells) > 5 else ''
-
-                # 去除重复空格/换行
+            if is_boq:
+                # ── 清单表：解析为 measure_items ─────────────────────────────
                 def norm(s: str) -> str:
                     return re.sub(r'\s+', ' ', s).strip()
 
-                items.append({
-                    'section_code':  sec_code,
-                    'item_code':     item_code,
-                    'item_name':     norm(item_name),
-                    'item_features': norm(item_features) or None,
-                    'unit':          norm(unit) or None,
-                    'calc_rule':     norm(calc_rule) or None,
-                    'work_content':  norm(work_content) or None,
-                })
+                for row in rows[1:]:
+                    cells = [_clean(c.text) for c in row.cells]
+                    if len(cells) < 2:
+                        continue
+                    code_cell = cells[0] if len(cells) > 0 else ''
+                    name_cell = cells[1] if len(cells) > 1 else ''
+
+                    if not _RE_ITEM_CODE.match(code_cell.replace(' ', '')):
+                        continue
+
+                    items.append({
+                        'section_code':  sec_code,
+                        'item_code':     code_cell.replace(' ', ''),
+                        'item_name':     norm(name_cell),
+                        'item_features': norm(cells[2]) if len(cells) > 2 else None or None,
+                        'unit':          norm(cells[3]) if len(cells) > 3 else None or None,
+                        'calc_rule':     norm(cells[4]) if len(cells) > 4 else None or None,
+                        'work_content':  norm(cells[5]) if len(cells) > 5 else None or None,
+                    })
+
+            elif desc_target:
+                # ── 非清单表：转 Markdown 追加到节描述 ───────────────────────
+                md = _table_to_markdown(table)
+                if md:
+                    desc_lines.append(md)
 
     # 收尾：flush 最后一个节的描述
     if desc_target and desc_lines:

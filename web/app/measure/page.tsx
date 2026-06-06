@@ -30,6 +30,62 @@ function groupItems(items: MeasureItem[], sections: MeasureSection[]) {
   return grouped
 }
 
+// ── 描述块（支持 Markdown 表格）─────────────────────────────────────────────
+
+function DescriptionBlock({ text }: { text: string }) {
+  // 把内容按"是否为 markdown 表格行"分段
+  const blocks: { type: 'text' | 'table'; lines: string[] }[] = []
+  let cur: { type: 'text' | 'table'; lines: string[] } = { type: 'text', lines: [] }
+  for (const line of text.split('\n')) {
+    const isTableLine = line.startsWith('|')
+    const isSep = /^\|[\s-|]+\|$/.test(line)
+    if (isSep) continue  // 跳过 ---分隔行
+    if (isTableLine) {
+      if (cur.type !== 'table') { if (cur.lines.length) blocks.push(cur); cur = { type: 'table', lines: [] } }
+      cur.lines.push(line)
+    } else {
+      if (cur.type !== 'text') { if (cur.lines.length) blocks.push(cur); cur = { type: 'text', lines: [] } }
+      cur.lines.push(line)
+    }
+  }
+  if (cur.lines.length) blocks.push(cur)
+
+  return (
+    <div className="space-y-2">
+      {blocks.map((b, i) => {
+        if (b.type === 'text') {
+          const content = b.lines.join('\n').trim()
+          if (!content) return null
+          return <pre key={i} className="text-xs text-gray-600 whitespace-pre-wrap leading-relaxed font-sans">{content}</pre>
+        }
+        // 表格
+        const rows = b.lines.map(l =>
+          l.split('|').slice(1, -1).map(c => c.trim())
+        )
+        if (!rows.length) return null
+        return (
+          <table key={i} className="text-xs border-collapse w-full">
+            <thead>
+              <tr>{rows[0].map((c, ci) => (
+                <th key={ci} className="border border-amber-200 bg-amber-100/70 px-2 py-1 text-left font-medium text-gray-700">{c}</th>
+              ))}</tr>
+            </thead>
+            <tbody>
+              {rows.slice(1).map((row, ri) => (
+                <tr key={ri} className="border-t border-amber-100">
+                  {row.map((c, ci) => (
+                    <td key={ci} className="border border-amber-100 px-2 py-1 text-gray-600 align-top">{c}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── 详情面板 ─────────────────────────────────────────────────────────────────
 
 function DetailPanel({ item }: { item: MeasureItem }) {
@@ -280,9 +336,7 @@ export default function MeasurePage() {
                           {/* ── 节描述文字（如：其他规定）──────────────── */}
                           {secOpen && section.description && (
                             <div className="pl-14 pr-4 py-3 bg-amber-50/40 border-b border-amber-100/60">
-                              <pre className="text-xs text-gray-600 whitespace-pre-wrap leading-relaxed font-sans">
-                                {section.description}
-                              </pre>
+                              <DescriptionBlock text={section.description} />
                             </div>
                           )}
 
