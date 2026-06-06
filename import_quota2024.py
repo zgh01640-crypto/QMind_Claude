@@ -16,6 +16,7 @@ import time
 import argparse
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
@@ -136,9 +137,6 @@ class CheckpointManager:
             print(f"[ERROR] 保存检查点失败: {e}")
 
 
-from dataclasses import dataclass
-
-
 # ============ 数据库操作 ============
 
 def get_or_create_standard(conn, standard_code: str, name: str, region: str, source_file: str) -> int:
@@ -257,6 +255,7 @@ def insert_groups_and_items(conn, section_id: int, groups: list[GroupBlock]):
 
             # 插入工料机
             if item.resources:
+                resource_rows = []
                 for res_idx, resource in enumerate(item.resources):
                     # 对每个有消耗量的子目插入一条工料机记录
                     for subitem_code, quantity in resource.quantities.items():
@@ -268,15 +267,22 @@ def insert_groups_and_items(conn, section_id: int, groups: list[GroupBlock]):
                         result = conn_cursor.fetchone()
                         if result:
                             subitem_id = result[0]
-                            conn_cursor.execute(
-                                """
-                                INSERT INTO quota2024_resources
-                                  (subitem_id, resource_type, resource_name, unit, quantity, ref_price, sort_order)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                """,
-                                (subitem_id, resource.resource_type, resource.resource_name,
-                                 resource.unit, quantity, resource.ref_price, res_idx)
-                            )
+                            resource_rows.append((
+                                subitem_id, resource.resource_type, resource.resource_name,
+                                resource.unit, quantity, resource.ref_price, res_idx
+                            ))
+
+                # 批量插入工料机
+                if resource_rows:
+                    psycopg2.extras.execute_values(
+                        conn_cursor,
+                        """
+                        INSERT INTO quota2024_resources
+                          (subitem_id, resource_type, resource_name, unit, quantity, ref_price, sort_order)
+                        VALUES %s
+                        """,
+                        resource_rows
+                    )
 
     conn.commit()
     conn_cursor.close()
@@ -336,7 +342,7 @@ def phase_boundary_detection(pdf_path: Path, doc: fitz.Document, parser: Quota20
 
 
 def phase_text_extraction(pdf_path: Path, doc: fitz.Document, parser: Quota2024Parser,
-                         page_maps: dict[int, PageMap], conn,
+                         page_maps: dict[int, PageMap], conn, standard_id: int,
                          ckp_mgr: CheckpointManager) -> dict[int, int]:
     """
     第二阶段：文本提取（说明和规则）
@@ -346,7 +352,6 @@ def phase_text_extraction(pdf_path: Path, doc: fitz.Document, parser: Quota2024P
     print("\n=== 第二阶段：文本提取 ===")
 
     section_map = {}  # page_no -> section_id
-    standard_id = None
     chapter_ids = {}  # chapter_no -> chapter_id
 
     for page_no in sorted(page_maps.keys()):
@@ -388,14 +393,13 @@ def phase_text_extraction(pdf_path: Path, doc: fitz.Document, parser: Quota2024P
 
 
 def phase_table_extraction(pdf_path: Path, doc: fitz.Document, parser: Quota2024Parser,
-                          page_maps: dict[int, PageMap], conn,
+                          page_maps: dict[int, PageMap], conn, standard_id: int,
                           ckp_mgr: CheckpointManager):
     """
     第三阶段：表格提取（子目构成表）
     """
     print("\n=== 第三阶段：表格提取 ===")
 
-    standard_id = None
     chapter_ids = {}
 
     # 按章节分组页码
@@ -510,10 +514,10 @@ def main():
         page_maps = phase_boundary_detection(pdf_path, doc, parser, ckp_mgr, args.start_page, end_page)
         print(f"\n✓ 边界检测完成，共 {len(page_maps)} 页")
 
-        phase_text_extraction(pdf_path, doc, parser, page_maps, conn, ckp_mgr)
+        phase_text_extraction(pdf_path, doc, parser, page_maps, conn, standard_id, ckp_mgr)
         print(f"\n✓ 文本提取完成")
 
-        phase_table_extraction(pdf_path, doc, parser, page_maps, conn, ckp_mgr)
+        phase_table_extraction(pdf_path, doc, parser, page_maps, conn, standard_id, ckp_mgr)
         print(f"\n✓ 表格提取完成")
 
         print("\n✓ 导入完成！")
@@ -522,6 +526,9 @@ def main():
         doc.close()
         conn.close()
 
+
+if __name__ == '__main__':
+    main()
 
 if __name__ == '__main__':
     main()
