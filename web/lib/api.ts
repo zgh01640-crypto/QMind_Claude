@@ -491,6 +491,8 @@ export interface Quota2024SubItem {
   subitem_code: string
   subitem_name: string | null
   variant_desc: string | null
+  unit: string | null
+  name_path: string[]
   total_unit_price: number | null
   unit_price: number | null
   labor_cost: number | null
@@ -754,6 +756,147 @@ export const fetchBoqCompare = (
 ) =>
   req<CompareResult>(`/api/boq/compare?run_a=${run_a}&run_b=${run_b}&run_a_type=${run_a_type}&run_b_type=${run_b_type}`)
 
+// ── 深圳市建筑工程消耗量标准 2024（新解析表族）────────────────────────────
+
+export interface BS2024Document {
+  id: number
+  standard_code: string
+  name: string
+  region: string | null
+  source_file: string
+  source_sha256: string
+  page_count: number
+  publish_date: string | null
+  effective_date: string | null
+  imported_at: string
+  latest_run_status: string | null
+  latest_run_stats: Record<string, unknown>
+  chapter_count: number
+  subitem_count: number
+  issue_count: number
+}
+
+export interface BS2024SectionNode {
+  id: number
+  section_type: 'intro' | 'rules' | 'items' | 'directory' | 'other'
+  section_code: string | null
+  title: string
+  page_start: number | null
+  page_end: number | null
+}
+
+export interface BS2024ChapterNode {
+  id: number
+  chapter_no: number
+  code: string | null
+  title: string
+  page_start: number | null
+  page_end: number | null
+  sections: BS2024SectionNode[]
+}
+
+export interface BS2024SectionDetail extends BS2024SectionNode {
+  document_id: number
+  chapter_id: number
+  content_md: string | null
+}
+
+export interface BS2024Resource {
+  id: number
+  resource_type: string
+  resource_name: string
+  unit: string | null
+  quantity: number | null
+  ref_price: number | null
+  page_no: number | null
+}
+
+export interface BS2024Subitem {
+  id: number
+  subitem_code: string
+  subitem_name: string | null
+  variant_desc: string | null
+  unit: string | null
+  name_path: string[]
+  total_unit_price: number | null
+  unit_price: number | null
+  labor_cost: number | null
+  material_cost: number | null
+  machine_cost: number | null
+  management_fee: number | null
+  profit: number | null
+  safety_fee: number | null
+  statutory_fee: number | null
+  tax: number | null
+  page_no: number | null
+  confidence: number | null
+  resources: BS2024Resource[]
+}
+
+export interface BS2024Item {
+  id: number
+  item_no: number | null
+  item_name: string
+  work_content: string | null
+  unit: string | null
+  page_no: number | null
+  subitems: BS2024Subitem[]
+}
+
+export interface BS2024Group {
+  id: number
+  group_code: string | null
+  group_name: string
+  page_start: number | null
+  page_end: number | null
+  sort_order: number
+  item_count: number
+  items: BS2024Item[]
+}
+
+export interface BS2024Issue {
+  id: number
+  page_no: number | null
+  severity: string
+  issue_type: string
+  message: string
+  context_json: Record<string, unknown>
+  created_at: string
+}
+
+export interface BS2024SearchResult {
+  id: number
+  subitem_code: string
+  name: string
+  variant_desc: string | null
+  unit: string | null
+  group_code: string | null
+  group_name: string
+  chapter_no: number
+  chapter_title: string
+}
+
+export const fetchBS2024Documents = () =>
+  req<BS2024Document[]>('/api/building-standard-2024/documents')
+
+export const fetchBS2024Tree = (documentId: number) =>
+  req<BS2024ChapterNode[]>(`/api/building-standard-2024/documents/${documentId}/tree`)
+
+export const fetchBS2024Section = (sectionId: number) =>
+  req<BS2024SectionDetail>(`/api/building-standard-2024/sections/${sectionId}`)
+
+export const fetchBS2024Groups = (sectionId: number) =>
+  req<BS2024Group[]>(`/api/building-standard-2024/groups?section_id=${sectionId}`)
+
+export const fetchBS2024GroupItems = (groupId: number) =>
+  req<BS2024Group>(`/api/building-standard-2024/groups/${groupId}/items`)
+
+export const searchBS2024 = (documentId: number, q: string) =>
+  req<BS2024SearchResult[]>(`/api/building-standard-2024/search?document_id=${documentId}&q=${encodeURIComponent(q)}`)
+
+export const fetchBS2024Issues = (documentId: number) =>
+  req<BS2024Issue[]>(`/api/building-standard-2024/parse-issues?document_id=${documentId}`)
+
 // ── 调试批次 ──────────────────────────────────────────────────────────────────
 
 export interface DebugBatch {
@@ -886,4 +1029,3 @@ export async function streamDebugMatch(
     }
   }
 }
-

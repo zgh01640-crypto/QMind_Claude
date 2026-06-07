@@ -8,3 +8,9 @@ python-docx
 openai
 pymupdf
 requests
+numpy
+opencv-python
+pillow
+paddleocr
+paddlepaddle
+easyocr
