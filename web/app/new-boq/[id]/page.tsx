@@ -432,19 +432,6 @@ export default function NewBoqDetailPage() {
             </div>
           </div>
 
-          {/* 批次名称 */}
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">批次名称</label>
-            <input
-              type="text"
-              value={runName}
-              onChange={e => setRunName(e.target.value)}
-              disabled={streaming}
-              placeholder="可选，区分多次结果"
-              className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            />
-          </div>
-
           {/* 已选统计 */}
           <div className="text-xs text-gray-500 space-y-0.5">
             <div>已选清单：<span className="font-medium text-gray-700">{selected.size} 条</span></div>
@@ -452,25 +439,38 @@ export default function NewBoqDetailPage() {
               <div>定额子目：<span className="font-medium text-gray-700">{totalSubitems} 个</span></div>
             )}
           </div>
-
-          {/* 操作按钮 */}
-          {!streaming ? (
-            <button
-              onClick={startMatch}
-              disabled={chapterIds.size === 0 || selected.size === 0}
-              className="w-full py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium"
-            >
-              开始套定额
-            </button>
-          ) : (
-            <button
-              onClick={stopMatch}
-              className="w-full py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 font-medium"
-            >
-              停止
-            </button>
-          )}
         </div>
+      </div>
+
+      {/* 批次名称 + 操作按钮行 */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 flex items-end gap-4">
+        <div className="flex-1">
+          <label className="block text-xs text-gray-500 mb-1">批次名称</label>
+          <input
+            type="text"
+            value={runName}
+            onChange={e => setRunName(e.target.value)}
+            disabled={streaming}
+            placeholder="可选，方便区分多次套定额结果"
+            className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          />
+        </div>
+        {!streaming ? (
+          <button
+            onClick={startMatch}
+            disabled={chapterIds.size === 0 || selected.size === 0}
+            className="px-6 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium shrink-0"
+          >
+            开始套定额
+          </button>
+        ) : (
+          <button
+            onClick={stopMatch}
+            className="px-6 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 font-medium shrink-0"
+          >
+            停止
+          </button>
+        )}
       </div>
 
       {/* 流式推理窗口（运行时全宽展示）*/}
