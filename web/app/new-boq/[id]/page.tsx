@@ -54,9 +54,10 @@ interface StreamState {
 
 // ── 流式面板 ──────────────────────────────────────────────────────────────────
 
-function StreamPanel({ state, scrollRef }: {
+function StreamPanel({ state, scrollRef, projectId }: {
   state: StreamState
-  scrollRef: React.RefObject<HTMLDivElement | null>
+  scrollRef: React.Ref<HTMLDivElement>
+  projectId: number
 }) {
   const confColor = (c: string) =>
     c === 'high' ? 'text-green-700 bg-green-50' :
@@ -77,7 +78,7 @@ function StreamPanel({ state, scrollRef }: {
         </span>
         {state.runId && (
           <Link
-            href={`/new-boq/${useParams().id}/run/${state.runId}`}
+            href={`/new-boq/${projectId}/run/${state.runId}`}
             className="ml-auto text-xs text-indigo-600 hover:underline shrink-0"
           >
             查看结果 →
@@ -135,6 +136,7 @@ function ItemList({
   onToggleAll: (ids: number[], checked: boolean) => void
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expandedItem, setExpandedItem] = useState<Set<number>>(new Set())
   const map = new Map<string, BoqItem[]>()
   for (const it of items) {
     const k = it.section_name ?? '未分类'
@@ -179,23 +181,41 @@ function ItemList({
             {expanded.has(name) && (
               <div className="bg-gray-50/50">
                 {its.map(it => (
-                  <label
-                    key={it.id}
-                    className="flex items-center gap-2 pl-8 pr-3 py-1.5 text-xs border-b border-gray-100 cursor-pointer hover:bg-gray-100/60"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selected.has(it.id)}
-                      onChange={() => onToggle(it.id)}
-                      className="rounded shrink-0"
-                    />
-                    <span className="font-mono text-blue-600 shrink-0 w-24 truncate">{it.item_code}</span>
-                    <span className="text-gray-700 flex-1 truncate">{it.item_name}</span>
-                    <span className="text-gray-400 shrink-0">{it.unit}</span>
-                    <span className="text-gray-500 tabular-nums shrink-0 w-16 text-right">
-                      {it.quantity?.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) ?? '—'}
-                    </span>
-                  </label>
+                  <div key={it.id} className="border-b border-gray-100">
+                    <div
+                      className="flex items-center gap-2 pl-8 pr-3 py-1.5 text-xs cursor-pointer hover:bg-gray-100/60"
+                      onClick={() => setExpandedItem(prev => {
+                        const n = new Set(prev); n.has(it.id) ? n.delete(it.id) : n.add(it.id); return n
+                      })}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected.has(it.id)}
+                        onChange={() => onToggle(it.id)}
+                        onClick={e => e.stopPropagation()}
+                        className="rounded shrink-0"
+                      />
+                      <span className="font-mono text-blue-600 shrink-0 w-24 truncate">{it.item_code}</span>
+                      <span className="text-gray-700 flex-1 truncate">{it.item_name}</span>
+                      <span className="text-gray-400 shrink-0">{it.unit}</span>
+                      <span className="text-gray-500 tabular-nums shrink-0 w-16 text-right">
+                        {it.quantity?.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) ?? '—'}
+                      </span>
+                      {it.item_description && (
+                        <span className="text-gray-300 shrink-0 ml-1">{expandedItem.has(it.id) ? '▲' : '▼'}</span>
+                      )}
+                    </div>
+                    {expandedItem.has(it.id) && it.item_description && (
+                      <div className="pl-12 pr-3 py-2 bg-white">
+                        <div className="text-xs text-gray-400 mb-1 font-medium">项目特征</div>
+                        <div className="text-xs text-gray-500 leading-relaxed space-y-0.5">
+                          {it.item_description.split('\n').filter(Boolean).map((l, i) => (
+                            <div key={i}>{l}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -235,13 +255,15 @@ export default function NewBoqDetailPage() {
       fetch(`${API}/api/bs2024-match/chapters`).then(r => r.json()),
       fetch(`${API}/api/bs2024-match/runs?project_id=${projectId}`).then(r => r.json()),
     ]).then(([projects, items, chs, rs]) => {
-      setProject(projects.find((p: BoqProject) => p.id === projectId) || null)
-      setAllItems(items)
-      setChapters(chs)
-      setRuns(rs)
-      if (chs.length > 0) setChapterId(chs[0].id)
+      setProject(Array.isArray(projects) ? (projects.find((p: BoqProject) => p.id === projectId) || null) : null)
+      setAllItems(Array.isArray(items) ? items : [])
+      const chsArr = Array.isArray(chs) ? chs : []
+      setChapters(chsArr)
+      setRuns(Array.isArray(rs) ? rs : [])
+      if (chsArr.length > 0) setChapterId(chsArr[0].id)
       // 默认全选
-      setSelected(new Set(items.map((it: BoqItem) => it.id)))
+      const itemsArr = Array.isArray(items) ? items : []
+      setSelected(new Set(itemsArr.map((it: BoqItem) => it.id)))
     }).finally(() => setLoading(false))
   }, [projectId])
 
@@ -430,7 +452,7 @@ export default function NewBoqDetailPage() {
           {streamState ? (
             <>
               <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">套定额进度</div>
-              <StreamPanel state={streamState} scrollRef={scrollRef} />
+              <StreamPanel state={streamState} scrollRef={scrollRef} projectId={projectId} />
             </>
           ) : (
             <>

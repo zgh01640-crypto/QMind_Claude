@@ -37,8 +37,149 @@ interface BoqItemResult {
   item_name: string
   boq_unit: string
   quantity: number | null
+  item_description: string
   matches: SubitemMatch[]
 }
+
+interface SubitemDetail {
+  subitem_code: string
+  name_path: string
+  unit: string
+  total_unit_price: number | null
+  unit_price: number | null
+  labor_cost: number | null
+  material_cost: number | null
+  machine_cost: number | null
+  management_fee: number | null
+  profit: number | null
+  safety_fee: number | null
+  statutory_fee: number | null
+  tax: number | null
+  work_content: string
+  resources: { resource_type: string; resource_name: string; unit: string; quantity: number | null; ref_price: number | null }[]
+}
+
+// ── 子目详情弹窗 ──────────────────────────────────────────────────────────────
+
+function SubitemModal({ subitemId, onClose }: { subitemId: number; onClose: () => void }) {
+  const [detail, setDetail] = useState<SubitemDetail | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch(`${API}/api/bs2024-match/subitems/${subitemId}`)
+      .then(r => r.json())
+      .then(setDetail)
+      .finally(() => setLoading(false))
+  }, [subitemId])
+
+  const fmt = (v: number | null) => v != null ? v.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '—'
+
+  const typeColor = (t: string) =>
+    t === '人工' ? 'bg-orange-50 text-orange-700' :
+    t === '材料' ? 'bg-blue-50 text-blue-700' :
+    'bg-purple-50 text-purple-700'
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 标题 */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 shrink-0">
+          <div>
+            {detail && (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-blue-700 font-bold text-lg">{detail.subitem_code}</span>
+                  <span className="text-gray-400 text-sm">{detail.unit}</span>
+                </div>
+                <div className="text-sm text-gray-500 mt-0.5">{detail.name_path}</div>
+              </>
+            )}
+            {loading && <div className="text-gray-400 text-sm animate-pulse">加载中…</div>}
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none shrink-0 ml-4">×</button>
+        </div>
+
+        {detail && (
+          <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
+            {/* 工作内容 */}
+            {detail.work_content && (
+              <div className="text-sm text-gray-600 bg-gray-50 rounded px-3 py-2">
+                <span className="font-medium text-gray-500 text-xs mr-2">工作内容</span>
+                {detail.work_content}
+              </div>
+            )}
+
+            {/* 费用分解 */}
+            <div>
+              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">费用分解（元/{detail.unit}）</div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: '全费用单价', value: detail.total_unit_price, highlight: true },
+                  { label: '综合单价', value: detail.unit_price },
+                  { label: '人工费', value: detail.labor_cost },
+                  { label: '材料费', value: detail.material_cost },
+                  { label: '机械费', value: detail.machine_cost },
+                  { label: '管理费', value: detail.management_fee },
+                  { label: '利润', value: detail.profit },
+                  { label: '安全文明费', value: detail.safety_fee },
+                  { label: '规费', value: detail.statutory_fee },
+                  { label: '税金', value: detail.tax },
+                ].map(item => (
+                  <div key={item.label} className={`rounded px-3 py-2 ${item.highlight ? 'bg-indigo-50 col-span-3' : 'bg-gray-50'}`}>
+                    <div className="text-xs text-gray-400">{item.label}</div>
+                    <div className={`font-mono font-medium ${item.highlight ? 'text-indigo-700 text-lg' : 'text-gray-700 text-sm'}`}>
+                      {fmt(item.value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 工料机 */}
+            {detail.resources.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">工料机消耗量</div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="px-2 py-1.5 text-left text-gray-500 font-medium">类型</th>
+                      <th className="px-2 py-1.5 text-left text-gray-500 font-medium">名称规格</th>
+                      <th className="px-2 py-1.5 text-right text-gray-500 font-medium">单位</th>
+                      <th className="px-2 py-1.5 text-right text-gray-500 font-medium">数量</th>
+                      <th className="px-2 py-1.5 text-right text-gray-500 font-medium">参考单价</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {detail.resources.map((r, i) => (
+                      <tr key={i} className="hover:bg-gray-50">
+                        <td className="px-2 py-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-xs ${typeColor(r.resource_type)}`}>{r.resource_type}</span>
+                        </td>
+                        <td className="px-2 py-1.5 text-gray-700">{r.resource_name}</td>
+                        <td className="px-2 py-1.5 text-right text-gray-500">{r.unit || '—'}</td>
+                        <td className="px-2 py-1.5 text-right font-mono text-gray-700">
+                          {r.quantity != null ? r.quantity.toLocaleString('zh-CN', { maximumFractionDigits: 4 }) : '—'}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono text-gray-600">
+                          {r.ref_price != null ? fmt(r.ref_price) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── 主页面 ────────────────────────────────────────────────────────────────────
 
 export default function NewBoqRunPage() {
   const params = useParams()
@@ -49,14 +190,15 @@ export default function NewBoqRunPage() {
   const [results, setResults] = useState<BoqItemResult[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [modalSubitemId, setModalSubitemId] = useState<number | null>(null)
 
   useEffect(() => {
     Promise.all([
       fetch(`${API}/api/bs2024-match/runs?project_id=${projectId}`).then(r => r.json()),
       fetch(`${API}/api/bs2024-match/runs/${runId}/matches`).then(r => r.json()),
     ]).then(([runs, matches]) => {
-      setRun(runs.find((r: MatchRun) => r.id === runId) || null)
-      setResults(matches)
+      setRun(Array.isArray(runs) ? (runs.find((r: MatchRun) => r.id === runId) || null) : null)
+      setResults(Array.isArray(matches) ? matches : [])
     }).finally(() => setLoading(false))
   }, [projectId, runId])
 
@@ -80,7 +222,6 @@ export default function NewBoqRunPage() {
     c === 'medium' ? 'text-yellow-700 bg-yellow-50 border-yellow-200' :
     'text-red-700 bg-red-50 border-red-200'
   const confLabel = (c: string) => c === 'high' ? '高置信' : c === 'medium' ? '中置信' : '低置信'
-
   const statusColor = (s: string) =>
     s === 'confirmed' ? 'text-green-700 bg-green-100' :
     s === 'rejected' ? 'text-red-700 bg-red-100' :
@@ -89,14 +230,14 @@ export default function NewBoqRunPage() {
   if (loading) return <div className="text-center text-gray-400 py-16 animate-pulse">加载中…</div>
 
   const hitCount = results.filter(r => r.matches.length > 0).length
-  const totalUnitPriceSum = results.reduce((sum, r) =>
-    sum + r.matches
-      .filter(m => m.status !== 'rejected')
-      .reduce((s, m) => s + (m.total_unit_price || 0) * m.qty_factor * (r.quantity || 0), 0)
-  , 0)
 
   return (
     <div className="space-y-4">
+      {/* 弹窗 */}
+      {modalSubitemId !== null && (
+        <SubitemModal subitemId={modalSubitemId} onClose={() => setModalSubitemId(null)} />
+      )}
+
       {/* 面包屑 */}
       <div className="flex items-center gap-2 text-sm text-gray-500">
         <Link href="/new-boq" className="hover:text-gray-700">新工程管理</Link>
@@ -125,12 +266,6 @@ export default function NewBoqRunPage() {
                 <div className="text-2xl font-bold text-gray-600">{results.length}</div>
                 <div className="text-xs text-gray-400">总清单项</div>
               </div>
-              <div>
-                <div className="text-2xl font-bold text-green-600">
-                  {totalUnitPriceSum > 0 ? `¥${totalUnitPriceSum.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}` : '—'}
-                </div>
-                <div className="text-xs text-gray-400">合价合计</div>
-              </div>
             </div>
           </div>
         </div>
@@ -158,20 +293,39 @@ export default function NewBoqRunPage() {
               <span className="text-gray-300 shrink-0">{expanded.has(item.boq_item_id) ? '▲' : '▼'}</span>
             </div>
 
-            {/* 展开：匹配详情 */}
+            {/* 展开内容 */}
             {expanded.has(item.boq_item_id) && (
               <div className="border-t border-gray-100">
+                {/* 项目特征 */}
+                {item.item_description && (
+                  <div className="px-6 py-3 bg-amber-50 border-b border-amber-100">
+                    <div className="text-xs font-medium text-amber-700 mb-1.5">项目特征</div>
+                    <div className="text-xs text-amber-900 leading-relaxed space-y-0.5">
+                      {item.item_description.split('\n').filter(Boolean).map((l, i) => (
+                        <div key={i}>{l}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 匹配结果 */}
                 {item.matches.length === 0 ? (
                   <div className="px-8 py-4 text-sm text-gray-400">该清单项未找到匹配的定额子目</div>
                 ) : (
                   <div className="divide-y divide-gray-100">
                     {item.matches.map((m, i) => (
                       <div key={m.match_id} className={`px-6 py-3 ${m.status === 'rejected' ? 'opacity-40' : ''}`}>
-                        <div className="flex items-start gap-3 mb-2">
-                          <span className="text-xs text-gray-400 shrink-0 mt-0.5">#{i + 1}</span>
+                        <div className="flex items-start gap-3">
+                          <span className="text-xs text-gray-400 shrink-0 mt-1">#{i + 1}</span>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1">
-                              <span className="font-mono text-blue-700 font-medium text-sm">{m.subitem_code}</span>
+                              {/* 子目编码 - 可点击 */}
+                              <button
+                                onClick={() => setModalSubitemId(m.subitem_id)}
+                                className="font-mono text-blue-700 font-bold text-sm hover:text-blue-900 hover:underline underline-offset-2"
+                              >
+                                {m.subitem_code}
+                              </button>
                               <span className={`text-xs px-1.5 py-0.5 rounded border ${confColor(m.confidence)}`}>{confLabel(m.confidence)}</span>
                               <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(m.status)}`}>
                                 {m.status === 'confirmed' ? '已确认' : m.status === 'rejected' ? '已拒绝' : 'AI建议'}
@@ -183,7 +337,7 @@ export default function NewBoqRunPage() {
                               <span>单位：{m.quota_unit || '—'}</span>
                               <span>换算系数：{m.qty_factor}</span>
                               {m.factor_explanation && <span>（{m.factor_explanation}）</span>}
-                              {m.total_unit_price && (
+                              {m.total_unit_price != null && (
                                 <span className="text-indigo-600 font-medium">
                                   全费用单价：¥{m.total_unit_price.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}
                                 </span>

@@ -4,8 +4,6 @@ import { usePathname } from 'next/navigation'
 
 const links = [
   { href: '/prices', label: '信息价' },
-  { href: '/quota', label: '消耗量标准' },
-  { href: '/quota2024', label: '消耗量标准2024' },
   { href: '/building-standard-2024', label: '建筑消耗量标准2024' },
   { href: '/measure', label: '国标清单' },
   { href: '/boq', label: '工程管理' },
@@ -13,7 +11,6 @@ const links = [
   { href: '/manual-boq', label: '工程管理（人工）' },
   { href: '/boq/debug', label: '套定额调试' },
   { href: '/compare', label: '定额比较' },
-  { href: '/import', label: '导入管理' },
 ]
 
 function isActive(pathname: string, href: string) {

@@ -370,6 +370,7 @@ def get_run_matches(run_id: int):
             cur.execute("""
                 SELECT m.id, m.boq_item_id,
                        bi.item_code, bi.item_name, bi.unit AS boq_unit, bi.quantity,
+                       bi.item_description,
                        m.subitem_id, m.subitem_code, m.work_procedure,
                        m.qty_factor, m.factor_explanation, m.ai_reasoning,
                        m.confidence, m.missing_info, m.status,
@@ -391,9 +392,10 @@ def get_run_matches(run_id: int):
                     "boq_item_id": bid,
                     "item_code": r[2], "item_name": r[3],
                     "boq_unit": r[4], "quantity": float(r[5]) if r[5] else None,
+                    "item_description": r[6] or "",
                     "matches": [],
                 }
-            path_json = r[17]
+            path_json = r[18]
             if isinstance(path_json, list):
                 path_str = " > ".join(path_json)
             else:
@@ -404,19 +406,83 @@ def get_run_matches(run_id: int):
 
             result[bid]["matches"].append({
                 "match_id": r[0],
-                "subitem_id": r[6], "subitem_code": r[7],
+                "subitem_id": r[7], "subitem_code": r[8],
                 "name_path": path_str,
-                "work_procedure": r[8],
-                "qty_factor": float(r[9]) if r[9] else 1.0,
-                "factor_explanation": r[10],
-                "ai_reasoning": r[11],
-                "confidence": r[12], "missing_info": r[13],
-                "status": r[14],
-                "total_unit_price": float(r[15]) if r[15] else None,
-                "quota_unit": r[16],
+                "work_procedure": r[9],
+                "qty_factor": float(r[10]) if r[10] else 1.0,
+                "factor_explanation": r[11],
+                "ai_reasoning": r[12],
+                "confidence": r[13], "missing_info": r[14],
+                "status": r[15],
+                "total_unit_price": float(r[16]) if r[16] else None,
+                "quota_unit": r[17],
             })
 
         return list(result.values())
+    finally:
+        conn.close()
+
+
+@router.get("/bs2024-match/subitems/{subitem_id}")
+def get_subitem_detail(subitem_id: int):
+    """子目详情：费用分解 + 工料机列表。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT sub.subitem_code, sub.name_path_json, sub.unit,
+                       sub.total_unit_price, sub.unit_price,
+                       sub.labor_cost, sub.material_cost, sub.machine_cost,
+                       sub.management_fee, sub.profit, sub.safety_fee,
+                       sub.statutory_fee, sub.tax,
+                       i.work_content
+                FROM bs2024_subitems sub
+                JOIN bs2024_items i ON i.id = sub.item_id
+                WHERE sub.id = %s
+            """, (subitem_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "子目不存在")
+
+            path_json = row[1]
+            if isinstance(path_json, list):
+                path_str = " > ".join(path_json)
+            else:
+                try:
+                    path_str = " > ".join(json.loads(path_json))
+                except Exception:
+                    path_str = str(path_json)
+
+            cur.execute("""
+                SELECT resource_type, resource_name, unit, quantity, ref_price
+                FROM bs2024_resources
+                WHERE subitem_id = %s
+                ORDER BY sort_order, resource_type
+            """, (subitem_id,))
+            resources = [
+                {"resource_type": r[0], "resource_name": r[1],
+                 "unit": r[2], "quantity": float(r[3]) if r[3] else None,
+                 "ref_price": float(r[4]) if r[4] else None}
+                for r in cur.fetchall()
+            ]
+
+        return {
+            "subitem_code": row[0],
+            "name_path": path_str,
+            "unit": row[2],
+            "total_unit_price": float(row[3]) if row[3] else None,
+            "unit_price": float(row[4]) if row[4] else None,
+            "labor_cost": float(row[5]) if row[5] else None,
+            "material_cost": float(row[6]) if row[6] else None,
+            "machine_cost": float(row[7]) if row[7] else None,
+            "management_fee": float(row[8]) if row[8] else None,
+            "profit": float(row[9]) if row[9] else None,
+            "safety_fee": float(row[10]) if row[10] else None,
+            "statutory_fee": float(row[11]) if row[11] else None,
+            "tax": float(row[12]) if row[12] else None,
+            "work_content": row[13] or "",
+            "resources": resources,
+        }
     finally:
         conn.close()
 
