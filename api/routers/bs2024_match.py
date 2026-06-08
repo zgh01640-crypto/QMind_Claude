@@ -33,8 +33,10 @@ def _ensure_schema(conn):
                 id            SERIAL PRIMARY KEY,
                 project_id    INT NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
                 chapter_id    INT NOT NULL REFERENCES bs2024_chapters(id),
+                chapter_ids   TEXT,
                 chapter_name  VARCHAR(200),
                 run_name      VARCHAR(200),
+                system_prompt TEXT,
                 status        VARCHAR(20) DEFAULT 'running',
                 total_items   INT DEFAULT 0,
                 matched_items INT DEFAULT 0,
@@ -361,6 +363,25 @@ def get_chapters():
         conn.close()
 
 
+@router.get("/bs2024-match/prompt-preview")
+def get_prompt_preview(chapter_ids: str = Query(..., description="逗号分隔的章节ID，如 356,218")):
+    """返回指定专业组合的系统提示词（发给大模型的完整内容）。"""
+    try:
+        ids = [int(x.strip()) for x in chapter_ids.split(',') if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "chapter_ids 格式错误，应为逗号分隔的整数")
+    if not ids:
+        raise HTTPException(400, "chapter_ids 不能为空")
+    conn = get_connection()
+    try:
+        chapter_name, system_prompt = build_bs2024_system_prompt(conn, ids)
+        return {"chapter_name": chapter_name, "system_prompt": system_prompt}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    finally:
+        conn.close()
+
+
 @router.get("/bs2024-match/runs")
 def get_runs(project_id: int = Query(...)):
     """工程的历史套定额批次列表。"""
@@ -385,6 +406,33 @@ def get_runs(project_id: int = Query(...)):
             }
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+@router.get("/bs2024-match/runs/{run_id}/detail")
+def get_run_detail(run_id: int):
+    """批次详情（含保存的系统提示词）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, chapter_id, chapter_name, run_name, status,
+                       total_items, matched_items, created_at, finished_at,
+                       system_prompt
+                FROM bs2024_match_runs WHERE id = %s
+            """, (run_id,))
+            r = cur.fetchone()
+            if not r:
+                raise HTTPException(404, "批次不存在")
+        return {
+            "id": r[0], "chapter_id": r[1], "chapter_name": r[2],
+            "run_name": r[3], "status": r[4],
+            "total_items": r[5], "matched_items": r[6],
+            "created_at": r[7].isoformat() if r[7] else None,
+            "finished_at": r[8].isoformat() if r[8] else None,
+            "system_prompt": r[9] or "",
+        }
     finally:
         conn.close()
 
@@ -608,14 +656,15 @@ def start_match_stream(req: MatchRunRequest):
                 yield f"data: {json.dumps({'type':'run_error','error':'无清单项'}, ensure_ascii=False)}\n\n"
                 return
 
-            # 创建批次记录
+            # 创建批次记录（含系统提示词）
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO bs2024_match_runs
-                        (project_id, chapter_id, chapter_ids, chapter_name, run_name, status, total_items, matched_items)
-                    VALUES (%s, %s, %s, %s, %s, 'running', %s, 0) RETURNING id
+                        (project_id, chapter_id, chapter_ids, chapter_name, run_name,
+                         system_prompt, status, total_items, matched_items)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, 0) RETURNING id
                 """, (req.project_id, cids[0], json.dumps(cids), chapter_name,
-                      req.run_name or None, total))
+                      req.run_name or None, system_prompt, total))
                 run_id = cur.fetchone()[0]
             conn.commit()
 

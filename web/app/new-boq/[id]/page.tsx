@@ -248,6 +248,24 @@ export default function NewBoqDetailPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null)
 
+  const [promptPreview, setPromptPreview] = useState<string | null>(null)
+  const [showPrompt, setShowPrompt] = useState(false)
+  const [loadingPrompt, setLoadingPrompt] = useState(false)
+
+  const fetchPromptPreview = async () => {
+    if (chapterIds.size === 0) return
+    setLoadingPrompt(true)
+    try {
+      const ids = Array.from(chapterIds).join(',')
+      const r = await fetch(`${API}/api/bs2024-match/prompt-preview?chapter_ids=${ids}`)
+      const d = await r.json()
+      setPromptPreview(d.system_prompt || null)
+      setShowPrompt(true)
+    } finally {
+      setLoadingPrompt(false)
+    }
+  }
+
   useEffect(() => {
     Promise.all([
       fetchBoqProjects(),
@@ -416,11 +434,15 @@ export default function NewBoqDetailPage() {
                       type="checkbox"
                       className="hidden"
                       checked={checked}
-                      onChange={e => setChapterIds(prev => {
-                        const n = new Set(prev)
-                        e.target.checked ? n.add(c.id) : n.delete(c.id)
-                        return n
-                      })}
+                      onChange={e => {
+                        setChapterIds(prev => {
+                          const n = new Set(prev)
+                          e.target.checked ? n.add(c.id) : n.delete(c.id)
+                          return n
+                        })
+                        setShowPrompt(false)
+                        setPromptPreview(null)
+                      }}
                     />
                     <span className="flex-1">第{c.chapter_no}章 {c.title}</span>
                     <span className={`shrink-0 ${checked ? 'text-indigo-200' : 'text-gray-400'}`}>
@@ -442,34 +464,56 @@ export default function NewBoqDetailPage() {
         </div>
       </div>
 
-      {/* 批次名称 + 操作按钮行 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4 flex items-end gap-4">
-        <div className="flex-1">
-          <label className="block text-xs text-gray-500 mb-1">批次名称</label>
-          <input
-            type="text"
-            value={runName}
-            onChange={e => setRunName(e.target.value)}
-            disabled={streaming}
-            placeholder="可选，方便区分多次套定额结果"
-            className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-          />
+      {/* 批次名称 + 提示词预览 + 操作按钮 */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
+        <div className="flex items-end gap-3">
+          <div className="flex-1">
+            <label className="block text-xs text-gray-500 mb-1">批次名称</label>
+            <input
+              type="text"
+              value={runName}
+              onChange={e => setRunName(e.target.value)}
+              disabled={streaming}
+              placeholder="可选，方便区分多次套定额结果"
+              className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            />
+          </div>
+          <button
+            onClick={() => showPrompt ? setShowPrompt(false) : fetchPromptPreview()}
+            disabled={chapterIds.size === 0 || loadingPrompt}
+            className="px-4 py-1.5 border border-gray-300 text-gray-600 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-40 shrink-0"
+          >
+            {loadingPrompt ? '加载中…' : showPrompt ? '收起提示词' : '查看提示词'}
+          </button>
+          {!streaming ? (
+            <button
+              onClick={startMatch}
+              disabled={chapterIds.size === 0 || selected.size === 0}
+              className="px-6 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium shrink-0"
+            >
+              开始套定额
+            </button>
+          ) : (
+            <button
+              onClick={stopMatch}
+              className="px-6 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 font-medium shrink-0"
+            >
+              停止
+            </button>
+          )}
         </div>
-        {!streaming ? (
-          <button
-            onClick={startMatch}
-            disabled={chapterIds.size === 0 || selected.size === 0}
-            className="px-6 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium shrink-0"
-          >
-            开始套定额
-          </button>
-        ) : (
-          <button
-            onClick={stopMatch}
-            className="px-6 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 font-medium shrink-0"
-          >
-            停止
-          </button>
+
+        {/* 提示词预览区 */}
+        {showPrompt && promptPreview && (
+          <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+              <span className="text-xs font-medium text-gray-600">系统提示词（发送给大模型）</span>
+              <span className="text-xs text-gray-400">{promptPreview.length.toLocaleString()} 字符</span>
+            </div>
+            <pre className="text-xs text-gray-700 leading-relaxed p-4 max-h-96 overflow-y-auto whitespace-pre-wrap font-mono bg-white">
+              {promptPreview}
+            </pre>
+          </div>
         )}
       </div>
 

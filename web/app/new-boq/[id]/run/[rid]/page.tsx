@@ -13,6 +13,7 @@ interface MatchRun {
   total_items: number
   matched_items: number
   created_at: string
+  system_prompt?: string
 }
 
 interface SubitemMatch {
@@ -194,13 +195,14 @@ export default function NewBoqRunPage() {
   const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(new Set())
   const [showAll, setShowAll] = useState<'all' | 'matched' | 'unmatched'>('all')
   const [modalSubitemId, setModalSubitemId] = useState<number | null>(null)
+  const [showPrompt, setShowPrompt] = useState(false)
 
   useEffect(() => {
     Promise.all([
-      fetch(`${API}/api/bs2024-match/runs?project_id=${projectId}`).then(r => r.json()),
+      fetch(`${API}/api/bs2024-match/runs/${runId}/detail`).then(r => r.json()),
       fetch(`${API}/api/bs2024-match/runs/${runId}/matches`).then(r => r.json()),
-    ]).then(([runs, matches]) => {
-      setRun(Array.isArray(runs) ? (runs.find((r: MatchRun) => r.id === runId) || null) : null)
+    ]).then(([detail, matches]) => {
+      setRun(detail && !detail.detail ? detail : null)
       setResults(Array.isArray(matches) ? matches : [])
     }).finally(() => setLoading(false))
   }, [projectId, runId])
@@ -255,25 +257,47 @@ export default function NewBoqRunPage() {
 
       {/* 批次摘要 */}
       {run && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4">
-          <div className="flex items-center justify-between">
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <div className="flex items-center justify-between p-4">
             <div>
               <div className="text-lg font-semibold text-gray-800">{run.run_name || `批次 #${runId}`}</div>
               <div className="text-sm text-gray-500 mt-0.5">
                 {run.chapter_name} · {new Date(run.created_at).toLocaleString('zh-CN')}
               </div>
             </div>
-            <div className="flex gap-4 text-center">
-              <div>
-                <div className="text-2xl font-bold text-indigo-600">{hitCount}</div>
-                <div className="text-xs text-gray-400">命中条目</div>
+            <div className="flex items-center gap-4">
+              <div className="flex gap-4 text-center">
+                <div>
+                  <div className="text-2xl font-bold text-indigo-600">{hitCount}</div>
+                  <div className="text-xs text-gray-400">命中条目</div>
+                </div>
+                <div>
+                  <div className="text-2xl font-bold text-gray-600">{results.length}</div>
+                  <div className="text-xs text-gray-400">总清单项</div>
+                </div>
               </div>
-              <div>
-                <div className="text-2xl font-bold text-gray-600">{results.length}</div>
-                <div className="text-xs text-gray-400">总清单项</div>
-              </div>
+              {run.system_prompt && (
+                <button
+                  onClick={() => setShowPrompt(v => !v)}
+                  className="px-3 py-1.5 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-50"
+                >
+                  {showPrompt ? '收起提示词' : '查看提示词'}
+                </button>
+              )}
             </div>
           </div>
+          {/* 保存的系统提示词 */}
+          {showPrompt && run.system_prompt && (
+            <div className="border-t border-gray-200">
+              <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                <span className="text-xs font-medium text-gray-600">本次使用的系统提示词</span>
+                <span className="text-xs text-gray-400">{run.system_prompt.length.toLocaleString()} 字符</span>
+              </div>
+              <pre className="text-xs text-gray-700 leading-relaxed p-4 max-h-96 overflow-y-auto whitespace-pre-wrap font-mono bg-white">
+                {run.system_prompt}
+              </pre>
+            </div>
+          )}
         </div>
       )}
 
