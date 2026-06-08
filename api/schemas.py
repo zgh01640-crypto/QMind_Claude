@@ -355,6 +355,7 @@ class CompareBoqItem(BaseModel):
     item_name: str
     unit: Optional[str]
     quantity: Optional[float]
+    item_description: Optional[str] = None
     quotas_a: list[CompareQuota]
     quotas_b: list[CompareQuota]
     consistent: bool   # 两侧定额编码集合相同（均非空）

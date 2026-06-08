@@ -729,6 +729,7 @@ export interface CompareBoqItem {
   item_name: string
   unit: string | null
   quantity: number | null
+  item_description: string | null
   quotas_a: CompareQuota[]
   quotas_b: CompareQuota[]
   consistent: boolean

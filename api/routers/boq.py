@@ -774,7 +774,8 @@ def _compare_fetch_matches(conn, id: int, src_type: str) -> list:
                 SELECT i.item_code, i.item_name, i.unit, i.quantity,
                        COALESCE(mq.quota_code, ''), COALESCE(mq.quota_name, ''),
                        mq.quota_item_id,
-                       mq.qty_factor, NULL, NULL
+                       mq.qty_factor, NULL, NULL,
+                       i.item_description
                 FROM manual_boq_items i
                 JOIN manual_boq_quotas mq ON mq.boq_item_id = i.id
                 WHERE i.project_id = %s AND i.item_code IS NOT NULL
@@ -787,7 +788,8 @@ def _compare_fetch_matches(conn, id: int, src_type: str) -> list:
                        m.subitem_code,
                        (SELECT string_agg(v, ' > ') FROM jsonb_array_elements_text(sub.name_path_json) v),
                        m.subitem_id,
-                       m.qty_factor, m.confidence, m.work_procedure
+                       m.qty_factor, m.confidence, m.work_procedure,
+                       i.item_description
                 FROM bs2024_quota_matches m
                 JOIN boq_items i ON i.id = m.boq_item_id
                 JOIN bs2024_subitems sub ON sub.id = m.subitem_id
@@ -799,7 +801,8 @@ def _compare_fetch_matches(conn, id: int, src_type: str) -> list:
             cur.execute("""
                 SELECT i.item_code, i.item_name, i.unit, i.quantity,
                        q.item_code, q.item_name, m.quota_item_id,
-                       m.qty_factor, m.confidence, m.work_procedure
+                       m.qty_factor, m.confidence, m.work_procedure,
+                       i.item_description
                 FROM boq_quota_matches m
                 JOIN boq_items i ON i.id = m.boq_item_id
                 JOIN quota_items q ON q.id = m.quota_item_id
@@ -830,6 +833,7 @@ def compare_runs(
                     result[code] = {
                         "item_name": row[1], "unit": row[2],
                         "quantity": float(row[3]) if row[3] else None,
+                        "item_description": row[10] or None,
                         "quotas": [],
                     }
                 result[code]["quotas"].append({
@@ -870,6 +874,7 @@ def compare_runs(
                 item_name=a["item_name"] or b["item_name"],
                 unit=a["unit"] or b["unit"],
                 quantity=a["quantity"] or b["quantity"],
+                item_description=a.get("item_description") or b.get("item_description"),
                 quotas_a=[CompareQuota(**q) for q in a["quotas"]],
                 quotas_b=[CompareQuota(**q) for q in b["quotas"]],
                 consistent=consistent,
