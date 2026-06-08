@@ -1,16 +1,28 @@
 'use client'
 import { useState, useEffect } from 'react'
 import {
-  fetchBoqProjects, fetchBoqRuns, fetchBoqCompare,
+  fetchBoqProjects, fetchBoqCompare,
   fetchManualBoqProjects,
-  BoqProject, BoqMatchRun, ManualBoqProject,
+  BoqProject, ManualBoqProject,
   CompareResult, CompareBoqItem, CompareQuota,
 } from '@/lib/api'
 
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
 
-type SrcType = 'run' | 'manual'
+type SrcType = 'bs2024' | 'manual'
 type FilterKey = 'all' | 'consistent' | 'different' | 'only_a' | 'only_b' | 'both_empty'
+
+interface Bs2024Run {
+  id: number
+  chapter_name: string
+  run_name: string | null
+  status: string
+  total_items: number
+  matched_items: number
+  created_at: string
+}
 
 function filterItems(items: CompareBoqItem[], f: FilterKey) {
   if (f === 'consistent') return items.filter(i => i.consistent)
@@ -110,14 +122,14 @@ interface SelectorProps {
   label: string
   srcType: SrcType
   onSrcTypeChange: (t: SrcType) => void
-  // AI 批次用
+  // 新工程AI批次
   boqProjects: BoqProject[]
   selectedProject: number | null
   setSelectedProject: (id: number | null) => void
-  runs: BoqMatchRun[]
+  bs2024Runs: Bs2024Run[]
   selectedRun: number | null
   setSelectedRun: (id: number | null) => void
-  // 人工套定额用
+  // 人工套定额
   manualProjects: ManualBoqProject[]
   selectedManual: number | null
   setSelectedManual: (id: number | null) => void
@@ -129,23 +141,23 @@ function Selector(p: SelectorProps) {
       <div className="flex items-center justify-between">
         <span className="text-sm font-semibold text-gray-700">{p.label}</span>
         <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
-          {(['run', 'manual'] as SrcType[]).map(t => (
+          {(['bs2024', 'manual'] as SrcType[]).map(t => (
             <button
               key={t}
               onClick={() => p.onSrcTypeChange(t)}
               className={`px-3 py-1 transition ${
                 p.srcType === t
-                  ? 'bg-blue-600 text-white'
+                  ? 'bg-indigo-600 text-white'
                   : 'bg-white text-gray-600 hover:bg-gray-50'
               }`}
             >
-              {t === 'run' ? 'AI 批次' : '人工套定额'}
+              {t === 'bs2024' ? '新工程AI' : '人工套定额'}
             </button>
           ))}
         </div>
       </div>
 
-      {p.srcType === 'run' ? (
+      {p.srcType === 'bs2024' ? (
         <>
           <div>
             <label className="block text-xs text-gray-500 mb-1">选择工程</label>
@@ -172,19 +184,19 @@ function Selector(p: SelectorProps) {
               className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
               value={p.selectedRun ?? ''}
               onChange={e => p.setSelectedRun(e.target.value ? Number(e.target.value) : null)}
-              disabled={!p.selectedProject || p.runs.length === 0}
+              disabled={!p.selectedProject || p.bs2024Runs.length === 0}
             >
               <option value="">-- 请选择批次 --</option>
-              {p.runs.map(r => (
+              {p.bs2024Runs.map(r => (
                 <option key={r.id} value={r.id}>
                   {r.run_name || `批次 #${r.id}`}
-                  {r.standard_code ? ` (${r.standard_code})` : ''}
-                  {r.status !== 'done' ? ` [${r.status}]` : ''}
+                  {r.chapter_name ? ` [${r.chapter_name}]` : ''}
+                  {r.status !== 'done' ? ` (${r.status})` : ''}
                 </option>
               ))}
             </select>
-            {p.selectedProject && p.runs.length === 0 && (
-              <p className="text-xs text-gray-400 mt-1">该工程暂无套定额批次</p>
+            {p.selectedProject && p.bs2024Runs.length === 0 && (
+              <p className="text-xs text-gray-400 mt-1">该工程暂无新工程套定额批次，请先在「新工程管理」中套定额</p>
             )}
           </div>
         </>
@@ -205,7 +217,7 @@ function Selector(p: SelectorProps) {
             ))}
           </select>
           {p.manualProjects.length === 0 && (
-            <p className="text-xs text-gray-400 mt-1">暂无人工套定额工程，请先在"工程管理（人工）"中导入</p>
+            <p className="text-xs text-gray-400 mt-1">暂无人工套定额工程，请先在「工程管理（人工）」中导入</p>
           )}
         </div>
       )}
@@ -219,13 +231,13 @@ export default function ComparePage() {
   const [boqProjects, setBoqProjects] = useState<BoqProject[]>([])
   const [manualProjects, setManualProjects] = useState<ManualBoqProject[]>([])
 
-  const [typeA, setTypeA] = useState<SrcType>('run')
+  const [typeA, setTypeA] = useState<SrcType>('bs2024')
   const [typeB, setTypeB] = useState<SrcType>('manual')
 
   const [projA, setProjA] = useState<number | null>(null)
   const [projB, setProjB] = useState<number | null>(null)
-  const [runsA, setRunsA] = useState<BoqMatchRun[]>([])
-  const [runsB, setRunsB] = useState<BoqMatchRun[]>([])
+  const [runsA, setRunsA] = useState<Bs2024Run[]>([])
+  const [runsB, setRunsB] = useState<Bs2024Run[]>([])
   const [runA, setRunA] = useState<number | null>(null)
   const [runB, setRunB] = useState<number | null>(null)
   const [manualA, setManualA] = useState<number | null>(null)
@@ -241,14 +253,17 @@ export default function ComparePage() {
     fetchManualBoqProjects().then(setManualProjects).catch(() => {})
   }, [])
 
+  // 加载 bs2024 批次
   useEffect(() => {
     if (!projA) { setRunsA([]); setRunA(null); return }
-    fetchBoqRuns(projA).then(setRunsA).catch(() => setRunsA([]))
+    fetch(`${API}/api/bs2024-match/runs?project_id=${projA}`)
+      .then(r => r.json()).then(d => setRunsA(Array.isArray(d) ? d : [])).catch(() => setRunsA([]))
   }, [projA])
 
   useEffect(() => {
     if (!projB) { setRunsB([]); setRunB(null); return }
-    fetchBoqRuns(projB).then(setRunsB).catch(() => setRunsB([]))
+    fetch(`${API}/api/bs2024-match/runs?project_id=${projB}`)
+      .then(r => r.json()).then(d => setRunsB(Array.isArray(d) ? d : [])).catch(() => setRunsB([]))
   }, [projB])
 
   function getSelection(type: SrcType, run: number | null, manual: number | null) {
@@ -259,9 +274,7 @@ export default function ComparePage() {
     const idA = getSelection(typeA, runA, manualA)
     const idB = getSelection(typeB, runB, manualB)
     if (!idA || !idB) return
-    setLoading(true)
-    setError(null)
-    setResult(null)
+    setLoading(true); setError(null); setResult(null)
     try {
       const r = await fetchBoqCompare(idA, idB, typeA, typeB)
       setResult(r)
@@ -276,7 +289,6 @@ export default function ComparePage() {
   const idA = getSelection(typeA, runA, manualA)
   const idB = getSelection(typeB, runB, manualB)
   const canCompare = Boolean(idA && idB)
-
   const displayed = result ? filterItems(result.items, filter) : []
 
   const filterOptions: {
@@ -295,7 +307,7 @@ export default function ComparePage() {
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
       <h1 className="text-xl font-bold text-gray-800">定额比较</h1>
       <p className="text-sm text-gray-500 -mt-4">
-        支持 AI 批次与人工套定额工程之间的交叉比较，按清单编码对齐后逐项对比定额结果。
+        对比「新工程管理」AI套定额批次与人工套定额工程，按清单编码对齐后逐项比较定额结果。
       </p>
 
       {/* 选择区 */}
@@ -305,7 +317,7 @@ export default function ComparePage() {
           srcType={typeA} onSrcTypeChange={t => { setTypeA(t); setResult(null) }}
           boqProjects={boqProjects}
           selectedProject={projA} setSelectedProject={setProjA}
-          runs={runsA} selectedRun={runA} setSelectedRun={setRunA}
+          bs2024Runs={runsA} selectedRun={runA} setSelectedRun={setRunA}
           manualProjects={manualProjects}
           selectedManual={manualA} setSelectedManual={setManualA}
         />
@@ -317,7 +329,7 @@ export default function ComparePage() {
           srcType={typeB} onSrcTypeChange={t => { setTypeB(t); setResult(null) }}
           boqProjects={boqProjects}
           selectedProject={projB} setSelectedProject={setProjB}
-          runs={runsB} selectedRun={runB} setSelectedRun={setRunB}
+          bs2024Runs={runsB} selectedRun={runB} setSelectedRun={setRunB}
           manualProjects={manualProjects}
           selectedManual={manualB} setSelectedManual={setManualB}
         />
@@ -327,7 +339,7 @@ export default function ComparePage() {
         <button
           onClick={doCompare}
           disabled={!canCompare || loading}
-          className="px-8 py-2 bg-blue-600 text-white rounded-lg font-medium disabled:opacity-40 hover:bg-blue-700 transition"
+          className="px-8 py-2 bg-indigo-600 text-white rounded-lg font-medium disabled:opacity-40 hover:bg-indigo-700 transition"
         >
           {loading ? '比较中…' : '开始比较'}
         </button>
@@ -340,7 +352,6 @@ export default function ComparePage() {
       {/* 比较结果 */}
       {result && (
         <div className="space-y-4">
-          {/* 信息卡片 */}
           <div className="grid grid-cols-2 gap-4">
             {[result.run_a, result.run_b].map((info, idx) => (
               <div key={idx} className="bg-white rounded-lg border border-gray-200 px-4 py-3">
@@ -353,14 +364,13 @@ export default function ComparePage() {
                   <span className={`inline-block text-xs mt-1 px-2 py-0.5 rounded ${
                     info.standard_code === '人工套定额'
                       ? 'bg-green-100 text-green-700'
-                      : 'bg-blue-50 text-blue-600'
+                      : 'bg-indigo-50 text-indigo-600'
                   }`}>{info.standard_code}</span>
                 )}
               </div>
             ))}
           </div>
 
-          {/* 筛选 */}
           <div className="flex flex-wrap gap-2">
             {filterOptions.map(opt => (
               <button
@@ -376,7 +386,6 @@ export default function ComparePage() {
             ))}
           </div>
 
-          {/* 列表 */}
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="flex items-center gap-3 px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs text-gray-500 font-medium">
               <span className="w-4" />

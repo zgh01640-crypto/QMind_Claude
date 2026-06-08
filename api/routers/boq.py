@@ -742,6 +742,16 @@ def _compare_run_info(conn, id: int, src_type: str) -> tuple:
             if not row:
                 raise HTTPException(status_code=404, detail=f"人工套定额工程 {id} 不存在")
             return (id, None, "人工套定额", row[0], row[1])
+        elif src_type == "bs2024":
+            cur.execute("""
+                SELECT r.id, r.run_name, r.chapter_name, p.id, p.project_name
+                FROM bs2024_match_runs r JOIN boq_projects p ON p.id = r.project_id
+                WHERE r.id = %s
+            """, (id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"新工程批次 {id} 不存在")
+            return row
         else:
             cur.execute("""
                 SELECT r.id, r.run_name, r.standard_code, p.id, p.project_name
@@ -770,6 +780,20 @@ def _compare_fetch_matches(conn, id: int, src_type: str) -> list:
                 WHERE i.project_id = %s AND i.item_code IS NOT NULL
                       AND mq.quota_code IS NOT NULL AND mq.quota_code != ''
                 ORDER BY i.item_seq, i.item_code, mq.id
+            """, (id,))
+        elif src_type == "bs2024":
+            cur.execute("""
+                SELECT i.item_code, i.item_name, i.unit, i.quantity,
+                       m.subitem_code,
+                       (SELECT string_agg(v, ' > ') FROM jsonb_array_elements_text(sub.name_path_json) v),
+                       m.subitem_id,
+                       m.qty_factor, m.confidence, m.work_procedure
+                FROM bs2024_quota_matches m
+                JOIN boq_items i ON i.id = m.boq_item_id
+                JOIN bs2024_subitems sub ON sub.id = m.subitem_id
+                WHERE m.run_id = %s AND m.status != 'rejected'
+                      AND i.item_code IS NOT NULL
+                ORDER BY i.item_seq, i.item_code, m.id
             """, (id,))
         else:
             cur.execute("""
