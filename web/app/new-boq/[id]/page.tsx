@@ -378,21 +378,38 @@ export default function NewBoqDetailPage() {
         <span className="text-gray-800 font-medium">{project.project_name}</span>
       </div>
 
-      {/* 顶部配置栏 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-end gap-4">
+      {/* 主体：清单列表（左）+ 配置区（右）*/}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 items-start">
+        {/* 左：清单列表 */}
+        <div>
+          <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+            清单项列表
+          </div>
+          <ItemList
+            items={allItems}
+            selected={selected}
+            onToggle={toggleItem}
+            onToggleAll={toggleAll}
+          />
+        </div>
+
+        {/* 右：定额配置 */}
+        <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
+          <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">套定额配置</div>
+
+          {/* 专业选择 */}
           <div>
-            <label className="block text-xs text-gray-500 mb-1">定额专业（可多选）</label>
-            <div className={`flex flex-wrap gap-2 ${streaming ? 'opacity-50 pointer-events-none' : ''}`}>
+            <label className="block text-xs text-gray-500 mb-2">定额专业（可多选）</label>
+            <div className={`flex flex-col gap-1.5 ${streaming ? 'opacity-50 pointer-events-none' : ''}`}>
               {chapters.map(c => {
                 const checked = chapterIds.has(c.id)
                 return (
                   <label
                     key={c.id}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs cursor-pointer select-none transition-colors ${
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs cursor-pointer select-none transition-colors ${
                       checked
                         ? 'bg-indigo-600 border-indigo-600 text-white'
-                        : 'bg-white border-gray-300 text-gray-600 hover:border-indigo-400'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-indigo-300 hover:bg-indigo-50'
                     }`}
                   >
                     <input
@@ -405,8 +422,8 @@ export default function NewBoqDetailPage() {
                         return n
                       })}
                     />
-                    第{c.chapter_no}章 {c.title}
-                    <span className={`text-xs ${checked ? 'text-indigo-200' : 'text-gray-400'}`}>
+                    <span className="flex-1">第{c.chapter_no}章 {c.title}</span>
+                    <span className={`shrink-0 ${checked ? 'text-indigo-200' : 'text-gray-400'}`}>
                       {c.subitem_count}目
                     </span>
                   </label>
@@ -414,122 +431,85 @@ export default function NewBoqDetailPage() {
               })}
             </div>
           </div>
-          <div className="flex-1 min-w-48">
+
+          {/* 批次名称 */}
+          <div>
             <label className="block text-xs text-gray-500 mb-1">批次名称</label>
             <input
               type="text"
               value={runName}
               onChange={e => setRunName(e.target.value)}
               disabled={streaming}
-              placeholder="可选，方便区分多次套定额结果"
+              placeholder="可选，区分多次结果"
               className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             />
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">已选清单</label>
-            <div className="text-sm font-medium text-gray-700 py-1.5">{selected.size} 条</div>
+
+          {/* 已选统计 */}
+          <div className="text-xs text-gray-500 space-y-0.5">
+            <div>已选清单：<span className="font-medium text-gray-700">{selected.size} 条</span></div>
+            {selectedChapters.length > 0 && (
+              <div>定额子目：<span className="font-medium text-gray-700">{totalSubitems} 个</span></div>
+            )}
           </div>
+
+          {/* 操作按钮 */}
           {!streaming ? (
             <button
               onClick={startMatch}
               disabled={chapterIds.size === 0 || selected.size === 0}
-              className="px-5 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-40 font-medium"
+              className="w-full py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 font-medium"
             >
               开始套定额
             </button>
           ) : (
             <button
               onClick={stopMatch}
-              className="px-5 py-1.5 bg-red-500 text-white text-sm rounded hover:bg-red-600 font-medium"
+              className="w-full py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 font-medium"
             >
               停止
             </button>
           )}
         </div>
-        {selectedChapters.length > 0 && (
-          <div className="mt-2 text-xs text-gray-400">
-            已选 {selectedChapters.length} 个专业（{totalSubitems} 个子目），对 {selected.size} 条清单项进行匹配
-          </div>
-        )}
       </div>
 
-      {/* 主体：清单列表 + 流式面板 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* 清单列表 */}
+      {/* 流式推理窗口（运行时全宽展示）*/}
+      {streamState && (
         <div>
-          <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">清单项列表</div>
-          <ItemList
-            items={allItems}
-            selected={selected}
-            onToggle={toggleItem}
-            onToggleAll={toggleAll}
-          />
+          <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">套定额进度</div>
+          <StreamPanel state={streamState} scrollRef={scrollRef} projectId={projectId} />
         </div>
+      )}
 
-        {/* 流式面板 / 历史批次 */}
-        <div>
-          {streamState ? (
-            <>
-              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">套定额进度</div>
-              <StreamPanel state={streamState} scrollRef={scrollRef} projectId={projectId} />
-            </>
+      {/* 历史批次（始终展示在底部）*/}
+      <div>
+        <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">历史批次</div>
+        <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
+          {runs.length === 0 ? (
+            <div className="text-center text-gray-400 py-8 text-sm">暂无套定额记录</div>
           ) : (
-            <>
-              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">历史批次</div>
-              <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
-                {runs.length === 0 ? (
-                  <div className="text-center text-gray-400 py-10 text-sm">暂无套定额记录</div>
-                ) : (
-                  <div className="divide-y divide-gray-100">
-                    {runs.map(r => (
-                      <div
-                        key={r.id}
-                        onClick={() => router.push(`/new-boq/${projectId}/run/${r.id}`)}
-                        className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-gray-50 cursor-pointer"
-                      >
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${
-                          r.status === 'done' ? 'bg-green-500' :
-                          r.status === 'running' ? 'bg-blue-400 animate-pulse' :
-                          'bg-red-400'
-                        }`} />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-gray-800 font-medium truncate">{r.run_name || `批次 #${r.id}`}</div>
-                          <div className="text-xs text-gray-400">{r.chapter_name} · {r.matched_items}/{r.total_items} 项命中</div>
-                        </div>
-                        <div className="text-xs text-gray-400 shrink-0">
-                          {new Date(r.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                        </div>
-                        <span className="text-gray-300 shrink-0">›</span>
-                      </div>
-                    ))}
+            <div className="divide-y divide-gray-100">
+              {runs.map(r => (
+                <div
+                  key={r.id}
+                  onClick={() => router.push(`/new-boq/${projectId}/run/${r.id}`)}
+                  className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-gray-50 cursor-pointer"
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${
+                    r.status === 'done' ? 'bg-green-500' :
+                    r.status === 'running' ? 'bg-blue-400 animate-pulse' :
+                    'bg-red-400'
+                  }`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-gray-800 font-medium truncate">{r.run_name || `批次 #${r.id}`}</div>
+                    <div className="text-xs text-gray-400">{r.chapter_name} · {r.matched_items}/{r.total_items} 项命中</div>
                   </div>
-                )}
-              </div>
-            </>
-          )}
-
-          {/* 完成后同时显示批次列表 */}
-          {streamState?.done && runs.length > 0 && (
-            <div className="mt-4">
-              <div className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">历史批次</div>
-              <div className="border border-gray-200 rounded-lg bg-white overflow-hidden">
-                <div className="divide-y divide-gray-100">
-                  {runs.map(r => (
-                    <div
-                      key={r.id}
-                      onClick={() => router.push(`/new-boq/${projectId}/run/${r.id}`)}
-                      className="flex items-center gap-3 px-4 py-3 text-sm hover:bg-gray-50 cursor-pointer"
-                    >
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${r.status === 'done' ? 'bg-green-500' : 'bg-red-400'}`} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-gray-800 font-medium truncate">{r.run_name || `批次 #${r.id}`}</div>
-                        <div className="text-xs text-gray-400">{r.chapter_name} · {r.matched_items}/{r.total_items} 项命中</div>
-                      </div>
-                      <span className="text-gray-300 shrink-0">›</span>
-                    </div>
-                  ))}
+                  <div className="text-xs text-gray-400 shrink-0">
+                    {new Date(r.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                  <span className="text-gray-300 shrink-0">›</span>
                 </div>
-              </div>
+              ))}
             </div>
           )}
         </div>
