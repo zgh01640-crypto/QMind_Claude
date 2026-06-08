@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024
+from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match
 
 app = FastAPI(title="深圳信息价管理系统", version="1.0.0")
 
@@ -27,3 +27,4 @@ app.include_router(measure.router, prefix="/api", tags=["measure"])
 app.include_router(boq.router, prefix="/api", tags=["boq"])
 app.include_router(manual_boq.router, prefix="/api", tags=["manual_boq"])
 app.include_router(building_standard_2024.router, prefix="/api", tags=["building_standard_2024"])
+app.include_router(bs2024_match.router, prefix="/api", tags=["bs2024-match"])

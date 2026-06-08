@@ -9,6 +9,7 @@ const links = [
   { href: '/building-standard-2024', label: '建筑消耗量标准2024' },
   { href: '/measure', label: '国标清单' },
   { href: '/boq', label: '工程管理' },
+  { href: '/new-boq', label: '新工程管理' },
   { href: '/manual-boq', label: '工程管理（人工）' },
   { href: '/boq/debug', label: '套定额调试' },
   { href: '/compare', label: '定额比较' },
@@ -19,6 +20,7 @@ function isActive(pathname: string, href: string) {
   if (pathname === href) return true
   // /boq 只匹配 /boq/[数字]（项目详情），不匹配 /boq/debug 等具名子路由
   if (href === '/boq') return /^\/boq\/\d/.test(pathname)
+  if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
   return pathname.startsWith(href + '/')
 }
 
