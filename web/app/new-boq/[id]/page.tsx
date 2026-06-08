@@ -239,7 +239,7 @@ export default function NewBoqDetailPage() {
   const [runs, setRuns] = useState<MatchRun[]>([])
   const [loading, setLoading] = useState(true)
 
-  const [chapterId, setChapterId] = useState<number>(0)
+  const [chapterIds, setChapterIds] = useState<Set<number>>(new Set())
   const [runName, setRunName] = useState('')
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
@@ -260,7 +260,7 @@ export default function NewBoqDetailPage() {
       const chsArr = Array.isArray(chs) ? chs : []
       setChapters(chsArr)
       setRuns(Array.isArray(rs) ? rs : [])
-      if (chsArr.length > 0) setChapterId(chsArr[0].id)
+      if (chsArr.length > 0) setChapterIds(new Set([chsArr[0].id]))
       // 默认全选
       const itemsArr = Array.isArray(items) ? items : []
       setSelected(new Set(itemsArr.map((it: BoqItem) => it.id)))
@@ -283,7 +283,7 @@ export default function NewBoqDetailPage() {
     })
 
   const startMatch = async () => {
-    if (!chapterId || selected.size === 0) return
+    if (chapterIds.size === 0 || selected.size === 0) return
     setStreaming(true)
     setStreamState({
       runId: null, total: 0, currentIndex: 0,
@@ -296,7 +296,7 @@ export default function NewBoqDetailPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         project_id: projectId,
-        chapter_id: chapterId,
+        chapter_ids: Array.from(chapterIds),
         item_ids: Array.from(selected),
         run_name: runName.trim() || null,
       }),
@@ -366,7 +366,8 @@ export default function NewBoqDetailPage() {
   if (loading) return <div className="text-center text-gray-400 py-16 animate-pulse">加载中…</div>
   if (!project) return <div className="text-center text-gray-400 py-16">工程不存在</div>
 
-  const selectedChapter = chapters.find(c => c.id === chapterId)
+  const selectedChapters = chapters.filter(c => chapterIds.has(c.id))
+  const totalSubitems = selectedChapters.reduce((s, c) => s + c.subitem_count, 0)
 
   return (
     <div className="space-y-4">
@@ -381,19 +382,37 @@ export default function NewBoqDetailPage() {
       <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex flex-wrap items-end gap-4">
           <div>
-            <label className="block text-xs text-gray-500 mb-1">定额专业</label>
-            <select
-              value={chapterId}
-              onChange={e => setChapterId(Number(e.target.value))}
-              disabled={streaming}
-              className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            >
-              {chapters.map(c => (
-                <option key={c.id} value={c.id}>
-                  第{c.chapter_no}章 {c.title}（{c.subitem_count}个子目）
-                </option>
-              ))}
-            </select>
+            <label className="block text-xs text-gray-500 mb-1">定额专业（可多选）</label>
+            <div className={`flex flex-wrap gap-2 ${streaming ? 'opacity-50 pointer-events-none' : ''}`}>
+              {chapters.map(c => {
+                const checked = chapterIds.has(c.id)
+                return (
+                  <label
+                    key={c.id}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs cursor-pointer select-none transition-colors ${
+                      checked
+                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                        : 'bg-white border-gray-300 text-gray-600 hover:border-indigo-400'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="hidden"
+                      checked={checked}
+                      onChange={e => setChapterIds(prev => {
+                        const n = new Set(prev)
+                        e.target.checked ? n.add(c.id) : n.delete(c.id)
+                        return n
+                      })}
+                    />
+                    第{c.chapter_no}章 {c.title}
+                    <span className={`text-xs ${checked ? 'text-indigo-200' : 'text-gray-400'}`}>
+                      {c.subitem_count}目
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
           </div>
           <div className="flex-1 min-w-48">
             <label className="block text-xs text-gray-500 mb-1">批次名称</label>
@@ -413,7 +432,7 @@ export default function NewBoqDetailPage() {
           {!streaming ? (
             <button
               onClick={startMatch}
-              disabled={!chapterId || selected.size === 0}
+              disabled={chapterIds.size === 0 || selected.size === 0}
               className="px-5 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-40 font-medium"
             >
               开始套定额
@@ -427,9 +446,9 @@ export default function NewBoqDetailPage() {
             </button>
           )}
         </div>
-        {selectedChapter && (
+        {selectedChapters.length > 0 && (
           <div className="mt-2 text-xs text-gray-400">
-            将使用「{selectedChapter.title}」定额库（{selectedChapter.subitem_count} 个子目）对选中的 {selected.size} 条清单项进行匹配
+            已选 {selectedChapters.length} 个专业（{totalSubitems} 个子目），对 {selected.size} 条清单项进行匹配
           </div>
         )}
       </div>

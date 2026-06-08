@@ -170,41 +170,65 @@ _MATCH_TOOL_BS2024 = {
 }
 
 
-def build_bs2024_system_prompt(conn, chapter_id: int) -> tuple[str, str]:
+def build_bs2024_system_prompt(conn, chapter_ids: int | list[int]) -> tuple[str, str]:
     """
     构建含专业定额上下文的 system prompt。
+    支持单个或多个 chapter_id，多个时合并所有专业的说明和子目。
     返回 (chapter_name, system_prompt)
     """
+    if isinstance(chapter_ids, int):
+        chapter_ids = [chapter_ids]
+
     with conn.cursor() as cur:
-        # chapter info
-        cur.execute("SELECT title FROM bs2024_chapters WHERE id = %s", (chapter_id,))
-        row = cur.fetchone()
-        if not row:
-            raise ValueError(f"chapter_id={chapter_id} 不存在")
-        chapter_name = row[0]
+        placeholders = ','.join(['%s'] * len(chapter_ids))
 
-        # intro + rules content_md
-        cur.execute("""
-            SELECT section_type, content_md FROM bs2024_sections
-            WHERE chapter_id = %s AND section_type IN ('intro', 'rules')
-            ORDER BY section_type
-        """, (chapter_id,))
-        sections = {r[0]: r[1] or "" for r in cur.fetchall()}
+        # chapter titles
+        cur.execute(f"SELECT id, title FROM bs2024_chapters WHERE id IN ({placeholders}) ORDER BY chapter_no", chapter_ids)
+        chapters_rows = cur.fetchall()
+        if not chapters_rows:
+            raise ValueError(f"chapter_ids={chapter_ids} 不存在")
+        chapter_name = " + ".join(r[1] for r in chapters_rows)
 
-        # subitems via chapter -> section(items) -> item_group -> item -> subitem
-        cur.execute("""
+        # intro + rules content_md（所有章节合并）
+        cur.execute(f"""
+            SELECT c.title, s.section_type, s.content_md
+            FROM bs2024_sections s
+            JOIN bs2024_chapters c ON c.id = s.chapter_id
+            WHERE s.chapter_id IN ({placeholders}) AND s.section_type IN ('intro', 'rules')
+            ORDER BY c.chapter_no, s.section_type
+        """, chapter_ids)
+        sections_rows = cur.fetchall()
+
+        # subitems（所有章节合并）
+        cur.execute(f"""
             SELECT sub.id, sub.subitem_code, sub.name_path_json, sub.unit, sub.total_unit_price,
                    i.work_content
             FROM bs2024_sections sec
             JOIN bs2024_item_groups g ON g.section_id = sec.id
             JOIN bs2024_items i ON i.group_id = g.id
             JOIN bs2024_subitems sub ON sub.item_id = i.id
-            WHERE sec.chapter_id = %s AND sec.section_type = 'items'
-            ORDER BY sub.sort_order, sub.subitem_code
-        """, (chapter_id,))
+            WHERE sec.chapter_id IN ({placeholders}) AND sec.section_type = 'items'
+            ORDER BY sec.chapter_id, sub.sort_order, sub.subitem_code
+        """, chapter_ids)
         subitems = cur.fetchall()
 
-    # 子目列表文本
+    # 按章节分组拼接说明和规则
+    from collections import defaultdict
+    sec_by_chapter: dict[str, dict] = defaultdict(dict)
+    for ch_title, sec_type, content_md in sections_rows:
+        sec_by_chapter[ch_title][sec_type] = content_md or ""
+
+    knowledge_blocks = []
+    for _, ch_title in chapters_rows:
+        secs = sec_by_chapter.get(ch_title, {})
+        block = f"### {ch_title}"
+        if secs.get("intro"):
+            block += f"\n#### 专业说明\n{secs['intro']}"
+        if secs.get("rules"):
+            block += f"\n#### 工程量计算规则\n{secs['rules']}"
+        knowledge_blocks.append(block)
+
+    # 子目列表
     lines = []
     for sid, code, path_json, unit, price, work in subitems:
         if isinstance(path_json, list):
@@ -221,16 +245,11 @@ def build_bs2024_system_prompt(conn, chapter_id: int) -> tuple[str, str]:
     subitem_text = "\n".join(lines)
     role = _ROLE_DESC_BS2024.replace("{chapter_name}", chapter_name)
 
-    intro_md = sections.get("intro", "（无说明）")
-    rules_md = sections.get("rules", "（无规则）")
-
     prompt = f"""{role}
 
-## 专业说明
-{intro_md}
+## 专业定额知识库
 
-## 工程量计算规则
-{rules_md}
+{"".join(chr(10) + b for b in knowledge_blocks)}
 
 ## 定额子目列表（{chapter_name}，共 {len(subitems)} 条）
 
@@ -512,8 +531,9 @@ def update_match_status(match_id: int, body: dict):
 
 class MatchRunRequest(BaseModel):
     project_id: int
-    chapter_id: int
-    item_ids: list[int] = []    # 空列表 = 全部清单项
+    chapter_id: int = 0          # 兼容旧调用，新调用用 chapter_ids
+    chapter_ids: list[int] = []  # 多专业支持
+    item_ids: list[int] = []
     run_name: str = ""
 
 
@@ -527,9 +547,15 @@ def start_match_stream(req: MatchRunRequest):
         try:
             _ensure_schema(conn)
 
+            # 确定章节 ID 列表（支持多选）
+            cids = req.chapter_ids if req.chapter_ids else ([req.chapter_id] if req.chapter_id else [])
+            if not cids:
+                yield f"data: {json.dumps({'type':'run_error','error':'未选择定额专业'}, ensure_ascii=False)}\n\n"
+                return
+
             # 构建专业上下文（KV Cache）
             try:
-                chapter_name, system_prompt = build_bs2024_system_prompt(conn, req.chapter_id)
+                chapter_name, system_prompt = build_bs2024_system_prompt(conn, cids)
             except ValueError as e:
                 yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"
                 return
@@ -560,9 +586,9 @@ def start_match_stream(req: MatchRunRequest):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO bs2024_match_runs
-                        (project_id, chapter_id, chapter_name, run_name, status, total_items, matched_items)
-                    VALUES (%s, %s, %s, %s, 'running', %s, 0) RETURNING id
-                """, (req.project_id, req.chapter_id, chapter_name,
+                        (project_id, chapter_id, chapter_ids, chapter_name, run_name, status, total_items, matched_items)
+                    VALUES (%s, %s, %s, %s, %s, 'running', %s, 0) RETURNING id
+                """, (req.project_id, cids[0], json.dumps(cids), chapter_name,
                       req.run_name or None, total))
                 run_id = cur.fetchone()[0]
             conn.commit()
