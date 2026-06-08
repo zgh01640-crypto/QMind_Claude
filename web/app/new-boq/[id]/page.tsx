@@ -87,7 +87,7 @@ function StreamPanel({ state, scrollRef, projectId }: {
       </div>
 
       {!state.done && state.reasoningBuffer && (
-        <div className="px-4 py-3 border-b border-indigo-100 bg-indigo-50/40 max-h-48 overflow-y-auto shrink-0" ref={scrollRef}>
+        <div className="px-4 py-3 border-b border-indigo-100 bg-indigo-50/40 max-h-96 overflow-y-auto shrink-0" ref={scrollRef}>
           <div className="text-xs font-medium text-indigo-600 mb-1">🧠 AI 推理中…</div>
           <div className="text-xs text-gray-600 leading-relaxed whitespace-pre-wrap font-mono">
             {state.reasoningBuffer}
@@ -96,7 +96,7 @@ function StreamPanel({ state, scrollRef, projectId }: {
         </div>
       )}
 
-      <div className="divide-y divide-gray-100 overflow-y-auto flex-1" style={{ maxHeight: 320 }}>
+      <div className="divide-y divide-gray-100 overflow-y-auto flex-1" style={{ maxHeight: 480 }}>
         {[...state.completedItems].reverse().map(item => (
           <div key={item.boq_item_id} className="px-4 py-2 text-xs hover:bg-gray-50">
             <div className="flex items-center gap-2 mb-1">
