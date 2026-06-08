@@ -38,6 +38,7 @@ interface BoqItemResult {
   boq_unit: string
   quantity: number | null
   item_description: string
+  reasoning_chain: string
   matches: SubitemMatch[]
 }
 
@@ -190,6 +191,8 @@ export default function NewBoqRunPage() {
   const [results, setResults] = useState<BoqItemResult[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(new Set())
+  const [showAll, setShowAll] = useState<'all' | 'matched' | 'unmatched'>('all')
   const [modalSubitemId, setModalSubitemId] = useState<number | null>(null)
 
   useEffect(() => {
@@ -204,6 +207,9 @@ export default function NewBoqRunPage() {
 
   const toggleExpand = (id: number) =>
     setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+
+  const toggleReasoning = (id: number) =>
+    setExpandedReasoning(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   const updateStatus = async (matchId: number, status: string) => {
     await fetch(`${API}/api/bs2024-match/matches/${matchId}`, {
@@ -271,9 +277,34 @@ export default function NewBoqRunPage() {
         </div>
       )}
 
+      {/* 过滤栏 */}
+      <div className="flex items-center gap-2">
+        {([
+          { label: `全部 (${results.length})`, value: 'all' },
+          { label: `已命中 (${hitCount})`, value: 'matched' },
+          { label: `未命中 (${results.length - hitCount})`, value: 'unmatched' },
+        ] as const).map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => setShowAll(opt.value)}
+            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+              showAll === opt.value
+                ? 'bg-indigo-600 border-indigo-600 text-white'
+                : 'bg-white border-gray-300 text-gray-600 hover:border-indigo-400'
+            }`}
+          >{opt.label}</button>
+        ))}
+      </div>
+
       {/* 结果列表 */}
       <div className="space-y-2">
-        {results.map(item => (
+        {results
+          .filter(item =>
+            showAll === 'all' ? true :
+            showAll === 'matched' ? item.matches.length > 0 :
+            item.matches.length === 0
+          )
+          .map(item => (
           <div key={item.boq_item_id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             {/* 清单项标题行 */}
             <div
@@ -305,6 +336,27 @@ export default function NewBoqRunPage() {
                         <div key={i}>{l}</div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* 推理过程 */}
+                {item.reasoning_chain && (
+                  <div className="border-b border-gray-100">
+                    <button
+                      onClick={() => toggleReasoning(item.boq_item_id)}
+                      className="w-full flex items-center gap-2 px-6 py-2 text-xs text-gray-500 hover:bg-gray-50 text-left"
+                    >
+                      <span className="text-purple-500">🧠</span>
+                      <span className="font-medium">AI 推理过程</span>
+                      <span className="ml-auto text-gray-300">{expandedReasoning.has(item.boq_item_id) ? '▲' : '▼'}</span>
+                    </button>
+                    {expandedReasoning.has(item.boq_item_id) && (
+                      <div className="px-6 pb-3 bg-purple-50/40">
+                        <div className="text-xs text-gray-600 leading-relaxed whitespace-pre-wrap font-mono max-h-64 overflow-y-auto bg-white rounded border border-purple-100 p-3">
+                          {item.reasoning_chain}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

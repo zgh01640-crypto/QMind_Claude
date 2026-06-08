@@ -61,6 +61,15 @@ def _ensure_schema(conn):
                 UNIQUE (run_id, boq_item_id, subitem_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bs2024_item_logs (
+                id            SERIAL PRIMARY KEY,
+                run_id        INT NOT NULL REFERENCES bs2024_match_runs(id) ON DELETE CASCADE,
+                boq_item_id   INT NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
+                reasoning_chain TEXT,
+                UNIQUE (run_id, boq_item_id)
+            )
+        """)
     conn.commit()
 
 
@@ -382,39 +391,44 @@ def get_runs(project_id: int = Query(...)):
 
 @router.get("/bs2024-match/runs/{run_id}/matches")
 def get_run_matches(run_id: int):
-    """批次匹配结果（含子目信息）。"""
+    """批次匹配结果（含所有处理过的清单项，包括未命中）。"""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            # 先取所有处理过的清单项（来自 item_logs）
+            cur.execute("""
+                SELECT log.boq_item_id, log.reasoning_chain,
+                       bi.item_code, bi.item_name, bi.unit AS boq_unit, bi.quantity,
+                       bi.item_description, bi.item_seq
+                FROM bs2024_item_logs log
+                JOIN boq_items bi ON bi.id = log.boq_item_id
+                WHERE log.run_id = %s
+                ORDER BY bi.item_seq
+            """, (run_id,))
+            item_rows = cur.fetchall()
+
+            # 再取所有匹配记录
             cur.execute("""
                 SELECT m.id, m.boq_item_id,
-                       bi.item_code, bi.item_name, bi.unit AS boq_unit, bi.quantity,
-                       bi.item_description,
                        m.subitem_id, m.subitem_code, m.work_procedure,
                        m.qty_factor, m.factor_explanation, m.ai_reasoning,
                        m.confidence, m.missing_info, m.status,
                        sub.total_unit_price, sub.unit AS quota_unit,
                        sub.name_path_json
                 FROM bs2024_quota_matches m
-                JOIN boq_items bi ON bi.id = m.boq_item_id
                 JOIN bs2024_subitems sub ON sub.id = m.subitem_id
                 WHERE m.run_id = %s
-                ORDER BY bi.item_seq, m.id
+                ORDER BY m.id
             """, (run_id,))
-            rows = cur.fetchall()
+            match_rows = cur.fetchall()
 
-        result = {}
-        for r in rows:
+        # 按 boq_item_id 分组匹配记录
+        matches_by_item: dict = {}
+        for r in match_rows:
             bid = r[1]
-            if bid not in result:
-                result[bid] = {
-                    "boq_item_id": bid,
-                    "item_code": r[2], "item_name": r[3],
-                    "boq_unit": r[4], "quantity": float(r[5]) if r[5] else None,
-                    "item_description": r[6] or "",
-                    "matches": [],
-                }
-            path_json = r[18]
+            if bid not in matches_by_item:
+                matches_by_item[bid] = []
+            path_json = r[13]
             if isinstance(path_json, list):
                 path_str = " > ".join(path_json)
             else:
@@ -422,22 +436,34 @@ def get_run_matches(run_id: int):
                     path_str = " > ".join(json.loads(path_json))
                 except Exception:
                     path_str = str(path_json)
-
-            result[bid]["matches"].append({
+            matches_by_item[bid].append({
                 "match_id": r[0],
-                "subitem_id": r[7], "subitem_code": r[8],
+                "subitem_id": r[2], "subitem_code": r[3],
                 "name_path": path_str,
-                "work_procedure": r[9],
-                "qty_factor": float(r[10]) if r[10] else 1.0,
-                "factor_explanation": r[11],
-                "ai_reasoning": r[12],
-                "confidence": r[13], "missing_info": r[14],
-                "status": r[15],
-                "total_unit_price": float(r[16]) if r[16] else None,
-                "quota_unit": r[17],
+                "work_procedure": r[4],
+                "qty_factor": float(r[5]) if r[5] else 1.0,
+                "factor_explanation": r[6],
+                "ai_reasoning": r[7],
+                "confidence": r[8], "missing_info": r[9],
+                "status": r[10],
+                "total_unit_price": float(r[11]) if r[11] else None,
+                "quota_unit": r[12],
             })
 
-        return list(result.values())
+        # 合并结果
+        result = []
+        for row in item_rows:
+            bid = row[0]
+            result.append({
+                "boq_item_id": bid,
+                "reasoning_chain": row[1] or "",
+                "item_code": row[2], "item_name": row[3],
+                "boq_unit": row[4], "quantity": float(row[5]) if row[5] else None,
+                "item_description": row[6] or "",
+                "matches": matches_by_item.get(bid, []),
+            })
+
+        return result
     finally:
         conn.close()
 
@@ -609,9 +635,11 @@ def start_match_stream(req: MatchRunRequest):
                 yield f"data: {json.dumps({'type':'item_start','index':idx+1,'total':total,'boq_item_id':item_id,'item_name':item_name}, ensure_ascii=False)}\n\n"
 
                 raw_results = []
+                reasoning_parts: list[str] = []
                 try:
                     for event_type, data in stream_match_bs2024_item(boq_item, system_prompt):
                         if event_type == "reasoning_token":
+                            reasoning_parts.append(data)
                             yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
                         elif event_type == "result":
                             raw_results = data
@@ -667,6 +695,13 @@ def start_match_stream(req: MatchRunRequest):
                         "UPDATE bs2024_match_runs SET matched_items=%s WHERE id=%s",
                         (matched_count, run_id)
                     )
+                    # 保存推理链（无论是否命中）
+                    full_reasoning = "".join(reasoning_parts)
+                    cur.execute("""
+                        INSERT INTO bs2024_item_logs (run_id, boq_item_id, reasoning_chain)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (run_id, boq_item_id) DO UPDATE SET reasoning_chain = EXCLUDED.reasoning_chain
+                    """, (run_id, item_id, full_reasoning))
                 conn.commit()
 
                 yield f"data: {json.dumps({'type':'item_done','boq_item_id':item_id,'matches':saved_matches}, ensure_ascii=False)}\n\n"
