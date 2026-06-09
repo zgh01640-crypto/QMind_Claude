@@ -255,7 +255,13 @@ def build_bs2024_system_prompt(conn, chapter_ids: int | list[int]) -> tuple[str,
         lines.append(f"[ID:{sid}|{code}] {path_str} | 单位:{unit or '—'} | 全费用:{price_str} | {work_str}")
 
     subitem_text = "\n".join(lines)
-    role = _ROLE_DESC_BS2024.replace("{chapter_name}", chapter_name)
+
+    # 优先从数据库读取激活的提示词模板，否则使用内置默认值
+    with conn.cursor() as cur:
+        cur.execute("SELECT content FROM prompt_templates WHERE is_active=TRUE LIMIT 1")
+        tpl_row = cur.fetchone()
+    role_template = tpl_row[0] if tpl_row else _ROLE_DESC_BS2024
+    role = role_template.replace("{chapter_name}", chapter_name)
 
     prompt = f"""{role}
 
