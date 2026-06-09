@@ -581,6 +581,61 @@ def get_subitem_detail(subitem_id: int):
         conn.close()
 
 
+@router.get("/bs2024-match/manual-compare")
+def get_manual_compare(manual_project_id: int = Query(...)):
+    """
+    获取人工套定额工程的配额结果，按 item_code 索引，用于与 AI 批次横向对比。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # 项目名称
+            cur.execute(
+                "SELECT project_name FROM manual_boq_projects WHERE id = %s",
+                (manual_project_id,)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "人工套定额工程不存在")
+            project_name = row[0]
+
+            # 获取所有清单项及其配额
+            cur.execute("""
+                SELECT i.item_code, i.item_name, i.unit, i.quantity,
+                       q.quota_code, q.quota_name, q.quota_unit,
+                       q.qty_factor, q.unit_price, q.total_price
+                FROM manual_boq_items i
+                JOIN manual_boq_quotas q ON q.boq_item_id = i.id
+                WHERE i.project_id = %s
+                  AND i.item_code IS NOT NULL
+                  AND q.quota_code IS NOT NULL AND q.quota_code != ''
+                ORDER BY i.item_seq, i.item_code, q.id
+            """, (manual_project_id,))
+            rows = cur.fetchall()
+
+        items: dict = {}
+        for r in rows:
+            code = r[0]
+            if code not in items:
+                items[code] = {
+                    "item_code": code, "item_name": r[1],
+                    "unit": r[2], "quantity": float(r[3]) if r[3] else None,
+                    "quotas": [],
+                }
+            items[code]["quotas"].append({
+                "quota_code": r[4],
+                "quota_name": r[5],
+                "quota_unit": r[6],
+                "qty_factor": float(r[7]) if r[7] is not None else 1.0,
+                "unit_price": float(r[8]) if r[8] else None,
+                "total_price": float(r[9]) if r[9] else None,
+            })
+
+        return {"project_name": project_name, "items": items}
+    finally:
+        conn.close()
+
+
 @router.put("/bs2024-match/matches/{match_id}")
 def update_match_status(match_id: int, body: dict):
     """确认/拒绝/重置一条匹配。body: {status: 'confirmed'|'rejected'|'ai'}"""

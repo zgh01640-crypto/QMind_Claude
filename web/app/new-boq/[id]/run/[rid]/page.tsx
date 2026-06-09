@@ -43,6 +43,27 @@ interface BoqItemResult {
   matches: SubitemMatch[]
 }
 
+interface ManualProject {
+  id: number
+  project_name: string
+  bid_section?: string
+  item_count?: number
+}
+
+interface ManualQuota {
+  quota_code: string
+  quota_name: string
+  quota_unit: string | null
+  qty_factor: number
+  unit_price: number | null
+  total_price: number | null
+}
+
+interface ManualCompareData {
+  project_name: string
+  items: Record<string, { item_code: string; item_name: string; unit: string | null; quantity: number | null; quotas: ManualQuota[] }>
+}
+
 interface SubitemDetail {
   subitem_code: string
   name_path: string
@@ -196,6 +217,27 @@ export default function NewBoqRunPage() {
   const [showAll, setShowAll] = useState<'all' | 'matched' | 'unmatched'>('all')
   const [modalSubitemId, setModalSubitemId] = useState<number | null>(null)
   const [showPrompt, setShowPrompt] = useState(false)
+  const [compareMode, setCompareMode] = useState(false)
+  const [manualProjects, setManualProjects] = useState<ManualProject[]>([])
+  const [selectedManualId, setSelectedManualId] = useState<number | null>(null)
+  const [manualData, setManualData] = useState<ManualCompareData | null>(null)
+  const [loadingManual, setLoadingManual] = useState(false)
+
+  useEffect(() => {
+    fetch(`${API}/api/manual-boq/projects`).then(r => r.json())
+      .then(d => setManualProjects(Array.isArray(d) ? d : []))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!selectedManualId) { setManualData(null); return }
+    setLoadingManual(true)
+    fetch(`${API}/api/bs2024-match/manual-compare?manual_project_id=${selectedManualId}`)
+      .then(r => r.json())
+      .then(d => setManualData(d && !d.detail ? d : null))
+      .catch(() => setManualData(null))
+      .finally(() => setLoadingManual(false))
+  }, [selectedManualId])
 
   useEffect(() => {
     Promise.all([
@@ -301,6 +343,38 @@ export default function NewBoqRunPage() {
         </div>
       )}
 
+      {/* 人工套定额对比控制栏 */}
+      <div className="bg-white rounded-lg border border-gray-200 p-3 flex items-center gap-3 flex-wrap">
+        <button
+          onClick={() => { setCompareMode(v => !v); if (compareMode) { setSelectedManualId(null); setManualData(null) } }}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+            compareMode
+              ? 'bg-green-600 border-green-600 text-white'
+              : 'bg-white border-gray-300 text-gray-600 hover:border-green-400'
+          }`}
+        >
+          {compareMode ? '✓ 对比模式开启' : '对比人工套定额'}
+        </button>
+        {compareMode && (
+          <>
+            <select
+              value={selectedManualId ?? ''}
+              onChange={e => setSelectedManualId(e.target.value ? Number(e.target.value) : null)}
+              className="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-48 focus:outline-none focus:ring-2 focus:ring-green-400"
+            >
+              <option value="">-- 选择人工套定额工程 --</option>
+              {manualProjects.map(p => (
+                <option key={p.id} value={p.id}>{p.project_name}{p.bid_section ? ` · ${p.bid_section}` : ''}</option>
+              ))}
+            </select>
+            {loadingManual && <span className="text-xs text-gray-400 animate-pulse">加载中…</span>}
+            {manualData && !loadingManual && (
+              <span className="text-xs text-green-600">已加载：{manualData.project_name}（{Object.keys(manualData.items).length} 条清单）</span>
+            )}
+          </>
+        )}
+      </div>
+
       {/* 过滤栏 */}
       <div className="flex items-center gap-2">
         {([
@@ -385,73 +459,139 @@ export default function NewBoqRunPage() {
                 )}
 
                 {/* 匹配结果 */}
-                {item.matches.length === 0 ? (
-                  <div className="px-8 py-4 text-sm text-gray-400">该清单项未找到匹配的定额子目</div>
-                ) : (
-                  <div className="divide-y divide-gray-100">
-                    {item.matches.map((m, i) => (
-                      <div key={m.match_id} className={`px-6 py-3 ${m.status === 'rejected' ? 'opacity-40' : ''}`}>
-                        <div className="flex items-start gap-3">
-                          <span className="text-xs text-gray-400 shrink-0 mt-1">#{i + 1}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              {/* 子目编码 - 可点击 */}
-                              <button
-                                onClick={() => setModalSubitemId(m.subitem_id)}
-                                className="font-mono text-blue-700 font-bold text-sm hover:text-blue-900 hover:underline underline-offset-2"
-                              >
-                                {m.subitem_code}
-                              </button>
-                              <span className={`text-xs px-1.5 py-0.5 rounded border ${confColor(m.confidence)}`}>{confLabel(m.confidence)}</span>
-                              <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(m.status)}`}>
-                                {m.status === 'confirmed' ? '已确认' : m.status === 'rejected' ? '已拒绝' : 'AI建议'}
-                              </span>
+                {compareMode && manualData ? (
+                  /* 对比双栏 */
+                  <div className="grid grid-cols-2 divide-x divide-gray-200">
+                    {/* 左：AI 套定额 */}
+                    <div>
+                      <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-100 text-xs font-medium text-indigo-700">
+                        🤖 AI 套定额
+                      </div>
+                      {item.matches.length === 0 ? (
+                        <div className="px-4 py-6 text-xs text-gray-400 text-center">无 AI 匹配</div>
+                      ) : (
+                        <div className="divide-y divide-gray-100">
+                          {item.matches.map((m, i) => (
+                            <div key={m.match_id} className={`px-4 py-2.5 text-xs ${m.status === 'rejected' ? 'opacity-40' : ''}`}>
+                              <div className="flex items-center gap-2 mb-1">
+                                <button onClick={() => setModalSubitemId(m.subitem_id)}
+                                  className="font-mono text-blue-700 font-bold hover:underline">{m.subitem_code}</button>
+                                <span className={`px-1.5 py-0.5 rounded border text-xs ${confColor(m.confidence)}`}>{confLabel(m.confidence)}</span>
+                              </div>
+                              <div className="text-gray-700 mb-1">{m.name_path}</div>
+                              <div className="flex flex-wrap gap-2 text-gray-500">
+                                <span>工序：{m.work_procedure || '—'}</span>
+                                <span>系数：{m.qty_factor}</span>
+                                {m.total_unit_price != null && (
+                                  <span className="text-indigo-600 font-medium">¥{m.total_unit_price.toLocaleString('zh-CN', {maximumFractionDigits:2})}</span>
+                                )}
+                              </div>
+                              {m.ai_reasoning && (
+                                <div className="mt-1 text-gray-400 bg-gray-50 rounded px-2 py-1 leading-relaxed">{m.ai_reasoning}</div>
+                              )}
+                              <div className="flex gap-1 mt-1">
+                                {m.status !== 'confirmed' && <button onClick={() => updateStatus(m.match_id, 'confirmed')} className="px-1.5 py-0.5 rounded border border-green-300 text-green-700 hover:bg-green-50">确认</button>}
+                                {m.status !== 'rejected' && <button onClick={() => updateStatus(m.match_id, 'rejected')} className="px-1.5 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">拒绝</button>}
+                                {m.status !== 'ai' && <button onClick={() => updateStatus(m.match_id, 'ai')} className="px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-50">重置</button>}
+                              </div>
                             </div>
-                            <div className="text-sm text-gray-700 mb-1">{m.name_path}</div>
-                            <div className="flex flex-wrap gap-3 text-xs text-gray-500">
-                              <span>工序：{m.work_procedure || '—'}</span>
-                              <span>单位：{m.quota_unit || '—'}</span>
-                              <span>换算系数：{m.qty_factor}</span>
-                              {m.factor_explanation && <span>（{m.factor_explanation}）</span>}
-                              {m.total_unit_price != null && (
-                                <span className="text-indigo-600 font-medium">
-                                  全费用单价：¥{m.total_unit_price.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* 右：人工套定额 */}
+                    <div>
+                      <div className="px-4 py-2 bg-green-50 border-b border-green-100 text-xs font-medium text-green-700">
+                        👷 人工套定额 · {manualData.project_name}
+                      </div>
+                      {(() => {
+                        const manualItem = manualData.items[item.item_code]
+                        if (!manualItem || manualItem.quotas.length === 0) {
+                          return <div className="px-4 py-6 text-xs text-gray-400 text-center">无人工匹配</div>
+                        }
+                        return (
+                          <div className="divide-y divide-gray-100">
+                            {manualItem.quotas.map((q, i) => (
+                              <div key={i} className="px-4 py-2.5 text-xs">
+                                <div className="font-mono text-green-700 font-bold mb-1">{q.quota_code}</div>
+                                <div className="text-gray-700 mb-1">{q.quota_name}</div>
+                                <div className="flex flex-wrap gap-2 text-gray-500">
+                                  <span>单位：{q.quota_unit || '—'}</span>
+                                  <span>系数：{q.qty_factor}</span>
+                                  {q.unit_price != null && (
+                                    <span className="text-green-600 font-medium">¥{q.unit_price.toLocaleString('zh-CN', {maximumFractionDigits:2})}</span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                ) : (
+                  /* 单列：原有展示 */
+                  item.matches.length === 0 ? (
+                    <div className="px-8 py-4 text-sm text-gray-400">该清单项未找到匹配的定额子目</div>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {item.matches.map((m, i) => (
+                        <div key={m.match_id} className={`px-6 py-3 ${m.status === 'rejected' ? 'opacity-40' : ''}`}>
+                          <div className="flex items-start gap-3">
+                            <span className="text-xs text-gray-400 shrink-0 mt-1">#{i + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <button
+                                  onClick={() => setModalSubitemId(m.subitem_id)}
+                                  className="font-mono text-blue-700 font-bold text-sm hover:text-blue-900 hover:underline underline-offset-2"
+                                >
+                                  {m.subitem_code}
+                                </button>
+                                <span className={`text-xs px-1.5 py-0.5 rounded border ${confColor(m.confidence)}`}>{confLabel(m.confidence)}</span>
+                                <span className={`text-xs px-1.5 py-0.5 rounded ${statusColor(m.status)}`}>
+                                  {m.status === 'confirmed' ? '已确认' : m.status === 'rejected' ? '已拒绝' : 'AI建议'}
                                 </span>
+                              </div>
+                              <div className="text-sm text-gray-700 mb-1">{m.name_path}</div>
+                              <div className="flex flex-wrap gap-3 text-xs text-gray-500">
+                                <span>工序：{m.work_procedure || '—'}</span>
+                                <span>单位：{m.quota_unit || '—'}</span>
+                                <span>换算系数：{m.qty_factor}</span>
+                                {m.factor_explanation && <span>（{m.factor_explanation}）</span>}
+                                {m.total_unit_price != null && (
+                                  <span className="text-indigo-600 font-medium">
+                                    全费用单价：¥{m.total_unit_price.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}
+                                  </span>
+                                )}
+                              </div>
+                              {m.ai_reasoning && (
+                                <div className="mt-1.5 text-xs text-gray-400 bg-gray-50 rounded px-2 py-1.5 leading-relaxed">
+                                  {m.ai_reasoning}
+                                </div>
+                              )}
+                              {m.missing_info && (
+                                <div className="mt-1 text-xs text-orange-500">⚠ 缺少信息：{m.missing_info}</div>
                               )}
                             </div>
-                            {m.ai_reasoning && (
-                              <div className="mt-1.5 text-xs text-gray-400 bg-gray-50 rounded px-2 py-1.5 leading-relaxed">
-                                {m.ai_reasoning}
-                              </div>
-                            )}
-                            {m.missing_info && (
-                              <div className="mt-1 text-xs text-orange-500">⚠ 缺少信息：{m.missing_info}</div>
-                            )}
-                          </div>
-                          <div className="flex gap-1 shrink-0">
-                            {m.status !== 'confirmed' && (
-                              <button
-                                onClick={() => updateStatus(m.match_id, 'confirmed')}
-                                className="text-xs px-2 py-1 rounded border border-green-300 text-green-700 hover:bg-green-50"
-                              >确认</button>
-                            )}
-                            {m.status !== 'rejected' && (
-                              <button
-                                onClick={() => updateStatus(m.match_id, 'rejected')}
-                                className="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50"
-                              >拒绝</button>
-                            )}
-                            {m.status !== 'ai' && (
-                              <button
-                                onClick={() => updateStatus(m.match_id, 'ai')}
-                                className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500 hover:bg-gray-50"
-                              >重置</button>
-                            )}
+                            <div className="flex gap-1 shrink-0">
+                              {m.status !== 'confirmed' && (
+                                <button onClick={() => updateStatus(m.match_id, 'confirmed')}
+                                  className="text-xs px-2 py-1 rounded border border-green-300 text-green-700 hover:bg-green-50">确认</button>
+                              )}
+                              {m.status !== 'rejected' && (
+                                <button onClick={() => updateStatus(m.match_id, 'rejected')}
+                                  className="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50">拒绝</button>
+                              )}
+                              {m.status !== 'ai' && (
+                                <button onClick={() => updateStatus(m.match_id, 'ai')}
+                                  className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500 hover:bg-gray-50">重置</button>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )
                 )}
               </div>
             )}
