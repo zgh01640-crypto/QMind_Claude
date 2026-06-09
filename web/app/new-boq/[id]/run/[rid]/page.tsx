@@ -489,6 +489,9 @@ export default function NewBoqRunPage() {
                               {m.ai_reasoning && (
                                 <div className="mt-1 text-gray-400 bg-gray-50 rounded px-2 py-1 leading-relaxed">{m.ai_reasoning}</div>
                               )}
+                              {m.missing_info && (
+                                <div className="mt-1 text-xs text-orange-500">⚠ 缺少信息：{m.missing_info}</div>
+                              )}
                               <div className="flex gap-1 mt-1">
                                 {m.status !== 'confirmed' && <button onClick={() => updateStatus(m.match_id, 'confirmed')} className="px-1.5 py-0.5 rounded border border-green-300 text-green-700 hover:bg-green-50">确认</button>}
                                 {m.status !== 'rejected' && <button onClick={() => updateStatus(m.match_id, 'rejected')} className="px-1.5 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">拒绝</button>}
