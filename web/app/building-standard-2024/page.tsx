@@ -4,6 +4,12 @@ import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  BuildingStandardHeader,
+  BuildingStandardSidebar,
+  pageRange,
+  StandardStat,
+} from '@/components/BuildingStandard2024Layout'
+import {
   fetchBS2024Documents,
   fetchBS2024Tree,
   fetchBS2024Section,
@@ -34,21 +40,6 @@ const tabLabels: Record<TabType, string> = {
 function fmt(v: number | null | undefined, digits = 2) {
   if (v == null) return '—'
   return v.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
-}
-
-function pageRange(start: number | null, end: number | null) {
-  if (!start && !end) return '—'
-  if (start === end || !end) return `P${start}`
-  return `P${start}-${end}`
-}
-
-function Stat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="min-w-28 rounded border border-gray-200 bg-white px-3 py-2">
-      <div className="text-xs text-gray-400">{label}</div>
-      <div className="mt-0.5 text-sm font-semibold text-gray-800 tabular-nums">{value}</div>
-    </div>
-  )
 }
 
 function MarkdownView({ content }: { content: string | null }) {
@@ -501,7 +492,9 @@ export default function BuildingStandard2024Page() {
     Promise.all([fetchBS2024Tree(documentId), fetchBS2024Issues(documentId)])
       .then(([treeData, issueData]) => {
         setTree(treeData)
-        setSelectedChapterId(treeData[0]?.id ?? null)
+        const requestedChapterId = Number(new URLSearchParams(window.location.search).get('chapter'))
+        const requestedChapter = treeData.find(chapter => chapter.id === requestedChapterId)
+        setSelectedChapterId(requestedChapter?.id ?? treeData[0]?.id ?? null)
         setIssues(issueData)
         setActiveTab('intro')
       })
@@ -560,123 +553,98 @@ export default function BuildingStandard2024Page() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="border-b border-gray-200 bg-white px-5 py-4">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-bold text-gray-900">建筑消耗量标准2024</h1>
-            <p className="mt-1 text-sm text-gray-500">本地 OCR 解析入库，保留页源、层级、说明规则和子目表结构。</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={documentId ?? ''}
-              onChange={e => setDocumentId(Number(e.target.value))}
-              className="rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700"
-            >
-              {documents.map(doc => (
-                <option key={doc.id} value={doc.id}>{doc.standard_code} - {doc.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
+      <BuildingStandardHeader
+        documents={documents}
+        documentId={documentId}
+        onDocumentChange={setDocumentId}
+        error={error}
+        stats={selectedDocument ? (
+          <>
+            <StandardStat label="页数" value={selectedDocument.page_count} />
+            <StandardStat label="章节" value={selectedDocument.chapter_count} />
+            <StandardStat label="子目" value={selectedDocument.subitem_count} />
+            <StandardStat label="解析问题" value={selectedDocument.issue_count} />
+            <StandardStat label="导入状态" value={selectedDocument.latest_run_status ?? '—'} />
+          </>
+        ) : null}
+      />
 
-        {selectedDocument && (
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Stat label="页数" value={selectedDocument.page_count} />
-            <Stat label="章节" value={selectedDocument.chapter_count} />
-            <Stat label="子目" value={selectedDocument.subitem_count} />
-            <Stat label="解析问题" value={selectedDocument.issue_count} />
-            <Stat label="导入状态" value={selectedDocument.latest_run_status ?? '—'} />
-          </div>
-        )}
-
-        {error && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-      </div>
-
-      <div className="grid min-h-[calc(100vh-170px)] grid-cols-[280px_1fr]">
-        <aside className="border-r border-gray-200 bg-white">
-          <div className="border-b border-gray-100 p-3">
-            <div className="flex gap-2">
-              <input
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
-                placeholder="搜索子目、项目、工料机"
-                className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={runSearch}
-                className="rounded bg-blue-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-800"
-              >
-                搜索
-              </button>
-            </div>
-          </div>
-          {results.length > 0 && (
-            <div className="max-h-64 overflow-y-auto border-b border-gray-100 p-3">
-              <div className="mb-2 text-xs font-medium text-gray-500">搜索结果</div>
-              <div className="space-y-1">
-                {results.map(r => (
-                  <div key={r.id} className="rounded border border-gray-100 px-2 py-1.5 text-xs">
-                    <div className="font-mono font-medium text-blue-700">{r.subitem_code}</div>
-                    <div className="truncate text-gray-700">{r.name}</div>
-                    <div className="truncate text-gray-400">{r.group_code} {r.group_name}</div>
-                  </div>
-                ))}
+      <div className="grid min-h-[calc(100vh-170px)] lg:grid-cols-[280px_minmax(0,1fr)]">
+        <BuildingStandardSidebar
+          tree={tree}
+          selectedChapterId={selectedChapterId}
+          onChapterClick={chapter => {
+            setSelectedChapterId(chapter.id)
+            setActiveTab('intro')
+            setGroupDetails({})
+            window.history.replaceState(null, '', `/building-standard-2024?chapter=${chapter.id}`)
+          }}
+          topContent={(
+            <>
+              <div className="border-b border-gray-100 p-3">
+                <div className="flex gap-2">
+                  <input
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
+                    placeholder="搜索子目、项目、工料机"
+                    className="min-w-0 flex-1 rounded border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={runSearch}
+                    className="rounded bg-blue-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-800"
+                  >
+                    搜索
+                  </button>
+                </div>
               </div>
+              {results.length > 0 && (
+                <div className="max-h-64 overflow-y-auto border-b border-gray-100 p-3">
+                  <div className="mb-2 text-xs font-medium text-gray-500">搜索结果</div>
+                  <div className="space-y-1">
+                    {results.map(r => (
+                      <div key={r.id} className="rounded border border-gray-100 px-2 py-1.5 text-xs">
+                        <div className="font-mono font-medium text-blue-700">{r.subitem_code}</div>
+                        <div className="truncate text-gray-700">{r.name}</div>
+                        <div className="truncate text-gray-400">{r.group_code} {r.group_name}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          renderChapterDetails={chapter => (
+            <div className="bg-gray-50 px-4 py-1.5">
+              {(['intro', 'rules', 'items'] as TabType[]).map(tab => {
+                const sec = chapter.sections.find(s => s.section_type === tab)
+                const tabSections = chapter.sections.filter(s => s.section_type === tab)
+                const starts = tabSections.map(s => s.page_start).filter((v): v is number => v != null)
+                const ends = tabSections.map(s => s.page_end).filter((v): v is number => v != null)
+                const tabRange = tabSections.length
+                  ? pageRange(starts.length ? Math.min(...starts) : null, ends.length ? Math.max(...ends) : null)
+                  : ''
+                return (
+                  <button
+                    key={tab}
+                    disabled={!sec}
+                    onClick={() => {
+                      setActiveTab(tab)
+                      setGroupDetails({})
+                    }}
+                    className={`my-0.5 block w-full rounded px-3 py-1.5 text-left text-xs ${
+                      activeTab === tab
+                        ? 'bg-blue-100 font-medium text-blue-700'
+                        : sec ? 'text-gray-600 hover:bg-gray-200' : 'text-gray-300'
+                    }`}
+                  >
+                    {tabLabels[tab]} {sec ? <span className="text-gray-400">{tabRange}</span> : ''}
+                  </button>
+                )
+              })}
             </div>
           )}
-          <div className="max-h-[calc(100vh-260px)] overflow-y-auto py-2">
-            {tree.map(chapter => (
-              <div key={chapter.id}>
-                <button
-                  onClick={() => {
-                    setSelectedChapterId(chapter.id)
-                    setActiveTab('intro')
-                    setGroupDetails({})
-                  }}
-                  className={`w-full px-4 py-2.5 text-left text-sm transition ${
-                    selectedChapterId === chapter.id
-                      ? 'border-l-2 border-blue-700 bg-blue-50 text-blue-700'
-                      : 'border-l-2 border-transparent text-gray-700 hover:bg-gray-50'
-                  }`}
-                >
-                  <div className="font-medium">第{chapter.chapter_no}章 {chapter.title}</div>
-                  <div className="mt-0.5 text-xs text-gray-400">{pageRange(chapter.page_start, chapter.page_end)}</div>
-                </button>
-                {selectedChapterId === chapter.id && (
-                  <div className="bg-gray-50 px-4 py-1.5">
-                    {(['intro', 'rules', 'items'] as TabType[]).map(tab => {
-                      const sec = chapter.sections.find(s => s.section_type === tab)
-                      const tabSections = chapter.sections.filter(s => s.section_type === tab)
-                      const starts = tabSections.map(s => s.page_start).filter((v): v is number => v != null)
-                      const ends = tabSections.map(s => s.page_end).filter((v): v is number => v != null)
-                      const tabRange = tabSections.length
-                        ? pageRange(starts.length ? Math.min(...starts) : null, ends.length ? Math.max(...ends) : null)
-                        : ''
-                      return (
-                        <button
-                          key={tab}
-                          disabled={!sec}
-                          onClick={() => {
-                            setActiveTab(tab)
-                            setGroupDetails({})
-                          }}
-                          className={`my-0.5 block w-full rounded px-3 py-1.5 text-left text-xs ${
-                            activeTab === tab
-                              ? 'bg-blue-100 font-medium text-blue-700'
-                              : sec ? 'text-gray-600 hover:bg-gray-200' : 'text-gray-300'
-                          }`}
-                        >
-                          {tabLabels[tab]} {sec ? <span className="text-gray-400">{tabRange}</span> : ''}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </aside>
+        />
 
         <main className="min-w-0 p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

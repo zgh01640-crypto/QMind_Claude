@@ -898,6 +898,68 @@ export const searchBS2024 = (documentId: number, q: string) =>
 export const fetchBS2024Issues = (documentId: number) =>
   req<BS2024Issue[]>(`/api/building-standard-2024/parse-issues?document_id=${documentId}`)
 
+export interface StandardReferencePrice {
+  id: number
+  document_id: number
+  appendix_code: string
+  sequence_no: number
+  resource_type: '材料' | '机械'
+  name: string
+  unit: string
+  price: number
+  source_page_no: number
+  source_page_id: number | null
+  confidence: number | null
+  raw_json: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface StandardReferencePriceList {
+  total: number
+  page: number
+  page_size: number
+  items: StandardReferencePrice[]
+}
+
+export interface StandardReferencePriceFilterOptions {
+  total: number
+  material_count: number
+  machine_count: number
+  units: string[]
+}
+
+export function fetchStandardReferencePrices(params: {
+  document_id: number
+  appendix_code?: string
+  q?: string
+  unit?: string
+  resource_type?: '材料' | '机械' | ''
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams({
+    document_id: String(params.document_id),
+    appendix_code: params.appendix_code ?? 'A',
+  })
+  if (params.q) query.set('q', params.q)
+  if (params.unit) query.set('unit', params.unit)
+  if (params.resource_type) query.set('resource_type', params.resource_type)
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<StandardReferencePriceList>(`/api/standard-reference-prices?${query}`)
+}
+
+export function fetchStandardReferencePriceFilterOptions(documentId: number, appendixCode = 'A') {
+  const query = new URLSearchParams({
+    document_id: String(documentId),
+    appendix_code: appendixCode,
+  })
+  return req<StandardReferencePriceFilterOptions>(
+    `/api/standard-reference-prices/filter-options?${query}`,
+  )
+}
+
 // ── 调试批次 ──────────────────────────────────────────────────────────────────
 
 export interface DebugBatch {
