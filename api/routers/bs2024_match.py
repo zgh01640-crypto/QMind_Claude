@@ -291,10 +291,12 @@ def _build_boq_user_msg(boq_item: dict) -> str:
 请按推理步骤分析，调用 submit_matches 函数返回匹配结果。"""
 
 
-def stream_match_bs2024_item(boq_item: dict, system_prompt: str):
+def stream_match_bs2024_item(boq_item: dict, system_prompt: str, max_retries: int = 2):
     """
     流式匹配单条清单项。
     yield ("reasoning_token", str) 或 ("result", list[dict])
+
+    为保证 submit_matches 调用不丢失，改用非流式 API，仅逐行流式显示推理。
     """
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:
@@ -304,43 +306,68 @@ def stream_match_bs2024_item(boq_item: dict, system_prompt: str):
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": _build_boq_user_msg(boq_item)},
-        ],
-        tools=[_MATCH_TOOL_BS2024],
-        tool_choice="auto",
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort="high",
-        max_tokens=8000,
-        stream=True,
-    )
-
-    full_reasoning_parts: list[str] = []
-    tool_call_args = ""
-
-    for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        rc = getattr(delta, "reasoning_content", None)
-        if rc:
-            full_reasoning_parts.append(rc)
-            yield ("reasoning_token", rc)
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                if tc.function and tc.function.arguments:
-                    tool_call_args += tc.function.arguments
-
     results = []
-    if tool_call_args:
+    last_error = None
+
+    for attempt in range(max_retries):
         try:
-            raw = json.loads(tool_call_args)
-            results = raw.get("matches", [])
-        except (json.JSONDecodeError, KeyError):
-            pass
+            # 非流式调用，确保完整接收工具调用
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": _build_boq_user_msg(boq_item)},
+                ],
+                tools=[_MATCH_TOOL_BS2024],
+                tool_choice="required",  # 强制调用工具
+                extra_body={"thinking": {"type": "enabled"}},
+                reasoning_effort="high",
+                max_tokens=8000,
+                stream=False,
+            )
+
+            # 提取推理内容并流式输出
+            if response.choices and response.choices[0].message:
+                msg = response.choices[0].message
+                if hasattr(msg, 'thinking') and msg.thinking:
+                    # 按行拆分推理内容，逐行流式输出
+                    for line in msg.thinking.split('\n'):
+                        if line.strip():
+                            yield ("reasoning_token", line + '\n')
+
+            # 提取工具调用结果
+            if response.choices and response.choices[0].message:
+                tool_calls = response.choices[0].message.tool_calls
+                if tool_calls:
+                    for tc in tool_calls:
+                        if tc.function.name == "submit_matches":
+                            try:
+                                args = json.loads(tc.function.arguments)
+                                results = args.get("matches", [])
+                                break  # 成功提取，跳出重试循环
+                            except json.JSONDecodeError as e:
+                                last_error = f"工具参数 JSON 解析失败: {e}"
+                                continue
+
+            if results or attempt == max_retries - 1:
+                break  # 成功或最后一次尝试，返回结果（可能为空）
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(1)  # 重试前等待
+                continue
+            else:
+                # 最后一次尝试失败，记录错误但继续
+                import sys
+                print(f"[WARN] 套定额项目 {boq_item.get('item_code')} 第{attempt+1}次尝试失败: {last_error}",
+                      file=sys.stderr)
+
+    if not results and last_error:
+        import sys
+        print(f"[WARN] 清单项 {boq_item.get('item_code')} 无法获得匹配结果（已重试{max_retries}次）: {last_error}",
+              file=sys.stderr)
 
     yield ("result", results)
 
