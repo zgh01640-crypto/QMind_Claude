@@ -960,6 +960,304 @@ export function fetchStandardReferencePriceFilterOptions(documentId: number, app
   )
 }
 
+// ── 组价知识库 ──────────────────────────────────────────────────────────────────
+
+export interface PricingKbSummary {
+  library_count: number
+  chapter_count: number
+  boq_item_count: number
+  quota_item_count: number
+  resource_count: number
+  conversion_rule_count: number
+  candidate_count: number
+  target_link_count: number
+  issue_count: number
+  boq_with_candidates: number
+  boq_without_candidates: number
+  link_status_counts: Record<string, number>
+  issue_type_counts: Record<string, number>
+}
+
+export interface PricingKbLibrary {
+  id: number
+  source_library_id: number
+  name: string
+  quota_count: number
+  boq_count: number
+}
+
+export interface PricingKbBoqItem {
+  id: number
+  source_library_id: number
+  library_name: string
+  code: string | null
+  name: string
+  unit: string | null
+  chapter_name: string | null
+  candidate_count: number
+}
+
+export interface PricingKbQuotaItem {
+  id: number
+  source_library_id: number
+  library_name: string
+  code: string | null
+  name: string
+  unit: string | null
+  chapter_name: string | null
+  link_status: string
+  target_table: string | null
+  target_item_id: number | null
+}
+
+export interface PricingKbResourceSummary {
+  resource_type: string | null
+  resource_code: string | null
+  resource_name: string
+  unit: string | null
+  quantity: number | null
+}
+
+export interface PricingKbConversionRule {
+  rule_type: string
+  prompt: string | null
+  description: string | null
+  group_no: number | null
+}
+
+export interface PricingKbCandidate {
+  candidate_id: number
+  quota_item: {
+    id: number
+    source_library_id: number
+    library_name: string
+    code: string | null
+    name: string
+    unit: string | null
+    work_content: string | null
+    chapter_name: string | null
+  }
+  target_link: {
+    link_status: string
+    target_table: string | null
+    target_item_id: number | null
+    review_message: string | null
+  }
+  resource_summary: PricingKbResourceSummary[]
+  resource_count: number
+  conversion_rules: PricingKbConversionRule[]
+}
+
+export interface PricingKbCandidateResponse {
+  boq_item: Omit<PricingKbBoqItem, 'candidate_count'>
+  total: number
+  candidates: PricingKbCandidate[]
+}
+
+export interface PricingKbImportRun {
+  id: number
+  source_file: string
+  source_file_sha256: string
+  status: string
+  stats_json: Record<string, unknown>
+  error_message: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+export interface PricingKbImportIssue {
+  id: number
+  run_id: number | null
+  severity: string
+  issue_type: string
+  message: string
+  source_table: string | null
+  source_library_id: number | null
+  source_record_id: number | null
+  context_json: Record<string, unknown>
+  created_at: string
+}
+
+export interface PricingKbList<T> {
+  total: number
+  page: number
+  page_size: number
+  items: T[]
+}
+
+export interface BoqTreeCategory {
+  id: number
+  qdkid: number
+  pid: number | null
+  zjmc: string
+  zjsm: string | null
+  child_count: number
+  item_count: number
+  enabled?: boolean
+}
+
+export interface BoqTreeItem {
+  id: number
+  qdkid: number
+  zmbh: string
+  zmmc: string
+  dw: string | null
+  zjh: number
+  chapter_name: string | null
+  candidate_count: number
+}
+
+export interface BoqTreeChapterResponse {
+  chapter: {
+    id: number
+    qdkid: number
+    pid: number | null
+    zjmc: string
+    zjsm: string | null
+  }
+  children: BoqTreeCategory[]
+  items: BoqTreeItem[]
+}
+
+export interface QuotaTreeCategory {
+  id: number
+  dekid: number
+  pid: number | null
+  zjmc: string
+  zjsm: string | null
+  child_count: number
+  item_count: number
+  quota_count?: number
+}
+
+export interface QuotaTreeItem {
+  id: number
+  dekid: number
+  zmbh: string | null
+  zmmc: string
+  dw: string | null
+  gznr: string | null
+  zjh: number
+  chapter_name: string | null
+  resource_count: number
+  conversion_rule_count: number
+  input_prompt_count: number
+  link_status: string
+  target_table: string | null
+  target_item_id: number | null
+}
+
+export interface QuotaTreeChapterResponse {
+  chapter: {
+    id: number
+    dekid: number
+    pid: number | null
+    zjmc: string
+    zjsm: string | null
+  }
+  children: QuotaTreeCategory[]
+  items: QuotaTreeItem[]
+}
+
+export interface QuotaTreeResource {
+  resource_type: string | null
+  resource_code: string | null
+  resource_name: string
+  unit: string | null
+  quantity: number | null
+}
+
+export interface QuotaTreeConversionRule {
+  prompt: string | null
+  description: string | null
+  group_no: number | null
+}
+
+export interface QuotaTreeItemDetail {
+  item: QuotaTreeItem & {
+    review_message: string | null
+  }
+  resources: QuotaTreeResource[]
+  conversion_rules: QuotaTreeConversionRule[]
+  input_prompts: string[]
+}
+
+export const fetchPricingKbSummary = () =>
+  req<PricingKbSummary>('/api/pricing-kb/summary')
+
+export const fetchPricingKbLibraries = () =>
+  req<PricingKbLibrary[]>('/api/pricing-kb/libraries')
+
+export const fetchBoqTreeTopCategories = () =>
+  req<BoqTreeCategory[]>('/api/pricing-kb/boq-tree/top-categories')
+
+export const fetchBoqTreeChapter = (chapterId: number) =>
+  req<BoqTreeChapterResponse>(`/api/pricing-kb/boq-tree/chapter/${chapterId}`)
+
+export const fetchQuotaTreeTopLibraries = () =>
+  req<QuotaTreeCategory[]>('/api/pricing-kb/quota-tree/top-libraries')
+
+export const fetchQuotaTreeChapter = (dekid: number, chapterId: number) =>
+  req<QuotaTreeChapterResponse>(`/api/pricing-kb/quota-tree/chapter/${chapterId}?dekid=${dekid}`)
+
+export const fetchQuotaTreeItemDetail = (dekid: number, itemId: number) =>
+  req<QuotaTreeItemDetail>(`/api/pricing-kb/quota-tree/items/${itemId}?dekid=${dekid}`)
+
+export function fetchPricingKbBoqItems(params: {
+  q?: string
+  code?: string
+  library_id?: number | null
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.code) query.set('code', params.code)
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<PricingKbList<PricingKbBoqItem>>(`/api/pricing-kb/boq-items?${query}`)
+}
+
+export function fetchPricingKbQuotaItems(params: {
+  q?: string
+  code?: string
+  library_id?: number | null
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.code) query.set('code', params.code)
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<PricingKbList<PricingKbQuotaItem>>(`/api/pricing-kb/quota-items?${query}`)
+}
+
+export const fetchPricingKbCandidates = (boqItemId: number) =>
+  req<PricingKbCandidateResponse>(`/api/pricing-kb/boq-items/${boqItemId}/candidates`)
+
+export function fetchPricingKbImportRuns(page = 1, pageSize = 20) {
+  return req<PricingKbList<PricingKbImportRun>>(
+    `/api/pricing-kb/import-runs?page=${page}&page_size=${pageSize}`,
+  )
+}
+
+export function fetchPricingKbImportIssues(params: {
+  run_id?: number | null
+  issue_type?: string
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.run_id) query.set('run_id', String(params.run_id))
+  if (params.issue_type) query.set('issue_type', params.issue_type)
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<PricingKbList<PricingKbImportIssue>>(`/api/pricing-kb/import-issues?${query}`)
+}
+
 // ── 调试批次 ──────────────────────────────────────────────────────────────────
 
 export interface DebugBatch {
