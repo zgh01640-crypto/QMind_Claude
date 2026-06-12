@@ -1194,7 +1194,7 @@ export async function streamPricingTaskItem(
   manual_project_id: number | null,
   onEvent: (e: PricingTaskEvent) => void,
 ): Promise<void> {
-  const url = `${API}/pricing-task/match-item-stream`
+  const url = `${API}/api/pricing-task/match-item-stream`
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
