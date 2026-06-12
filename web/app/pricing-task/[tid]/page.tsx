@@ -22,6 +22,7 @@ interface ItemResult {
   codeCheck?: { item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   judgment?: { is_consistent: boolean; reasoning: string }
   featureCheck?: { is_complete: boolean; missing_features: string[]; analysis: string }
+  workProcedures?: string[]
   error?: string
 }
 
@@ -105,8 +106,13 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'feature_check') {
           updateResult(itemId, s => ({
             ...s,
-            phase: 'done',
             featureCheck: { is_complete: evt.is_complete, missing_features: evt.missing_features, analysis: evt.analysis },
+          }))
+        } else if (evt.type === 'work_procedures') {
+          updateResult(itemId, s => ({
+            ...s,
+            phase: 'done',
+            workProcedures: evt.procedures,
           }))
         } else if (evt.type === 'error') {
           updateResult(itemId, s => ({ ...s, phase: 'error', error: evt.error }))
@@ -167,6 +173,9 @@ export default function PricingTaskDetailPage() {
                     const badge2 = result?.featureCheck
                       ? <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${result.featureCheck.is_complete ? 'bg-green-500' : 'bg-red-500'}`}>2</span>
                       : null
+                    const badge3 = result?.workProcedures
+                      ? <span className="text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white bg-green-500">3</span>
+                      : null
                     return (
                       <div
                         key={item.id}
@@ -195,6 +204,7 @@ export default function PricingTaskDetailPage() {
                           <div className="ml-auto flex-shrink-0 flex gap-1">
                             {badge1}
                             {badge2}
+                            {badge3}
                           </div>
                         </div>
 
@@ -326,6 +336,25 @@ export default function PricingTaskDetailPage() {
                         </ul>
                       )}
                       <p className="text-xs text-gray-600">{currentResult.featureCheck.analysis}</p>
+                    </div>
+                  )}
+
+                  {/* 标准工序拆解 */}
+                  {currentResult.workProcedures && (
+                    <div className="px-4 py-4 border-t bg-indigo-50 border-indigo-200">
+                      <div className="font-semibold text-sm text-indigo-900 mb-3">🔧 标准工序</div>
+                      <div className="flex flex-wrap items-center gap-1 text-xs">
+                        {currentResult.workProcedures.map((p, i) => (
+                          <span key={i} className="flex items-center gap-1">
+                            <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded font-medium">
+                              {'①②③④⑤⑥⑦⑧⑨⑩'[i] ?? `${i + 1}.`}{p}
+                            </span>
+                            {i < currentResult.workProcedures!.length - 1 && (
+                              <span className="text-indigo-400">→</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

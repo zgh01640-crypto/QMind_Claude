@@ -1186,6 +1186,7 @@ export type PricingTaskEvent =
   | { type: 'code_check'; item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | { type: 'feature_check'; is_complete: boolean; missing_features: string[]; analysis: string }
+  | { type: 'work_procedures'; procedures: string[] }
   | { type: 'done' }
   | { type: 'error'; error: string }
 

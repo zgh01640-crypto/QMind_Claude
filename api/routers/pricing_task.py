@@ -52,6 +52,27 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
     },
 }
 
+_TOOL_SUBMIT_WORK_PROCEDURES = {
+    "type": "function",
+    "function": {
+        "name": "submit_work_procedures",
+        "description": "提交该清单项的标准施工工序拆解结果，按施工顺序列出每道工序名称。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "procedures": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "按顺序排列的标准工序名称列表，例如：[\"制作\", \"安装\", \"除锈\"]",
+                },
+            },
+            "required": ["procedures"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _TOOL_CHECK_ITEM_CODE = {
     "type": "function",
     "function": {
@@ -170,6 +191,43 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         feature_result = json.loads(tool_args_r2)
         print("[stream] round2_done", file=sys.stderr, flush=True)
         yield ("feature_check", feature_result)
+        # Round 3 — 标准工序拆解，全新独立对话
+        print("[stream] round3", file=sys.stderr, flush=True)
+        user_msg_r3 = (
+            f"请根据以下工程量清单项的名称和项目特征，拆解出完成该清单项所需的标准施工工序，按施工顺序列出：\n\n"
+            f"清单名称：{boq_item['item_name']}\n"
+            f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n\n"
+            f"请调用工具提交工序拆解结果。"
+        )
+        messages_r3 = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg_r3},
+        ]
+        stream3 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages_r3,
+            tools=[_TOOL_SUBMIT_WORK_PROCEDURES],
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=4000,
+            stream=True,
+        )
+        tool_args_r3 = ""
+        for chunk in stream3:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield ("reasoning_token", delta.reasoning_content)
+            if delta.content:
+                yield ("reasoning_token", delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        tool_args_r3 += tc.function.arguments
+        procedures_result = json.loads(tool_args_r3)
+        print("[stream] round3_done", file=sys.stderr, flush=True)
+        yield ("work_procedures", procedures_result)
     except Exception as e:
         import traceback
         print(f"[stream] error: {str(e)}", file=sys.stderr, flush=True)
@@ -204,6 +262,8 @@ def pricing_task_match_item_stream(req: dict):
                     yield f"data: {json.dumps({'type':'judgment',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "feature_check":
                     yield f"data: {json.dumps({'type':'feature_check',**data}, ensure_ascii=False)}\n\n"
+                elif event_type == "work_procedures":
+                    yield f"data: {json.dumps({'type':'work_procedures',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "error":
                     yield f"data: {json.dumps({'type':'error','error':data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type':'done'})}\n\n"
