@@ -235,10 +235,10 @@ export default function PricingTaskDetailPage() {
                 </div>
               </div>
             ) : (
-              <>
-                {/* 推理过程区 */}
-                <div className="flex-1 flex flex-col border-b">
-                  <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2">
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {/* 推理过程区 - 占大部分并可滚动 */}
+                <div className="flex-1 flex flex-col border-b overflow-hidden min-h-0">
+                  <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2 flex-shrink-0">
                     <span className="text-amber-600 font-semibold text-sm">🧠 AI 推理中</span>
                     <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
                   </div>
@@ -250,54 +250,56 @@ export default function PricingTaskDetailPage() {
                   </div>
                 </div>
 
-                {/* Step 1 校验结果 */}
-                {rightState.codeCheck && (
-                  <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
-                    <div className="font-semibold text-blue-900 text-sm mb-3">📝 Step 1 编码核查</div>
-                    <div className="space-y-2 text-xs">
-                      <div>
-                        <span className="text-gray-600">原始编码：</span>
-                        <span className="font-mono text-blue-700 font-semibold">{rightState.codeCheck.item_code}</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-600">基准编码：</span>
-                        <span className="font-mono text-blue-600">{rightState.codeCheck.base_code}</span>
-                        <span className="text-gray-400 text-xs ml-2">（去掉末尾3位）</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-600">工程清单名称：</span>
-                        <span className="text-gray-900">{rightState.codeCheck.item_name}</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-600">标准名称：</span>
-                        {rightState.codeCheck.found ? (
-                          <div className="mt-1 space-y-1">
-                            {rightState.codeCheck.standard_names.map((name, i) => (
-                              <div key={i} className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2 mb-1">
-                                ✅ {name}
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
-                        )}
+                {/* Step 1 校验结果和判断 - 可滚动下方区域 */}
+                <div className="overflow-y-auto flex-shrink-0 max-h-1/3">
+                  {rightState.codeCheck && (
+                    <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
+                      <div className="font-semibold text-blue-900 text-sm mb-3">📝 Step 1 编码核查</div>
+                      <div className="space-y-2 text-xs">
+                        <div>
+                          <span className="text-gray-600">原始编码：</span>
+                          <span className="font-mono text-blue-700 font-semibold">{rightState.codeCheck.item_code}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600">基准编码：</span>
+                          <span className="font-mono text-blue-600">{rightState.codeCheck.base_code}</span>
+                          <span className="text-gray-400 text-xs ml-2">（去掉末尾3位）</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600">工程清单名称：</span>
+                          <span className="text-gray-900">{rightState.codeCheck.item_name}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600">标准名称：</span>
+                          {rightState.codeCheck.found ? (
+                            <div className="mt-1 space-y-1">
+                              {rightState.codeCheck.standard_names.map((name, i) => (
+                                <div key={i} className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2 mb-1">
+                                  ✅ {name}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {/* AI 的判断结论 */}
-                {rightState.judgment && (
-                  <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
-                    <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
-                      {rightState.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
+                  {/* AI 的判断结论 */}
+                  {rightState.judgment && (
+                    <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+                      <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
+                        {rightState.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
+                      </div>
+                      <div className="text-xs text-gray-700 whitespace-pre-wrap">
+                        {rightState.judgment.reasoning}
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-700 whitespace-pre-wrap">
-                      {rightState.judgment.reasoning}
-                    </div>
-                  </div>
-                )}
-              </>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
