@@ -13,6 +13,7 @@ const oldLinks = [
 const links = [
   { href: '/boq-standard-management', label: '国标清单管理' },
   { href: '/quota-management', label: '定额管理' },
+  { href: '/pricing-task', label: '单条组价' },
   { href: '/new-boq', label: '新工程管理' },
   { href: '/prompt-templates', label: '提示词模板' },
   { href: '/manual-boq', label: '工程管理（人工）' },
