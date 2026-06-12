@@ -21,7 +21,13 @@ def exec_check_item_code(conn, item_code: str) -> dict:
 _TOOL_CHECK_ITEM_CODE = {"type": "function", "function": {"name": "check_item_code", "description": "Check item code", "strict": True, "parameters": {"type": "object", "properties": {"item_code": {"type": "string"}}, "required": ["item_code"], "additionalProperties": False}}}
 
 def build_system_prompt() -> str:
-    return "Review BOQ items and compare with standard names."
+    return (
+        "你是专业的建筑工程造价工程师，精通以下标准与规范：\n"
+        "各专业工程量清单计价标准\n"
+        "各专业工程消耗量标准\n"
+        "任务：将招标工程量清单中的清单项与定额子目进行匹配（即『套定额』），完成必要的换算及综合单价计算。\n"
+        "要求：全程使用中文进行推理和分析，包括思维链过程。"
+    )
 
 def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     from openai import OpenAI
