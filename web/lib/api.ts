@@ -1183,8 +1183,8 @@ export interface PricingTaskMatch {
 export type PricingTaskEvent =
   | { type: 'item_info'; item: BoqItem }
   | { type: 'reasoning_token'; token: string }
-  | { type: 'tool_call'; tool_name: string; result: any }
-  | { type: 'result'; matches: PricingTaskMatch[] }
+  | { type: 'code_check'; item_code: string; base_code: string; standard_names: string[]; found: boolean }
+  | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | { type: 'done' }
   | { type: 'error'; error: string }
 
