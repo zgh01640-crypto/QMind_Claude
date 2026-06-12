@@ -163,14 +163,17 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     try:
         api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
+            print("ERROR: DEEPSEEK_API_KEY not set")
             yield ("error", "未设置 DEEPSEEK_API_KEY 环境变量")
             return
 
+        print("Creating OpenAI client...")
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.deepseek.com",
             timeout=120.0,
         )
+        print("OpenAI client created successfully")
 
         # ── Round 1.1: 第一次调用 AI 获取编码检索工具参数 ─────────────────────────
         user_msg = f"""请对以下清单项进行编码一致性审查：
@@ -338,6 +341,16 @@ def test_api_key():
         return {"status": "error", "message": "DEEPSEEK_API_KEY 未设置"}
 
 
+@router.get("/pricing-task/test-stream")
+def test_stream():
+    """简单的流式测试端点"""
+    def generate():
+        yield "data: {\"type\": \"test1\"}\n\n"
+        yield "data: {\"type\": \"test2\"}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @router.post("/pricing-task/match-item-stream")
 def pricing_task_match_item_stream(req: SinglePricingRequest):
     from db.connection import get_connection
@@ -369,10 +382,18 @@ def pricing_task_match_item_stream(req: SinglePricingRequest):
             sp = build_system_prompt()
             yield f"data: {json.dumps({'type':'item_info','item':boq_item}, ensure_ascii=False)}\n\n"
 
-            print(f"DEBUG: 即将调用 stream_pricing_item，boq_item_id={req.boq_item_id}")
-            final_results = []
-            for event_type, data in stream_pricing_item(boq_item, sp, conn):
-                print(f"DEBUG: 收到事件 {event_type}: {str(data)[:100]}")
+            import sys
+            print(f"DEBUG: 即将调用 stream_pricing_item", file=sys.stderr, flush=True)
+            try:
+                events_list = list(stream_pricing_item(boq_item, sp, conn))
+                print(f"DEBUG: 收到 {len(events_list)} 个事件", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"ERROR in stream_pricing_item: {str(e)}", file=sys.stderr, flush=True)
+                yield f"data: {json.dumps({'type':'error','error':f'AI流程异常: {str(e)}'}, ensure_ascii=False)}\n\n"
+                return
+
+            for event_type, data in events_list:
+                print(f"DEBUG: 处理事件 {event_type}", file=sys.stderr, flush=True)
                 if event_type == "reasoning_token":
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
                 elif event_type == "code_check":
