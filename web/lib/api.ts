@@ -1412,20 +1412,30 @@ export async function streamBS2024MatchItem(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ boq_item_id, chapter_ids, manual_project_id }),
   })
-  if (!res.ok) throw new Error(`请求失败 ${res.status}`)
-  const reader = res.body!.getReader()
+  if (!res.ok) throw new Error(`API 请求失败: ${res.status} ${res.statusText}`)
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('无法读取响应流')
   const decoder = new TextDecoder()
   let buf = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try { onEvent(JSON.parse(line.slice(6)) as BS2024MatchEvent) } catch { /* skip */ }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const evt = JSON.parse(line.slice(6)) as BS2024MatchEvent
+            onEvent(evt)
+          } catch (e) {
+            console.warn('SSE 事件解析错误:', line.slice(6), e)
+          }
+        }
       }
     }
+  } catch (e) {
+    throw new Error(`SSE 流读取错误: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
