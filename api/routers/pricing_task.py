@@ -364,7 +364,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             tools=[_TOOL_SUBMIT_QUOTA_MATCH],
             reasoning_effort="high",
             extra_body={"thinking": {"type": "enabled"}},
-            max_tokens=6000,
+            max_tokens=16000,
             stream=True,
         )
         tool_args_r5 = ""
@@ -380,7 +380,11 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
                 for tc in delta.tool_calls:
                     if tc.function and tc.function.arguments:
                         tool_args_r5 += tc.function.arguments
-        match_result = json.loads(tool_args_r5)
+        try:
+            match_result = json.loads(tool_args_r5)
+        except Exception as e:
+            print(f"[stream] round5_json_error: {e}\nraw: {tool_args_r5[:500]}", file=sys.stderr, flush=True)
+            raise
         print("[stream] round5_done", file=sys.stderr, flush=True)
         yield ("quota_match", match_result)
     except Exception as e:
