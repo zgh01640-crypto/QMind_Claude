@@ -188,20 +188,32 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         messages=messages,
         tools=[_TOOL_CHECK_ITEM_CODE],
         tool_choice={"type": "function", "function": {"name": "check_item_code"}},
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
         max_tokens=8000,
         stream=True,
     )
 
-    # 收集 Round 1.1 的 tool_call
+    # 收集 Round 1.1 的思考内容、工具调用、和完整 message
     tool_call_id = ""
     tool_call_args = ""
+    reasoning_content = ""
+    assistant_message = {"role": "assistant", "content": "", "reasoning_content": "", "tool_calls": []}
+
     for chunk in stream1:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
 
+        # 思考内容
+        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+            reasoning_content += delta.reasoning_content
+            assistant_message["reasoning_content"] += delta.reasoning_content
+            yield ("reasoning_token", delta.reasoning_content)
+
         # 内容 token（流式文本）
         if delta.content:
+            assistant_message["content"] += delta.content
             yield ("reasoning_token", delta.content)
 
         # 工具调用
@@ -211,6 +223,14 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
                     tool_call_id = tc.id
                 if tc.function and tc.function.arguments:
                     tool_call_args += tc.function.arguments
+
+    # 添加工具调用到 assistant message
+    if tool_call_id:
+        assistant_message["tool_calls"] = [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "check_item_code", "arguments": tool_call_args},
+        }]
 
     # 执行编码检索工具
     try:
@@ -230,16 +250,8 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     # ── Round 1.2: 第二次调用 AI 进行名称比对和结论 ───────────────────────────
     standard_names_str = ", ".join(code_check_result.get("standard_names", [])) or "（未找到标准名称）"
 
-    # 添加工具调用结果到对话历史
-    messages.append({
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [{
-            "id": tool_call_id,
-            "type": "function",
-            "function": {"name": "check_item_code", "arguments": tool_call_args},
-        }],
-    })
+    # 添加工具调用结果到对话历史（必须包含 reasoning_content）
+    messages.append(assistant_message)
     messages.append({
         "role": "tool",
         "tool_call_id": tool_call_id,
@@ -262,16 +274,23 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     stream2 = client.chat.completions.create(
         model="deepseek-v4-pro",
         messages=messages,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
         max_tokens=8000,
         stream=True,
     )
 
-    # 收集 Round 1.2 的内容和最终结论
+    # 收集 Round 1.2 的思考内容和最终结论
     final_reasoning = ""
+    final_reasoning_content = ""
     for chunk in stream2:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
+
+        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+            final_reasoning_content += delta.reasoning_content
+            yield ("reasoning_token", delta.reasoning_content)
 
         if delta.content:
             yield ("reasoning_token", delta.content)
