@@ -18,7 +18,22 @@ def exec_check_item_code(conn, item_code: str) -> dict:
     standard_names = list({r[0] for r in rows if r[0]})
     return {"item_code": item_code, "base_code": base_code, "standard_names": standard_names, "found": len(standard_names) > 0}
 
-_TOOL_CHECK_ITEM_CODE = {"type": "function", "function": {"name": "check_item_code", "description": "Check item code", "strict": True, "parameters": {"type": "object", "properties": {"item_code": {"type": "string"}}, "required": ["item_code"], "additionalProperties": False}}}
+_TOOL_CHECK_ITEM_CODE = {
+    "type": "function",
+    "function": {
+        "name": "check_item_code",
+        "description": "根据工程量清单编码查询对应的标准清单名称。输入清单编码，返回该编码在国家标准清单中对应的子目名称列表，用于核查清单编码与清单名称是否匹配。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item_code": {"type": "string", "description": "工程量清单编码，例如：010402001006"}
+            },
+            "required": ["item_code"],
+            "additionalProperties": False
+        }
+    }
+}
 
 def build_system_prompt() -> str:
     return (
@@ -39,7 +54,16 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         return
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=120.0)
     try:
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Code:{boq_item['item_code']} Name:{boq_item['item_name']}"}]
+        user_msg = (
+            f"请对以下工程量清单项进行编码一致性检查：\n\n"
+            f"清单编码：{boq_item['item_code']}\n"
+            f"清单名称：{boq_item['item_name']}\n"
+            f"项目特征：{boq_item.get('item_description') or '无'}\n"
+            f"计量单位：{boq_item.get('unit') or '无'}\n"
+            f"工程量：{boq_item.get('quantity') or '无'}\n\n"
+            f"请调用工具查询该清单编码对应的标准清单名称。"
+        )
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}]
         print("[stream] round1", file=sys.stderr, flush=True)
         yield ("reasoning_token", "[Round 1] Querying API...\n")
         stream1 = client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=[_TOOL_CHECK_ITEM_CODE], reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}, max_tokens=8000, stream=True)
@@ -74,7 +98,23 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         messages.append(assistant_message)
         if tool_call_id:
             messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(code_check_result, ensure_ascii=False)})
-        messages.append({"role": "user", "content": f"Compare: BOQ={boq_item['item_name']}, Standard={standard_names_str}"})
+        if code_check_result.get("found"):
+            compare_msg = (
+                f"工具已返回查询结果。\n"
+                f"工程清单名称：{boq_item['item_name']}\n"
+                f"标准清单名称：{standard_names_str}\n\n"
+                f"请比对工程清单名称与标准清单名称是否一致，给出明确结论：\n"
+                f"1. 判断：一致 / 不一致\n"
+                f"2. 说明原因（如名称完全相同、表述相近但含义一致、或存在明显差异等）"
+            )
+        else:
+            compare_msg = (
+                f"工具查询结果：清单编码 {boq_item['item_code']} 在标准清单库中未找到对应子目。\n\n"
+                f"请给出结论：\n"
+                f"1. 判断：无法核查（编码不存在）\n"
+                f"2. 说明：该编码不在标准清单范围内，建议人工复核。"
+            )
+        messages.append({"role": "user", "content": compare_msg})
         print("[stream] round2", file=sys.stderr, flush=True)
         yield ("reasoning_token", "\n[Round 2] Comparing...\n")
         stream2 = client.chat.completions.create(model="deepseek-v4-pro", messages=messages, reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}, max_tokens=8000, stream=True)
@@ -89,7 +129,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
                 yield ("reasoning_token", delta.content)
                 final_reasoning += delta.content
         print("[stream] done", file=sys.stderr, flush=True)
-        is_consistent = "consistent" in final_reasoning.lower() or "一致" in final_reasoning
+        is_consistent = ("一致" in final_reasoning and "不一致" not in final_reasoning) or "consistent" in final_reasoning.lower()
         yield ("judgment", {"is_consistent": is_consistent, "reasoning": final_reasoning})
     except Exception as e:
         import traceback
