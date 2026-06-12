@@ -345,9 +345,12 @@ def _build_boq_user_msg(boq_item: dict) -> str:
 
 def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     """
-    Step 1：强制调用 check_item_code 工具，执行 DB 查询。
+    Step 1：两轮对话
+    第一轮：调用 check_item_code 工具查询标准名称
+    第二轮：基于查询结果，判断清单名称与标准名称是否一致
     yield ("reasoning_token", str)
     yield ("code_check", dict)
+    yield ("judgment", dict)  # 新增：AI 的判断结论
     """
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:
@@ -357,7 +360,7 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
 
-    # Round 1 特殊用户消息：要求调用 check_item_code
+    # ── 第一轮：调用工具查询 ──
     user_msg = f"""## 待套定额的清单项
 
 - 项目编码：{boq_item.get('item_code', '')}
@@ -386,6 +389,7 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     )
 
     tool_call_args = ""
+    tool_call_id = ""
     for chunk in stream:
         if not chunk.choices:
             continue
@@ -395,16 +399,76 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
             yield ("reasoning_token", rc)
         if delta.tool_calls:
             for tc in delta.tool_calls:
+                if tc.id:
+                    tool_call_id = tc.id
                 if tc.function and tc.function.arguments:
                     tool_call_args += tc.function.arguments
 
+    # 执行工具
     try:
         call_input = json.loads(tool_call_args)
-        result = exec_check_item_code(conn, call_input.get("item_code", ""), boq_item.get("item_name", ""))
+        check_result = exec_check_item_code(conn, call_input.get("item_code", ""), boq_item.get("item_name", ""))
     except Exception:
-        result = {"item_code": "", "base_code": "", "item_name": "", "standard_names": [], "found": False}
+        check_result = {"item_code": "", "base_code": "", "item_name": "", "standard_names": [], "found": False}
 
-    yield ("code_check", result)
+    yield ("code_check", check_result)
+
+    # ── 第二轮：基于查询结果，进行判断 ──
+    # 将工具结果追加到对话历史
+    messages.append({
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "check_item_code", "arguments": tool_call_args},
+        }],
+    })
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": json.dumps(check_result, ensure_ascii=False),
+    })
+
+    # 要求 AI 进行判断
+    judgment_prompt = f"""根据上面的查询结果，请判断：
+
+清单项名称（"{check_result['item_name']}"）与标准库名称（"{', '.join(check_result['standard_names'])}"）是否一致？
+
+请给出：
+1. 是否一致（一致/不一致/无法判断）
+2. 简要理由（1-2句）"""
+
+    messages.append({"role": "user", "content": judgment_prompt})
+
+    stream2 = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=[],  # 第二轮不需要工具
+        extra_body={"thinking": {"type": "enabled"}},
+        reasoning_effort="high",
+        max_tokens=1000,
+        stream=True,
+    )
+
+    judgment_text = ""
+    for chunk in stream2:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
+            yield ("reasoning_token", rc)
+        if delta.content:
+            judgment_text += delta.content
+            yield ("reasoning_token", delta.content)
+
+    # 解析 AI 的判断
+    is_consistent = "一致" in judgment_text
+    yield ("judgment", {
+        "is_consistent": is_consistent,
+        "reasoning": judgment_text.strip(),
+    })
 
 
 def stream_match_bs2024_item(boq_item: dict, system_prompt: str):
@@ -827,6 +891,8 @@ def bs2024_match_item_stream(req: SingleMatchRequest):
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data},ensure_ascii=False)}\n\n"
                 elif event_type == "code_check":
                     yield f"data: {json.dumps({'type':'code_check',**data},ensure_ascii=False)}\n\n"
+                elif event_type == "judgment":
+                    yield f"data: {json.dumps({'type':'judgment',**data},ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'type':'done'})}\n\n"
         except Exception as e:

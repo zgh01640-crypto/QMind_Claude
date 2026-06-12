@@ -1397,6 +1397,7 @@ export type BS2024MatchEvent =
   | { type: 'item_info'; item: BoqItem; system_prompt: string; system_prompt_len: number; user_message: string; chapter_name: string }
   | { type: 'reasoning_token'; token: string }
   | { type: 'code_check'; item_code: string; base_code: string; item_name: string; standard_names: string[]; found: boolean }
+  | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | { type: 'done' }
   | { type: 'error'; error: string }
 

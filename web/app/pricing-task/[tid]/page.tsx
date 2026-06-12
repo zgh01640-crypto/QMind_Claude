@@ -20,6 +20,7 @@ interface RightState {
   phase: 'idle' | 'reasoning' | 'done' | 'error'
   reasoning: string
   codeCheck?: { item_code: string; base_code: string; item_name: string; standard_names: string[]; found: boolean }
+  judgment?: { is_consistent: boolean; reasoning: string }
   error?: string
 }
 
@@ -79,13 +80,21 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'code_check') {
           setRightState(s => ({
             ...s,
-            phase: 'done',
             codeCheck: {
               item_code: evt.item_code,
               base_code: evt.base_code,
               item_name: evt.item_name,
               standard_names: evt.standard_names,
               found: evt.found,
+            },
+          }))
+        } else if (evt.type === 'judgment') {
+          setRightState(s => ({
+            ...s,
+            phase: 'done',
+            judgment: {
+              is_consistent: evt.is_consistent,
+              reasoning: evt.reasoning,
             },
           }))
         } else if (evt.type === 'error') {
@@ -273,6 +282,18 @@ export default function PricingTaskDetailPage() {
                           <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
                         )}
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* AI 的判断结论 */}
+                {rightState.judgment && (
+                  <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+                    <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
+                      {rightState.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
+                    </div>
+                    <div className="text-xs text-gray-700 whitespace-pre-wrap">
+                      {rightState.judgment.reasoning}
                     </div>
                   </div>
                 )}
