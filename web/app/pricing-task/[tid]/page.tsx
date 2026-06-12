@@ -16,10 +16,10 @@ interface PricingTask {
   created_at: string
 }
 
-interface RightState {
-  phase: 'idle' | 'reasoning' | 'done' | 'error'
+interface ItemResult {
+  phase: 'reasoning' | 'done' | 'error'
   reasoning: string
-  codeCheck?: { item_code: string; base_code: string; standard_names: string[]; found: boolean }
+  codeCheck?: { item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   judgment?: { is_consistent: boolean; reasoning: string }
   error?: string
 }
@@ -34,12 +34,11 @@ export default function PricingTaskDetailPage() {
   const [expandedItemId, setExpandedItemId] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // 右侧面板状态
-  const [rightState, setRightState] = useState<RightState>({ phase: 'idle', reasoning: '' })
+  // per-item 结果 Map
+  const [itemResults, setItemResults] = useState<Map<number, ItemResult>>(new Map())
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    // 加载任务
     const stored = localStorage.getItem('pricing_tasks')
     if (stored) {
       const tasks = JSON.parse(stored) as PricingTask[]
@@ -51,12 +50,13 @@ export default function PricingTaskDetailPage() {
     }
   }, [taskId])
 
-  // 推理过程自动滚到底部
+  // 当前选中项的推理内容变化时自动滚到底部
+  const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
   useEffect(() => {
     if (reasoningRef.current) {
       reasoningRef.current.scrollTop = reasoningRef.current.scrollHeight
     }
-  }, [rightState.reasoning])
+  }, [currentResult?.reasoning])
 
   const loadItems = async (projectId: number) => {
     try {
@@ -69,41 +69,45 @@ export default function PricingTaskDetailPage() {
     }
   }
 
+  const updateResult = (itemId: number, updater: (prev: ItemResult) => ItemResult) => {
+    setItemResults(m => {
+      const prev = m.get(itemId) ?? { phase: 'reasoning', reasoning: '' }
+      return new Map(m).set(itemId, updater(prev))
+    })
+  }
+
   const handleMatch = async (itemId: number) => {
     if (!task) return
-    setRightState({ phase: 'reasoning', reasoning: '' })
+    setItemResults(m => new Map(m).set(itemId, { phase: 'reasoning', reasoning: '' }))
 
     try {
       await streamPricingTaskItem(itemId, task.chapter_ids, task.manual_project_id, (evt: PricingTaskEvent) => {
         if (evt.type === 'reasoning_token') {
-          setRightState(s => ({ ...s, reasoning: s.reasoning + evt.token }))
+          updateResult(itemId, s => ({ ...s, reasoning: s.reasoning + evt.token }))
         } else if (evt.type === 'code_check') {
-          setRightState(s => ({
+          updateResult(itemId, s => ({
             ...s,
             codeCheck: {
               item_code: evt.item_code,
+              item_name: evt.item_name,
               base_code: evt.base_code,
-              standard_names: evt.standard_names,
+              standard_name: evt.standard_name,
               found: evt.found,
+              is_consistent: evt.is_consistent,
             },
           }))
         } else if (evt.type === 'judgment') {
-          setRightState(s => ({
+          updateResult(itemId, s => ({
             ...s,
             phase: 'done',
-            judgment: {
-              is_consistent: evt.is_consistent,
-              reasoning: evt.reasoning,
-            },
+            judgment: { is_consistent: evt.is_consistent, reasoning: evt.reasoning },
           }))
-        } else if (evt.type === 'done') {
-          // 保持 phase: 'done'（由 judgment 事件已设置）
         } else if (evt.type === 'error') {
-          setRightState(s => ({ ...s, phase: 'error', error: evt.error }))
+          updateResult(itemId, s => ({ ...s, phase: 'error', error: evt.error }))
         }
       })
     } catch (err) {
-      setRightState(s => ({
+      updateResult(itemId, s => ({
         ...s,
         phase: 'error',
         error: err instanceof Error ? err.message : '未知错误',
@@ -119,7 +123,7 @@ export default function PricingTaskDetailPage() {
     )
   }
 
-  const selectedItem = items.find(i => i.id === selectedItemId)
+  const isRunning = currentResult?.phase === 'reasoning'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -149,58 +153,65 @@ export default function PricingTaskDetailPage() {
                 <div className="p-4 text-center text-gray-500 text-sm">暂无清单项</div>
               ) : (
                 <div className="divide-y divide-gray-200">
-                  {items.map(item => (
-                    <div
-                      key={item.id}
-                      className={`cursor-pointer transition-colors ${
-                        selectedItemId === item.id
-                          ? 'border-l-2 border-blue-700 bg-blue-50'
-                          : 'hover:bg-gray-50'
-                      }`}
-                    >
-                      {/* 项目标题（可展开）*/}
+                  {items.map(item => {
+                    const result = itemResults.get(item.id)
+                    const badge = result?.phase === 'done' && result.judgment
+                      ? result.judgment.is_consistent
+                        ? <span className="ml-auto flex-shrink-0 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full bg-green-500 text-white">1</span>
+                        : <span className="ml-auto flex-shrink-0 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full bg-red-500 text-white">1</span>
+                      : null
+                    return (
                       <div
-                        onClick={() => {
-                          setSelectedItemId(item.id)
-                          setExpandedItemId(
-                            expandedItemId === item.id ? null : item.id
-                          )
-                        }}
-                        className="px-4 py-3"
+                        key={item.id}
+                        className={`cursor-pointer transition-colors ${
+                          selectedItemId === item.id
+                            ? 'border-l-2 border-blue-700 bg-blue-50'
+                            : 'hover:bg-gray-50'
+                        }`}
                       >
-                        <div className="flex-1 min-w-0">
-                          <div className="font-mono text-xs text-gray-600">
-                            {item.item_code}
+                        {/* 项目标题（可展开）*/}
+                        <div
+                          onClick={() => {
+                            setSelectedItemId(item.id)
+                            setExpandedItemId(expandedItemId === item.id ? null : item.id)
+                          }}
+                          className="px-4 py-3 flex items-start gap-2"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="font-mono text-xs text-gray-600">
+                              {item.item_code}
+                            </div>
+                            <div className="text-sm font-medium text-gray-900 truncate">
+                              {item.item_name}
+                            </div>
                           </div>
-                          <div className="text-sm font-medium text-gray-900 truncate">
-                            {item.item_name}
-                          </div>
+                          {badge}
                         </div>
-                      </div>
 
-                      {/* 详情（展开时显示）*/}
-                      {expandedItemId === item.id && (
-                        <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-xs text-gray-700 space-y-2">
-                          {item.item_description && (
+                        {/* 详情（展开时显示）*/}
+                        {expandedItemId === item.id && (
+                          <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-xs text-gray-700 space-y-2">
+                            {item.item_description && (
+                              <p>
+                                <span className="font-medium">特征：</span>
+                                {item.item_description}
+                              </p>
+                            )}
                             <p>
-                              <span className="font-medium">特征：</span>
-                              {item.item_description}
+                              <span className="font-medium">单位：</span>
+                              {item.unit || '—'}
                             </p>
-                          )}
-                          <p>
-                            <span className="font-medium">单位：</span>
-                            {item.unit || '—'}
-                          </p>
-                          {item.quantity && (
-                            <p>
-                              <span className="font-medium">工程量：</span>
-                              {item.quantity}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                            {item.quantity && (
+                              <p>
+                                <span className="font-medium">工程量：</span>
+                                {item.quantity}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -210,10 +221,10 @@ export default function PricingTaskDetailPage() {
               <div className="px-4 py-4 border-t border-gray-200 bg-gray-50">
                 <button
                   onClick={() => handleMatch(selectedItemId)}
-                  disabled={rightState.phase === 'reasoning'}
+                  disabled={isRunning}
                   className="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
                 >
-                  {rightState.phase === 'reasoning' ? '推理中...' : '套定额'}
+                  {isRunning ? '推理中...' : '套定额'}
                 </button>
               </div>
             )}
@@ -221,18 +232,18 @@ export default function PricingTaskDetailPage() {
 
           {/* 右侧面板 */}
           <div className="flex-1 bg-white rounded-lg shadow flex flex-col overflow-hidden">
-            {rightState.phase === 'idle' ? (
+            {!currentResult ? (
               <div className="flex-1 flex items-center justify-center text-gray-400 text-center">
                 <div>
                   <p className="text-lg mb-2">📋</p>
                   <p>选择清单项后点击「套定额」开始</p>
                 </div>
               </div>
-            ) : rightState.phase === 'error' ? (
+            ) : currentResult.phase === 'error' ? (
               <div className="flex-1 flex items-center justify-center p-6">
                 <div className="text-center">
                   <p className="text-red-600 font-semibold mb-2">出错了</p>
-                  <p className="text-sm text-red-500">{rightState.error}</p>
+                  <p className="text-sm text-red-500">{currentResult.error}</p>
                 </div>
               </div>
             ) : (
@@ -240,7 +251,7 @@ export default function PricingTaskDetailPage() {
                 {/* 顶部标题栏 */}
                 <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2 flex-shrink-0">
                   <span className="text-amber-600 font-semibold text-sm">🧠 AI 推理</span>
-                  {rightState.phase === 'reasoning' && (
+                  {currentResult.phase === 'reasoning' && (
                     <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
                   )}
                 </div>
@@ -249,35 +260,33 @@ export default function PricingTaskDetailPage() {
                 <div ref={reasoningRef} className="flex-1 overflow-y-auto">
                   {/* 推理文字 */}
                   <div className="px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono">
-                    {rightState.reasoning || '…'}
+                    {currentResult.reasoning || '…'}
                   </div>
 
                   {/* 编码核查结果 */}
-                  {rightState.codeCheck && (
+                  {currentResult.codeCheck && (
                     <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
                       <div className="font-semibold text-blue-900 text-sm mb-3">📝 编码核查</div>
                       <div className="space-y-2 text-xs">
                         <div>
                           <span className="text-gray-600">原始编码：</span>
-                          <span className="font-mono text-blue-700 font-semibold">{rightState.codeCheck.item_code}</span>
+                          <span className="font-mono text-blue-700 font-semibold">{currentResult.codeCheck.item_code}</span>
                         </div>
                         <div>
                           <span className="text-gray-600">基准编码：</span>
-                          <span className="font-mono text-blue-600">{rightState.codeCheck.base_code}</span>
+                          <span className="font-mono text-blue-600">{currentResult.codeCheck.base_code}</span>
                           <span className="text-gray-400 text-xs ml-2">（去掉末尾3位）</span>
                         </div>
                         <div>
-                          <span className="text-gray-600">标准名称：</span>
-                          {rightState.codeCheck.found ? (
-                            <div className="mt-1 space-y-1">
-                              {rightState.codeCheck.standard_names.map((name: string, i: number) => (
-                                <div key={i} className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2 mb-1">
-                                  ✅ {name}
-                                </div>
-                              ))}
-                            </div>
+                          <span className="text-gray-600">工程清单名称：</span>
+                          <span className="text-gray-900">{currentResult.codeCheck.item_name}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600">标准清单名称：</span>
+                          {currentResult.codeCheck.found ? (
+                            <span className="text-green-800 font-medium">{currentResult.codeCheck.standard_name}</span>
                           ) : (
-                            <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
+                            <span className="text-orange-600">⚠️ 标准库未找到该编码</span>
                           )}
                         </div>
                       </div>
@@ -285,13 +294,10 @@ export default function PricingTaskDetailPage() {
                   )}
 
                   {/* 一致性判断结果 */}
-                  {rightState.judgment && (
-                    <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
-                      <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
-                        {rightState.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
-                      </div>
-                      <div className="text-xs text-gray-700 whitespace-pre-wrap">
-                        {rightState.judgment.reasoning}
+                  {currentResult.judgment && (
+                    <div className={`px-4 py-4 border-t ${currentResult.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+                      <div className={`font-semibold text-sm ${currentResult.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
+                        {currentResult.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
                       </div>
                     </div>
                   )}
