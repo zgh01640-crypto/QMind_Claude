@@ -186,38 +186,65 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     stream1 = client.chat.completions.create(
         model="deepseek-v4-pro",
         messages=messages,
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort="high",
+        tools=[_TOOL_CHECK_ITEM_CODE],
+        tool_choice={"type": "function", "function": {"name": "check_item_code"}},
         max_tokens=8000,
         stream=True,
     )
 
-    # 收集 Round 1.1 的 reasoning tokens
-    reasoning_text = ""
+    # 收集 Round 1.1 的 tool_call
+    tool_call_id = ""
+    tool_call_args = ""
     for chunk in stream1:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
 
-        # 推理 token
-        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-            yield ("reasoning_token", delta.reasoning_content)
-
-        # 内容 token（AI 的响应文本，需要手动解析）
+        # 内容 token（流式文本）
         if delta.content:
-            reasoning_text += delta.content
+            yield ("reasoning_token", delta.content)
 
-    # 从 AI 响应中提取编码（直接调用工具）
-    # AI 会在推理中提到要调用 check_item_code 工具
-    # 我们直接调用它
-    item_code = boq_item['item_code']
+        # 工具调用
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                if tc.id:
+                    tool_call_id = tc.id
+                if tc.function and tc.function.arguments:
+                    tool_call_args += tc.function.arguments
 
     # 执行编码检索工具
-    code_check_result = exec_check_item_code(conn, item_code)
+    try:
+        call_input = json.loads(tool_call_args)
+        code_check_result = exec_check_item_code(conn, call_input.get("item_code", ""))
+    except Exception as e:
+        code_check_result = {
+            "item_code": boq_item['item_code'],
+            "base_code": "",
+            "standard_names": [],
+            "found": False,
+            "error": str(e),
+        }
+
     yield ("code_check", code_check_result)
 
     # ── Round 1.2: 第二次调用 AI 进行名称比对和结论 ───────────────────────────
     standard_names_str = ", ".join(code_check_result.get("standard_names", [])) or "（未找到标准名称）"
+
+    # 添加工具调用结果到对话历史
+    messages.append({
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{
+            "id": tool_call_id,
+            "type": "function",
+            "function": {"name": "check_item_code", "arguments": tool_call_args},
+        }],
+    })
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": json.dumps(code_check_result, ensure_ascii=False),
+    })
 
     # 第二轮用户消息
     user_msg_round2 = f"""现在你已经查询了编码对应的标准清单名称。请完成以下任务：
@@ -230,34 +257,24 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
 1. 是否一致（一致/不一致/存疑）
 2. 详细理由说明"""
 
-    # 第二轮 messages
-    messages2 = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
-        {"role": "assistant", "content": f"我已经查询了编码 {item_code} 对应的标准清单名称。"},
-        {"role": "user", "content": user_msg_round2},
-    ]
+    messages.append({"role": "user", "content": user_msg_round2})
 
     stream2 = client.chat.completions.create(
         model="deepseek-v4-pro",
-        messages=messages2,
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort="high",
+        messages=messages,
         max_tokens=8000,
         stream=True,
     )
 
-    # 收集 Round 1.2 的 reasoning 和最终结论
+    # 收集 Round 1.2 的内容和最终结论
     final_reasoning = ""
     for chunk in stream2:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
 
-        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-            yield ("reasoning_token", delta.reasoning_content)
-
         if delta.content:
+            yield ("reasoning_token", delta.content)
             final_reasoning += delta.content
 
     # 解析最终结论（简单判断：包含"一致"则为 True）
