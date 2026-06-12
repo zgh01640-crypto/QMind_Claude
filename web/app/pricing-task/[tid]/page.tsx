@@ -106,11 +106,7 @@ export default function PricingTaskDetailPage() {
                         }}
                         className="px-4 py-3"
                       >
-                        <div className="flex items-start gap-2">
-                          <div className="flex-shrink-0 mt-1">
-                            {expandedItemId === item.id ? '▼' : '▶'}
-                          </div>
-                          <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-0">
                             <div className="font-mono text-xs text-gray-600">
                               {item.item_code}
                             </div>
