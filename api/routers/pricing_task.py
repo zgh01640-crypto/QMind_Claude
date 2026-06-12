@@ -358,33 +358,22 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             f"请调用工具提交套定额结果，选出匹配的定额子目并说明理由，同时列出影响套定额的模糊问题。"
         )
         messages_r5 = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg_r5}]
-        stream5 = client.chat.completions.create(
+        # Round 5 使用非流式调用，避免流式截断 tool_call JSON
+        resp5 = client.chat.completions.create(
             model="deepseek-v4-pro",
             messages=messages_r5,
             tools=[_TOOL_SUBMIT_QUOTA_MATCH],
             reasoning_effort="high",
             extra_body={"thinking": {"type": "enabled"}},
             max_tokens=16000,
-            stream=True,
+            stream=False,
         )
-        tool_args_r5 = ""
-        for chunk in stream5:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                yield ("reasoning_token", delta.reasoning_content)
-            if delta.content:
-                yield ("reasoning_token", delta.content)
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    if tc.function and tc.function.arguments:
-                        tool_args_r5 += tc.function.arguments
-        try:
-            match_result = json.loads(tool_args_r5)
-        except Exception as e:
-            print(f"[stream] round5_json_error: {e}\nraw: {tool_args_r5[:500]}", file=sys.stderr, flush=True)
-            raise
+        msg5 = resp5.choices[0].message
+        if hasattr(msg5, 'reasoning_content') and msg5.reasoning_content:
+            yield ("reasoning_token", msg5.reasoning_content)
+        if not msg5.tool_calls:
+            raise ValueError("Round 5: AI did not call submit_quota_match")
+        match_result = json.loads(msg5.tool_calls[0].function.arguments)
         print("[stream] round5_done", file=sys.stderr, flush=True)
         yield ("quota_match", match_result)
     except Exception as e:
