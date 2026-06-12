@@ -73,6 +73,43 @@ _TOOL_SUBMIT_WORK_PROCEDURES = {
     },
 }
 
+_TOOL_SUBMIT_QUOTA_MATCH = {
+    "type": "function",
+    "function": {
+        "name": "submit_quota_match",
+        "description": "提交套定额结果，包括从候选定额中选出的匹配子目列表，以及影响套定额的模糊问题。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "matches": {
+                    "type": "array",
+                    "description": "匹配的定额子目列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "zmbh": {"type": "string", "description": "定额子目编码"},
+                            "zmmc": {"type": "string", "description": "定额子目名称"},
+                            "qty_factor": {"type": "number", "description": "工程量系数，一般为1，换算时填具体值"},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"], "description": "匹配置信度"},
+                            "match_reason": {"type": "string", "description": "选取该定额的简要理由"},
+                        },
+                        "required": ["zmbh", "zmmc", "qty_factor", "confidence", "match_reason"],
+                        "additionalProperties": False,
+                    },
+                },
+                "issues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "影响套定额的模糊或不清楚的问题，若无则为空数组",
+                },
+            },
+            "required": ["matches", "issues"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _TOOL_FETCH_QUOTA_CANDIDATES = {
     "type": "function",
     "function": {
@@ -298,6 +335,54 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         candidates_data = exec_fetch_quota_candidates(conn, call_input_r4.get("item_code", boq_item["item_code"]))
         print("[stream] round4_done", file=sys.stderr, flush=True)
         yield ("quota_candidates", candidates_data)
+        # Round 5 — 套定额匹配，候选列表直接嵌入提示词
+        print("[stream] round5", file=sys.stderr, flush=True)
+        candidates_text = "\n".join(
+            f"  [{i+1}] 编码：{c['zmbh']}  名称：{c['zmmc']}  单位：{c['dw']}"
+            + (f"\n      施工内容：{c['gznr']}" if c['gznr'] else "")
+            for i, c in enumerate(candidates_data["candidates"])
+        ) or "（无候选定额）"
+        circle_nums = '①②③④⑤⑥⑦⑧⑨⑩'
+        procedures_text = " → ".join(
+            f"{circle_nums[i] if i < len(circle_nums) else str(i+1)}{p}"
+            for i, p in enumerate(procedures_result.get("procedures", []))
+        )
+        user_msg_r5 = (
+            f"请根据以下信息，从候选定额子目中选出最匹配的定额，完成套定额。\n\n"
+            f"【清单项信息】\n"
+            f"清单名称：{boq_item['item_name']}\n"
+            f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n"
+            f"计量单位：{boq_item.get('unit') or '无'}\n\n"
+            f"【标准施工工序】\n{procedures_text or '（未获取）'}\n\n"
+            f"【候选定额子目（共 {candidates_data['total']} 条）】\n{candidates_text}\n\n"
+            f"请调用工具提交套定额结果，选出匹配的定额子目并说明理由，同时列出影响套定额的模糊问题。"
+        )
+        messages_r5 = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg_r5}]
+        stream5 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages_r5,
+            tools=[_TOOL_SUBMIT_QUOTA_MATCH],
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=6000,
+            stream=True,
+        )
+        tool_args_r5 = ""
+        for chunk in stream5:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield ("reasoning_token", delta.reasoning_content)
+            if delta.content:
+                yield ("reasoning_token", delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        tool_args_r5 += tc.function.arguments
+        match_result = json.loads(tool_args_r5)
+        print("[stream] round5_done", file=sys.stderr, flush=True)
+        yield ("quota_match", match_result)
     except Exception as e:
         import traceback
         print(f"[stream] error: {str(e)}", file=sys.stderr, flush=True)
@@ -336,6 +421,8 @@ def pricing_task_match_item_stream(req: dict):
                     yield f"data: {json.dumps({'type':'work_procedures',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "quota_candidates":
                     yield f"data: {json.dumps({'type':'quota_candidates',**data}, ensure_ascii=False)}\n\n"
+                elif event_type == "quota_match":
+                    yield f"data: {json.dumps({'type':'quota_match',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "error":
                     yield f"data: {json.dumps({'type':'error','error':data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type':'done'})}\n\n"

@@ -1178,6 +1178,14 @@ export interface QuotaCandidate {
   gznr: string
 }
 
+export interface QuotaMatch {
+  zmbh: string
+  zmmc: string
+  qty_factor: number
+  confidence: 'high' | 'medium' | 'low'
+  match_reason: string
+}
+
 export interface PricingTaskMatch {
   dezmid: number
   dekid: number
@@ -1197,6 +1205,7 @@ export type PricingTaskEvent =
   | { type: 'feature_check'; is_complete: boolean; missing_features: string[]; analysis: string }
   | { type: 'work_procedures'; procedures: string[] }
   | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
+  | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'done' }
   | { type: 'error'; error: string }
 

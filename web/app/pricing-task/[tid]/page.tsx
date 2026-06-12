@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { fetchAllBoqItems, BoqItem, streamPricingTaskItem, PricingTaskEvent, QuotaCandidate } from '@/lib/api'
+import { fetchAllBoqItems, BoqItem, streamPricingTaskItem, PricingTaskEvent, QuotaCandidate, QuotaMatch } from '@/lib/api'
 
 interface PricingTask {
   id: string
@@ -24,6 +24,7 @@ interface ItemResult {
   featureCheck?: { is_complete: boolean; missing_features: string[]; analysis: string }
   workProcedures?: string[]
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
+  quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   error?: string
 }
 
@@ -117,8 +118,13 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'quota_candidates') {
           updateResult(itemId, s => ({
             ...s,
-            phase: 'done',
             quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total },
+          }))
+        } else if (evt.type === 'quota_match') {
+          updateResult(itemId, s => ({
+            ...s,
+            phase: 'done',
+            quotaMatch: { matches: evt.matches, issues: evt.issues },
           }))
         } else if (evt.type === 'error') {
           updateResult(itemId, s => ({ ...s, phase: 'error', error: evt.error }))
@@ -185,6 +191,14 @@ export default function PricingTaskDetailPage() {
                     const badge4 = result?.quotaCandidates
                       ? <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${result.quotaCandidates.total > 0 ? 'bg-green-500' : 'bg-gray-400'}`}>4</span>
                       : null
+                    const badge5 = result?.quotaMatch
+                      ? (() => {
+                          const hasMatches = result.quotaMatch.matches.length > 0
+                          const allHigh = result.quotaMatch.matches.every(m => m.confidence === 'high')
+                          const color = !hasMatches ? 'bg-gray-400' : allHigh ? 'bg-green-500' : 'bg-amber-500'
+                          return <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${color}`}>5</span>
+                        })()
+                      : null
                     return (
                       <div
                         key={item.id}
@@ -215,6 +229,7 @@ export default function PricingTaskDetailPage() {
                             {badge2}
                             {badge3}
                             {badge4}
+                            {badge5}
                           </div>
                         </div>
 
@@ -393,6 +408,51 @@ export default function PricingTaskDetailPage() {
                               )}
                             </div>
                           ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 套定额结果 */}
+                  {currentResult.quotaMatch && (
+                    <div className="px-4 py-4 border-t bg-emerald-50 border-emerald-200">
+                      <div className="font-semibold text-sm text-emerald-900 mb-3">
+                        ✅ 套定额结果
+                        <span className="ml-2 text-xs font-normal text-emerald-600">
+                          {currentResult.quotaMatch.matches.length} 条匹配
+                        </span>
+                      </div>
+                      {currentResult.quotaMatch.matches.length === 0 ? (
+                        <p className="text-xs text-gray-400">未找到匹配定额</p>
+                      ) : (
+                        <div className="space-y-2 text-xs mb-3">
+                          {currentResult.quotaMatch.matches.map((m, i) => {
+                            const confColor = m.confidence === 'high' ? 'bg-green-100 text-green-800' : m.confidence === 'medium' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
+                            const confLabel = m.confidence === 'high' ? '高' : m.confidence === 'medium' ? '中' : '低'
+                            return (
+                              <div key={i} className="bg-white border border-emerald-200 rounded px-3 py-2">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="font-mono text-emerald-700 font-semibold">{m.zmbh}</span>
+                                  <span className="font-medium text-gray-900">{m.zmmc}</span>
+                                  {m.qty_factor !== 1 && (
+                                    <span className="text-gray-500 ml-1">×{m.qty_factor}</span>
+                                  )}
+                                  <span className={`ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold flex-shrink-0 ${confColor}`}>{confLabel}</span>
+                                </div>
+                                <p className="text-gray-500">{m.match_reason}</p>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      {currentResult.quotaMatch.issues.length > 0 && (
+                        <div className="mt-2">
+                          <div className="text-xs font-semibold text-amber-700 mb-1">⚠️ 模糊问题</div>
+                          <ul className="text-xs text-amber-700 space-y-0.5 list-disc list-inside">
+                            {currentResult.quotaMatch.issues.map((issue, i) => (
+                              <li key={i}>{issue}</li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                     </div>
