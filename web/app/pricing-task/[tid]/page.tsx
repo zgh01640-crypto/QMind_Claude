@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { fetchAllBoqItems, BoqItem } from '@/lib/api'
+import { fetchAllBoqItems, BoqItem, streamBS2024MatchItem, BS2024MatchEvent } from '@/lib/api'
 
 interface PricingTask {
   id: string
@@ -16,6 +16,13 @@ interface PricingTask {
   created_at: string
 }
 
+interface RightState {
+  phase: 'idle' | 'reasoning' | 'done' | 'error'
+  reasoning: string
+  codeCheck?: { item_code: string; base_code: string; item_name: string; standard_names: string[]; found: boolean }
+  error?: string
+}
+
 export default function PricingTaskDetailPage() {
   const params = useParams()
   const taskId = params.tid as string
@@ -26,6 +33,10 @@ export default function PricingTaskDetailPage() {
   const [expandedItemId, setExpandedItemId] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
 
+  // 右侧面板状态
+  const [rightState, setRightState] = useState<RightState>({ phase: 'idle', reasoning: '' })
+  const reasoningRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
     // 加载任务
     const stored = localStorage.getItem('pricing_tasks')
@@ -34,11 +45,17 @@ export default function PricingTaskDetailPage() {
       const found = tasks.find(t => t.id === taskId)
       if (found) {
         setTask(found)
-        // 加载清单项
         loadItems(found.project_id)
       }
     }
   }, [taskId])
+
+  // 推理过程自动滚到底部
+  useEffect(() => {
+    if (reasoningRef.current) {
+      reasoningRef.current.scrollTop = reasoningRef.current.scrollHeight
+    }
+  }, [rightState.reasoning])
 
   const loadItems = async (projectId: number) => {
     try {
@@ -51,6 +68,39 @@ export default function PricingTaskDetailPage() {
     }
   }
 
+  const handleMatch = async (itemId: number) => {
+    if (!task) return
+    setRightState({ phase: 'reasoning', reasoning: '' })
+
+    try {
+      await streamBS2024MatchItem(itemId, task.chapter_ids, task.manual_project_id, (evt) => {
+        if (evt.type === 'reasoning_token') {
+          setRightState(s => ({ ...s, reasoning: s.reasoning + evt.token }))
+        } else if (evt.type === 'code_check') {
+          setRightState(s => ({
+            ...s,
+            phase: 'done',
+            codeCheck: {
+              item_code: evt.item_code,
+              base_code: evt.base_code,
+              item_name: evt.item_name,
+              standard_names: evt.standard_names,
+              found: evt.found,
+            },
+          }))
+        } else if (evt.type === 'error') {
+          setRightState(s => ({ ...s, phase: 'error', error: evt.error }))
+        }
+      })
+    } catch (err) {
+      setRightState(s => ({
+        ...s,
+        phase: 'error',
+        error: err instanceof Error ? err.message : '未知错误',
+      }))
+    }
+  }
+
   if (loading || !task) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -58,6 +108,8 @@ export default function PricingTaskDetailPage() {
       </div>
     )
   }
+
+  const selectedItem = items.find(i => i.id === selectedItemId)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -107,16 +159,16 @@ export default function PricingTaskDetailPage() {
                         className="px-4 py-3"
                       >
                         <div className="flex-1 min-w-0">
-                            <div className="font-mono text-xs text-gray-600">
-                              {item.item_code}
-                            </div>
-                            <div className="text-sm font-medium text-gray-900 truncate">
-                              {item.item_name}
-                            </div>
+                          <div className="font-mono text-xs text-gray-600">
+                            {item.item_code}
+                          </div>
+                          <div className="text-sm font-medium text-gray-900 truncate">
+                            {item.item_name}
                           </div>
                         </div>
+                      </div>
 
-                      {/* 详情（展开时显示） */}
+                      {/* 详情（展开时显示）*/}
                       {expandedItemId === item.id && (
                         <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-xs text-gray-700 space-y-2">
                           {item.item_description && (
@@ -147,34 +199,85 @@ export default function PricingTaskDetailPage() {
             {selectedItemId && (
               <div className="px-4 py-4 border-t border-gray-200 bg-gray-50">
                 <button
-                  onClick={() => console.log('套定额:', selectedItemId)}
-                  className="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors"
+                  onClick={() => handleMatch(selectedItemId)}
+                  disabled={rightState.phase === 'reasoning'}
+                  className="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
                 >
-                  套定额
+                  {rightState.phase === 'reasoning' ? '推理中...' : '套定额'}
                 </button>
               </div>
             )}
           </div>
 
-          {/* 右侧占位区 */}
-          <div className="flex-1 bg-white rounded-lg shadow flex items-center justify-center border-2 border-dashed border-gray-300">
-            <div className="text-center">
-              <div className="text-4xl mb-4">📝</div>
-              <p className="font-semibold text-gray-900 mb-1">提示词</p>
-              <p className="text-sm text-gray-500 mb-6">
-                提示词模板功能即将上线
-              </p>
+          {/* 右侧面板 */}
+          <div className="flex-1 bg-white rounded-lg shadow flex flex-col overflow-hidden">
+            {rightState.phase === 'idle' ? (
+              <div className="flex-1 flex items-center justify-center text-gray-400 text-center">
+                <div>
+                  <p className="text-lg mb-2">📋</p>
+                  <p>选择清单项后点击「套定额」开始</p>
+                </div>
+              </div>
+            ) : rightState.phase === 'error' ? (
+              <div className="flex-1 flex items-center justify-center p-6">
+                <div className="text-center">
+                  <p className="text-red-600 font-semibold mb-2">出错了</p>
+                  <p className="text-sm text-red-500">{rightState.error}</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* 推理过程区 */}
+                <div className="flex-1 flex flex-col border-b">
+                  <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2">
+                    <span className="text-amber-600 font-semibold text-sm">🧠 AI 推理中</span>
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  </div>
+                  <div
+                    ref={reasoningRef}
+                    className="flex-1 overflow-y-auto px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono"
+                  >
+                    {rightState.reasoning || '…'}
+                  </div>
+                </div>
 
-              <div className="text-4xl mb-4">🧠</div>
-              <p className="font-semibold text-gray-900 mb-1">推理过程</p>
-              <p className="text-sm text-gray-500 mb-6">
-                选择清单后点击套定额开始
-              </p>
-
-              <div className="text-4xl mb-4">✓</div>
-              <p className="font-semibold text-gray-900 mb-1">匹配结果</p>
-              <p className="text-sm text-gray-500">推理完成后展示</p>
-            </div>
+                {/* Step 1 校验结果 */}
+                {rightState.codeCheck && (
+                  <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
+                    <div className="font-semibold text-blue-900 text-sm mb-3">📝 Step 1 编码核查</div>
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <span className="text-gray-600">原始编码：</span>
+                        <span className="font-mono text-blue-700 font-semibold">{rightState.codeCheck.item_code}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-600">基准编码：</span>
+                        <span className="font-mono text-blue-600">{rightState.codeCheck.base_code}</span>
+                        <span className="text-gray-400 text-xs ml-2">（去掉末尾3位）</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-600">工程清单名称：</span>
+                        <span className="text-gray-900">{rightState.codeCheck.item_name}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-600">标准名称：</span>
+                        {rightState.codeCheck.found ? (
+                          <div className="mt-1 space-y-1">
+                            {rightState.codeCheck.standard_names.map((name, i) => (
+                              <div key={i} className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2 mb-1">
+                                ✅ {name}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>

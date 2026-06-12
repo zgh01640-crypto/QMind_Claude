@@ -120,6 +120,58 @@ medium/low 时 missing_info 必须说明缺少哪些特征。
 - 所有候选定额置信度均为 low 且工作内容匹配度低
 - 清单单位无法与定额换算"""
 
+
+# ── 辅助函数 ──────────────────────────────────────────────────────────────────
+
+def strip_serial(item_code: str) -> str:
+    """去掉清单编码末尾3位流水号，返回9位基准编码。010102002004 → 010102002"""
+    code = item_code.strip().replace(' ', '')
+    if len(code) >= 3:
+        return code[:-3]
+    return code
+
+
+def exec_check_item_code(conn, item_code: str, item_name: str) -> dict:
+    """
+    执行 check_item_code 工具：查 tqdk_tqdzm.zmbh，返回标准子目名称。
+    """
+    base_code = strip_serial(item_code)
+    with conn.cursor() as cur:
+        cur.execute("SELECT zmmc FROM tqdk_tqdzm WHERE zmbh = %s LIMIT 5", (base_code,))
+        rows = cur.fetchall()
+    standard_names = list({r[0] for r in rows if r[0]})
+    return {
+        "item_code": item_code,
+        "base_code": base_code,
+        "item_name": item_name,
+        "standard_names": standard_names,
+        "found": len(standard_names) > 0,
+    }
+
+
+# ── 工具定义 ──────────────────────────────────────────────────────────────────
+
+_CHECK_CODE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_item_code",
+        "description": (
+            "根据工程清单编码查询国标清单标准库，返回标准名称，"
+            "用于核验工程清单名称与标准名称是否一致。"
+            "取原始编码去掉末尾3位流水号，得到9位基准编码，精确匹配 tqdk_tqdzm.zmbh。"
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item_code": {"type": "string", "description": "原始12位编码，如 010102002004"}
+            },
+            "required": ["item_code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _MATCH_TOOL_BS2024 = {
     "type": "function",
     "function": {
@@ -289,6 +341,58 @@ def _build_boq_user_msg(boq_item: dict) -> str:
 {boq_item.get('item_description') or '（无）'}
 
 请按推理步骤分析，调用 submit_matches 函数返回匹配结果。"""
+
+
+def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
+    """
+    Step 1：强制调用 check_item_code 工具，执行 DB 查询。
+    yield ("reasoning_token", str)
+    yield ("code_check", dict)
+    """
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
+
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": _build_boq_user_msg(boq_item)},
+    ]
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=[_CHECK_CODE_TOOL],
+        tool_choice={"type": "function", "function": {"name": "check_item_code"}},
+        extra_body={"thinking": {"type": "enabled"}},
+        reasoning_effort="high",
+        max_tokens=2000,
+        stream=True,
+    )
+
+    tool_call_args = ""
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        rc = getattr(delta, "reasoning_content", None)
+        if rc:
+            yield ("reasoning_token", rc)
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                if tc.function and tc.function.arguments:
+                    tool_call_args += tc.function.arguments
+
+    try:
+        call_input = json.loads(tool_call_args)
+        result = exec_check_item_code(conn, call_input.get("item_code", ""), boq_item.get("item_name", ""))
+    except Exception:
+        result = {"item_code": "", "base_code": "", "item_name": "", "standard_names": [], "found": False}
+
+    yield ("code_check", result)
 
 
 def stream_match_bs2024_item(boq_item: dict, system_prompt: str):
@@ -664,6 +768,62 @@ def update_match_status(match_id: int, body: dict):
 
 
 # ── 流式套定额端点 ────────────────────────────────────────────────────────────
+
+class SingleMatchRequest(BaseModel):
+    boq_item_id: int
+    chapter_ids: list[int]
+    manual_project_id: Optional[int] = None
+
+
+@router.post("/bs2024-match/match-item-stream")
+def bs2024_match_item_stream(req: SingleMatchRequest):
+    """单条清单项 Step 1：编码核查（SSE 流式）。"""
+
+    def generate():
+        conn = get_connection()
+        try:
+            # 1. 读清单项
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id,item_code,item_name,item_description,unit,quantity FROM boq_items WHERE id=%s",
+                    (req.boq_item_id,),
+                )
+                row = cur.fetchone()
+            if not row:
+                yield f"data: {json.dumps({'type':'error','error':'清单项不存在'})}\n\n"
+                return
+
+            boq_item = {
+                "id": row[0],
+                "item_code": row[1],
+                "item_name": row[2],
+                "item_description": row[3],
+                "unit": row[4],
+                "quantity": float(row[5]) if row[5] else None,
+            }
+
+            # 2. 构建提示词
+            chapter_name, sp = build_bs2024_system_prompt(conn, req.chapter_ids)
+            user_msg = _build_boq_user_msg(boq_item)
+
+            # 3. item_info 事件
+            yield f"data: {json.dumps({'type':'item_info','item':boq_item,'system_prompt':sp[:2000],'system_prompt_len':len(sp),'user_message':user_msg,'chapter_name':chapter_name},ensure_ascii=False)}\n\n"
+
+            # 4. Round 1 流式推理
+            for event_type, data in stream_match_bs2024_item_step1(boq_item, sp, conn):
+                if event_type == "reasoning_token":
+                    yield f"data: {json.dumps({'type':'reasoning_token','token':data},ensure_ascii=False)}\n\n"
+                elif event_type == "code_check":
+                    yield f"data: {json.dumps({'type':'code_check',**data},ensure_ascii=False)}\n\n"
+
+            yield f"data: {json.dumps({'type':'done'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','error':str(e)})}\n\n"
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 class MatchRunRequest(BaseModel):
     project_id: int

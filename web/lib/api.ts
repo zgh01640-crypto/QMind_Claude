@@ -1390,3 +1390,42 @@ export async function streamDebugMatch(
     }
   }
 }
+
+// ── 单条清单 BS2024 匹配（Phase 2 Step 1） ──────────────────────────────────────
+
+export type BS2024MatchEvent =
+  | { type: 'item_info'; item: BoqItem; system_prompt: string; system_prompt_len: number; user_message: string; chapter_name: string }
+  | { type: 'reasoning_token'; token: string }
+  | { type: 'code_check'; item_code: string; base_code: string; item_name: string; standard_names: string[]; found: boolean }
+  | { type: 'done' }
+  | { type: 'error'; error: string }
+
+export async function streamBS2024MatchItem(
+  boq_item_id: number,
+  chapter_ids: number[],
+  manual_project_id: number | null,
+  onEvent: (e: BS2024MatchEvent) => void,
+): Promise<void> {
+  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const res = await fetch(`${API}/api/bs2024-match/match-item-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boq_item_id, chapter_ids, manual_project_id }),
+  })
+  if (!res.ok) throw new Error(`请求失败 ${res.status}`)
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6)) as BS2024MatchEvent) } catch { /* skip */ }
+      }
+    }
+  }
+}
