@@ -36,7 +36,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Code:{boq_item['item_code']} Name:{boq_item['item_name']}"}]
         print("[stream] round1", file=sys.stderr, flush=True)
         yield ("reasoning_token", "[Round 1] Querying API...\n")
-        stream1 = client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=[_TOOL_CHECK_ITEM_CODE], tool_choice={"type": "function", "function": {"name": "check_item_code"}}, reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}, max_tokens=8000, stream=True)
+        stream1 = client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=[_TOOL_CHECK_ITEM_CODE], reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}, max_tokens=8000, stream=True)
         tool_call_id, tool_call_args, reasoning_content, content = "", "", "", ""
         for chunk in stream1:
             if not chunk.choices:
@@ -125,3 +125,4 @@ def pricing_task_match_item_stream(req: dict):
         finally:
             conn.close()
     return StreamingResponse(generate(), media_type="text/event-stream")
+
