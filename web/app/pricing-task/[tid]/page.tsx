@@ -237,22 +237,22 @@ export default function PricingTaskDetailPage() {
               </div>
             ) : (
               <div className="flex-1 flex flex-col overflow-hidden">
-                {/* 推理过程区 - 占大部分并可滚动 */}
-                <div className="flex-1 flex flex-col border-b overflow-hidden min-h-0">
-                  <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2 flex-shrink-0">
-                    <span className="text-amber-600 font-semibold text-sm">🧠 AI 推理中</span>
+                {/* 顶部标题栏 */}
+                <div className="px-4 py-3 border-b bg-amber-50 flex items-center gap-2 flex-shrink-0">
+                  <span className="text-amber-600 font-semibold text-sm">🧠 AI 推理</span>
+                  {rightState.phase === 'reasoning' && (
                     <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                  </div>
-                  <div
-                    ref={reasoningRef}
-                    className="flex-1 overflow-y-auto px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono"
-                  >
-                    {rightState.reasoning || '…'}
-                  </div>
+                  )}
                 </div>
 
-                {/* 匹配结果卡片区 - 可滚动下方区域 */}
-                <div className="overflow-y-auto flex-shrink-0 max-h-1/3">
+                {/* 单一滚动区：推理文字 + 结果卡片顺序排列 */}
+                <div ref={reasoningRef} className="flex-1 overflow-y-auto">
+                  {/* 推理文字 */}
+                  <div className="px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono">
+                    {rightState.reasoning || '…'}
+                  </div>
+
+                  {/* 编码核查结果 */}
                   {rightState.codeCheck && (
                     <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
                       <div className="font-semibold text-blue-900 text-sm mb-3">📝 编码核查</div>
@@ -284,6 +284,7 @@ export default function PricingTaskDetailPage() {
                     </div>
                   )}
 
+                  {/* 一致性判断结果 */}
                   {rightState.judgment && (
                     <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
                       <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
