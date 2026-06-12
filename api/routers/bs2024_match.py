@@ -357,16 +357,28 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
 
+    # Round 1 特殊用户消息：要求调用 check_item_code
+    user_msg = f"""## 待套定额的清单项
+
+- 项目编码：{boq_item.get('item_code', '')}
+- 项目名称：{boq_item.get('item_name', '')}
+- 计量单位：{boq_item.get('unit', '')}
+- 工程量：{boq_item.get('quantity', '')}
+- 项目特征描述：
+{boq_item.get('item_description') or '（无）'}
+
+【第一步】请先调用 check_item_code 工具核查该编码是否与标准库中的编码一致。"""
+
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": _build_boq_user_msg(boq_item)},
+        {"role": "user",   "content": user_msg},
     ]
 
     stream = client.chat.completions.create(
         model=model,
         messages=messages,
         tools=[_CHECK_CODE_TOOL],
-        tool_choice={"type": "function", "function": {"name": "check_item_code"}},
+        tool_choice="auto",
         extra_body={"thinking": {"type": "enabled"}},
         reasoning_effort="high",
         max_tokens=2000,
