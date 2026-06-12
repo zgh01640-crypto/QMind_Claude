@@ -11,7 +11,7 @@ def _ensure_schema(conn):
         conn.commit()
 
 def exec_check_item_code(conn, item_code: str) -> dict:
-    base_code = item_code.strip()[-9:] if len(item_code.strip()) >= 3 else item_code.strip()
+    base_code = item_code.strip()[:-3] if len(item_code.strip()) > 3 else item_code.strip()
     with conn.cursor() as cur:
         cur.execute("SELECT zmmc FROM tqdk_tqdzm WHERE zmbh = %s LIMIT 5", (base_code,))
         rows = cur.fetchall()
