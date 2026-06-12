@@ -364,15 +364,23 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             model="deepseek-v4-pro",
             messages=messages_r5,
             tools=[_TOOL_SUBMIT_QUOTA_MATCH],
-            max_tokens=4000,
+            max_tokens=8000,
             stream=False,
         )
         msg5 = resp5.choices[0].message
+        finish5 = resp5.choices[0].finish_reason
+        print(f"[stream] round5_finish_reason: {finish5}", file=sys.stderr, flush=True)
         if hasattr(msg5, 'reasoning_content') and msg5.reasoning_content:
             yield ("reasoning_token", msg5.reasoning_content)
         if not msg5.tool_calls:
-            raise ValueError("Round 5: AI did not call submit_quota_match")
-        match_result = json.loads(msg5.tool_calls[0].function.arguments)
+            raise ValueError(f"Round 5: AI did not call tool (finish_reason={finish5}, content={msg5.content!r})")
+        raw_args = msg5.tool_calls[0].function.arguments
+        print(f"[stream] round5_args_len: {len(raw_args)}", file=sys.stderr, flush=True)
+        try:
+            match_result = json.loads(raw_args)
+        except Exception as e:
+            print(f"[stream] round5_json_error raw: {raw_args[:600]}", file=sys.stderr, flush=True)
+            raise
         print("[stream] round5_done", file=sys.stderr, flush=True)
         yield ("quota_match", match_result)
     except Exception as e:
