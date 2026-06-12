@@ -192,6 +192,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             f"请调用工具查询该清单编码对应的标准清单名称。"
         )
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}]
+        # Round 1 — 工程量清单项进行编码一致性检查
         print("[stream] round1", file=sys.stderr, flush=True)
         yield ("reasoning_token", "[Round 1] Querying API...\n")
         stream1 = client.chat.completions.create(model="deepseek-v4-pro", messages=messages, tools=[_TOOL_CHECK_ITEM_CODE], reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}, max_tokens=8000, stream=True)
@@ -358,14 +359,12 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             f"请调用工具提交套定额结果，选出匹配的定额子目并说明理由，同时列出影响套定额的模糊问题。"
         )
         messages_r5 = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg_r5}]
-        # Round 5 使用非流式调用，避免流式截断 tool_call JSON
+        # Round 5 非流式，不启用 thinking（thinking tokens 会吃掉 max_tokens 导致 JSON 截断）
         resp5 = client.chat.completions.create(
             model="deepseek-v4-pro",
             messages=messages_r5,
             tools=[_TOOL_SUBMIT_QUOTA_MATCH],
-            reasoning_effort="high",
-            extra_body={"thinking": {"type": "enabled"}},
-            max_tokens=16000,
+            max_tokens=4000,
             stream=False,
         )
         msg5 = resp5.choices[0].message
