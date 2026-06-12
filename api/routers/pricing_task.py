@@ -188,8 +188,6 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         messages=messages,
         tools=[_TOOL_CHECK_ITEM_CODE],
         tool_choice={"type": "function", "function": {"name": "check_item_code"}},
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort="high",
         max_tokens=2000,
         stream=True,
     )
@@ -263,8 +261,6 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     stream2 = client.chat.completions.create(
         model="deepseek-v4-pro",
         messages=messages,
-        extra_body={"thinking": {"type": "enabled"}},
-        reasoning_effort="high",
         max_tokens=2000,
         stream=True,
     )
