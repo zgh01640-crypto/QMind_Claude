@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { fetchAllBoqItems, BoqItem, streamPricingTaskItem, PricingTaskEvent } from '@/lib/api'
+import { fetchAllBoqItems, BoqItem, streamPricingTaskItem, PricingTaskEvent, QuotaCandidate } from '@/lib/api'
 
 interface PricingTask {
   id: string
@@ -23,6 +23,7 @@ interface ItemResult {
   judgment?: { is_consistent: boolean; reasoning: string }
   featureCheck?: { is_complete: boolean; missing_features: string[]; analysis: string }
   workProcedures?: string[]
+  quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   error?: string
 }
 
@@ -111,8 +112,13 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'work_procedures') {
           updateResult(itemId, s => ({
             ...s,
-            phase: 'done',
             workProcedures: evt.procedures,
+          }))
+        } else if (evt.type === 'quota_candidates') {
+          updateResult(itemId, s => ({
+            ...s,
+            phase: 'done',
+            quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total },
           }))
         } else if (evt.type === 'error') {
           updateResult(itemId, s => ({ ...s, phase: 'error', error: evt.error }))
@@ -176,6 +182,9 @@ export default function PricingTaskDetailPage() {
                     const badge3 = result?.workProcedures
                       ? <span className="text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white bg-green-500">3</span>
                       : null
+                    const badge4 = result?.quotaCandidates
+                      ? <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${result.quotaCandidates.total > 0 ? 'bg-green-500' : 'bg-gray-400'}`}>4</span>
+                      : null
                     return (
                       <div
                         key={item.id}
@@ -205,6 +214,7 @@ export default function PricingTaskDetailPage() {
                             {badge1}
                             {badge2}
                             {badge3}
+                            {badge4}
                           </div>
                         </div>
 
@@ -355,6 +365,36 @@ export default function PricingTaskDetailPage() {
                           </span>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* 定额候选子目 */}
+                  {currentResult.quotaCandidates && (
+                    <div className="px-4 py-4 border-t bg-slate-50 border-slate-200">
+                      <div className="font-semibold text-sm text-slate-900 mb-2">
+                        📦 定额候选子目
+                        <span className="ml-2 text-xs font-normal text-slate-500">
+                          共 {currentResult.quotaCandidates.total} 条
+                        </span>
+                      </div>
+                      {currentResult.quotaCandidates.total === 0 ? (
+                        <p className="text-xs text-slate-400">未找到候选定额子目</p>
+                      ) : (
+                        <div className="space-y-1 text-xs">
+                          {currentResult.quotaCandidates.candidates.map((c, i) => (
+                            <div key={i} className="bg-white border border-slate-200 rounded px-3 py-2">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <span className="font-mono text-slate-500">{c.zmbh}</span>
+                                <span className="font-medium text-slate-900">{c.zmmc}</span>
+                                <span className="text-slate-400 ml-auto flex-shrink-0">{c.dw}</span>
+                              </div>
+                              {c.gznr && (
+                                <div className="text-slate-500 line-clamp-2">{c.gznr}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

@@ -73,6 +73,23 @@ _TOOL_SUBMIT_WORK_PROCEDURES = {
     },
 }
 
+_TOOL_FETCH_QUOTA_CANDIDATES = {
+    "type": "function",
+    "function": {
+        "name": "fetch_quota_candidates",
+        "description": "根据工程量清单编码，查询该清单项对应的定额候选子目列表。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item_code": {"type": "string", "description": "工程量清单编码，例如：010402001006"},
+            },
+            "required": ["item_code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _TOOL_CHECK_ITEM_CODE = {
     "type": "function",
     "function": {
@@ -91,6 +108,34 @@ _TOOL_CHECK_ITEM_CODE = {
     },
 }
 
+def exec_fetch_quota_candidates(conn, item_code: str, chapter_ids: list) -> dict:
+    base_code = item_code.strip()[:-3] if len(item_code.strip()) > 3 else item_code.strip()
+    with conn.cursor() as cur:
+        if chapter_ids:
+            cur.execute("""
+                SELECT DISTINCT q.id, q.dekid, q.zmbh, q.zmmc, q.dw, q.gznr
+                FROM tqdk_tqdzm zm
+                JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
+                JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
+                WHERE zm.zmbh = %s AND cand.dekid = ANY(%s)
+                LIMIT 30
+            """, (base_code, chapter_ids))
+        else:
+            cur.execute("""
+                SELECT DISTINCT q.id, q.dekid, q.zmbh, q.zmmc, q.dw, q.gznr
+                FROM tqdk_tqdzm zm
+                JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
+                JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
+                WHERE zm.zmbh = %s
+                LIMIT 30
+            """, (base_code,))
+        rows = cur.fetchall()
+    candidates = [
+        {"id": r[0], "dekid": r[1], "zmbh": r[2], "zmmc": r[3], "dw": r[4], "gznr": r[5] or ""}
+        for r in rows
+    ]
+    return {"item_code": item_code, "base_code": base_code, "candidates": candidates, "total": len(candidates)}
+
 def build_system_prompt() -> str:
     return (
         "你是专业的建筑工程造价工程师，精通以下标准与规范：\n"
@@ -100,7 +145,7 @@ def build_system_prompt() -> str:
         "要求：全程使用中文进行推理和分析，包括思维链过程。"
     )
 
-def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
+def stream_pricing_item(boq_item: dict, system_prompt: str, conn, chapter_ids: list):
     from openai import OpenAI
     import os, sys
     print("[stream] start", file=sys.stderr, flush=True)
@@ -228,6 +273,41 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
         procedures_result = json.loads(tool_args_r3)
         print("[stream] round3_done", file=sys.stderr, flush=True)
         yield ("work_procedures", procedures_result)
+        # Round 4 — 定额候选查询，AI调用工具，Python执行DB查询
+        print("[stream] round4", file=sys.stderr, flush=True)
+        user_msg_r4 = (
+            f"请调用工具查询以下清单项的定额候选子目：\n\n"
+            f"清单编码：{boq_item['item_code']}\n"
+            f"清单名称：{boq_item['item_name']}\n\n"
+            f"请调用工具获取定额候选数据。"
+        )
+        messages_r4 = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg_r4}]
+        stream4 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages_r4,
+            tools=[_TOOL_FETCH_QUOTA_CANDIDATES],
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=2000,
+            stream=True,
+        )
+        tool_args_r4 = ""
+        for chunk in stream4:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield ("reasoning_token", delta.reasoning_content)
+            if delta.content:
+                yield ("reasoning_token", delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        tool_args_r4 += tc.function.arguments
+        call_input_r4 = json.loads(tool_args_r4)
+        candidates_data = exec_fetch_quota_candidates(conn, call_input_r4.get("item_code", boq_item["item_code"]), chapter_ids)
+        print("[stream] round4_done", file=sys.stderr, flush=True)
+        yield ("quota_candidates", candidates_data)
     except Exception as e:
         import traceback
         print(f"[stream] error: {str(e)}", file=sys.stderr, flush=True)
@@ -249,10 +329,11 @@ def pricing_task_match_item_stream(req: dict):
                 return
             boq_item = {"id": row[0], "item_code": row[1], "item_name": row[2], "item_description": row[3], "unit": row[4], "quantity": float(row[5]) if row[5] else None, "project_id": row[6]}
             sp = build_system_prompt()
+            chapter_ids = req.get("chapter_ids") or []
             yield f"data: {json.dumps({'type':'item_info','item':boq_item}, ensure_ascii=False)}\n\n"
             import sys
             print("[SSE] calling stream", file=sys.stderr, flush=True)
-            for event_type, data in stream_pricing_item(boq_item, sp, conn):
+            for event_type, data in stream_pricing_item(boq_item, sp, conn, chapter_ids):
                 print(f"[SSE] {event_type}", file=sys.stderr, flush=True)
                 if event_type == "reasoning_token":
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
@@ -264,6 +345,8 @@ def pricing_task_match_item_stream(req: dict):
                     yield f"data: {json.dumps({'type':'feature_check',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "work_procedures":
                     yield f"data: {json.dumps({'type':'work_procedures',**data}, ensure_ascii=False)}\n\n"
+                elif event_type == "quota_candidates":
+                    yield f"data: {json.dumps({'type':'quota_candidates',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "error":
                     yield f"data: {json.dumps({'type':'error','error':data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type':'done'})}\n\n"

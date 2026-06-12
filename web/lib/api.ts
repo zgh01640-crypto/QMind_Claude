@@ -1169,6 +1169,15 @@ export interface QuotaTreeResource {
 
 // ── 单条组价 — 新版接口 ────────────────────────────────────────────
 
+export interface QuotaCandidate {
+  id: number
+  dekid: number
+  zmbh: string
+  zmmc: string
+  dw: string
+  gznr: string
+}
+
 export interface PricingTaskMatch {
   dezmid: number
   dekid: number
@@ -1187,6 +1196,7 @@ export type PricingTaskEvent =
   | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | { type: 'feature_check'; is_complete: boolean; missing_features: string[]; analysis: string }
   | { type: 'work_procedures'; procedures: string[] }
+  | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'done' }
   | { type: 'error'; error: string }
 
