@@ -62,9 +62,12 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             code_check_result = {"item_code": boq_item['item_code'], "base_code": "", "standard_names": [], "found": False, "error": str(e)}
         yield ("code_check", code_check_result)
         standard_names_str = ", ".join(code_check_result.get("standard_names", [])) or "not found"
-        assistant_message = {"role": "assistant", "content": content, "reasoning_content": reasoning_content, "tool_calls": [{"id": tool_call_id, "type": "function", "function": {"name": "check_item_code", "arguments": tool_call_args}}] if tool_call_id else None}
+        assistant_message = {"role": "assistant", "content": content, "reasoning_content": reasoning_content}
+        if tool_call_id:
+            assistant_message["tool_calls"] = [{"id": tool_call_id, "type": "function", "function": {"name": "check_item_code", "arguments": tool_call_args}}]
         messages.append(assistant_message)
-        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(code_check_result, ensure_ascii=False)})
+        if tool_call_id:
+            messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(code_check_result, ensure_ascii=False)})
         messages.append({"role": "user", "content": f"Compare: BOQ={boq_item['item_name']}, Standard={standard_names_str}"})
         print("[stream] round2", file=sys.stderr, flush=True)
         yield ("reasoning_token", "\n[Round 2] Comparing...\n")
