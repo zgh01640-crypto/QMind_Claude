@@ -108,27 +108,17 @@ _TOOL_CHECK_ITEM_CODE = {
     },
 }
 
-def exec_fetch_quota_candidates(conn, item_code: str, chapter_ids: list) -> dict:
+def exec_fetch_quota_candidates(conn, item_code: str) -> dict:
     base_code = item_code.strip()[:-3] if len(item_code.strip()) > 3 else item_code.strip()
     with conn.cursor() as cur:
-        if chapter_ids:
-            cur.execute("""
-                SELECT DISTINCT q.id, q.dekid, q.zmbh, q.zmmc, q.dw, q.gznr
-                FROM tqdk_tqdzm zm
-                JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
-                JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
-                WHERE zm.zmbh = %s AND cand.dekid = ANY(%s)
-                LIMIT 30
-            """, (base_code, chapter_ids))
-        else:
-            cur.execute("""
-                SELECT DISTINCT q.id, q.dekid, q.zmbh, q.zmmc, q.dw, q.gznr
-                FROM tqdk_tqdzm zm
-                JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
-                JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
-                WHERE zm.zmbh = %s
-                LIMIT 30
-            """, (base_code,))
+        cur.execute("""
+            SELECT DISTINCT q.id, q.dekid, q.zmbh, q.zmmc, q.dw, q.gznr
+            FROM tqdk_tqdzm zm
+            JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
+            JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
+            WHERE zm.zmbh = %s
+            LIMIT 50
+        """, (base_code,))
         rows = cur.fetchall()
     candidates = [
         {"id": r[0], "dekid": r[1], "zmbh": r[2], "zmmc": r[3], "dw": r[4], "gznr": r[5] or ""}
@@ -145,7 +135,7 @@ def build_system_prompt() -> str:
         "要求：全程使用中文进行推理和分析，包括思维链过程。"
     )
 
-def stream_pricing_item(boq_item: dict, system_prompt: str, conn, chapter_ids: list):
+def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     from openai import OpenAI
     import os, sys
     print("[stream] start", file=sys.stderr, flush=True)
@@ -305,7 +295,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn, chapter_ids: l
                     if tc.function and tc.function.arguments:
                         tool_args_r4 += tc.function.arguments
         call_input_r4 = json.loads(tool_args_r4)
-        candidates_data = exec_fetch_quota_candidates(conn, call_input_r4.get("item_code", boq_item["item_code"]), chapter_ids)
+        candidates_data = exec_fetch_quota_candidates(conn, call_input_r4.get("item_code", boq_item["item_code"]))
         print("[stream] round4_done", file=sys.stderr, flush=True)
         yield ("quota_candidates", candidates_data)
     except Exception as e:
@@ -329,11 +319,10 @@ def pricing_task_match_item_stream(req: dict):
                 return
             boq_item = {"id": row[0], "item_code": row[1], "item_name": row[2], "item_description": row[3], "unit": row[4], "quantity": float(row[5]) if row[5] else None, "project_id": row[6]}
             sp = build_system_prompt()
-            chapter_ids = req.get("chapter_ids") or []
             yield f"data: {json.dumps({'type':'item_info','item':boq_item}, ensure_ascii=False)}\n\n"
             import sys
             print("[SSE] calling stream", file=sys.stderr, flush=True)
-            for event_type, data in stream_pricing_item(boq_item, sp, conn, chapter_ids):
+            for event_type, data in stream_pricing_item(boq_item, sp, conn):
                 print(f"[SSE] {event_type}", file=sys.stderr, flush=True)
                 if event_type == "reasoning_token":
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
