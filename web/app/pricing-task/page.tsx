@@ -19,9 +19,8 @@ interface PricingTask {
 interface BS2024Chapter {
   id: number
   chapter_no: number
-  code: string | null
-  name: string
-  sort_order: number
+  title: string
+  subitem_count: number
 }
 
 export default function PricingTaskPage() {
@@ -81,7 +80,7 @@ export default function PricingTaskPage() {
       project_id: selectedProject,
       project_name: project?.project_name || '',
       chapter_ids: Array.from(selectedChapters),
-      chapter_names: selectedChapterObjs.map(c => c.name),
+      chapter_names: selectedChapterObjs.map(c => c.title),
       manual_project_id: selectedManualProject,
       manual_project_name: manualProject?.project_name || null,
       created_at: new Date().toISOString(),
@@ -212,7 +211,7 @@ export default function PricingTaskPage() {
                             }}
                             className="rounded"
                           />
-                          <span className="ml-2 text-sm">{ch.name}</span>
+                          <span className="ml-2 text-sm">{ch.title}</span>
                         </label>
                       ))}
                     </div>
