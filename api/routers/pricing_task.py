@@ -95,60 +95,7 @@ _TOOL_CHECK_ITEM_CODE = {
     },
 }
 
-    """
-    工具：根据清单编码查询候选定额子目集合
-    流程：item_code 去末3位 → tqdk_tqdzm.zmbh → tqdk_tqdzy → tdek_tdezm
-    """
-    # 1. 去掉末3位得到基准编码
-    base_code = item_code.strip().replace(' ', '')
-    if len(base_code) >= 3:
-        base_code = base_code[:-3]
 
-    candidates = []
-    with conn.cursor() as cur:
-        # 2. 查 tqdk_tqdzm 得 qdzmid
-        cur.execute(
-            "SELECT id FROM tqdk_tqdzm WHERE zmbh = %s LIMIT 1",
-            (base_code,)
-        )
-        row = cur.fetchone()
-        if not row:
-            return {"item_code": item_code, "base_code": base_code, "candidates": [], "found": False}
-
-        qdzmid = row[0]
-
-        # 3. 查 tqdk_tqdzy 得候选 dezmid 集合（可能有多个定额库）
-        cur.execute(
-            "SELECT DISTINCT dekid, dezmid FROM tqdk_tqdzy WHERE qdzmid = %s",
-            (qdzmid,)
-        )
-        mappings = cur.fetchall()
-        if not mappings:
-            return {"item_code": item_code, "base_code": base_code, "candidates": [], "found": False}
-
-        # 4. 逐个拿定额详情
-        for dekid, dezmid in mappings:
-            cur.execute(
-                "SELECT zmbh, zmmc, dw, gznr FROM tdek_tdezm WHERE dekid = %s AND id = %s",
-                (dekid, dezmid)
-            )
-            row = cur.fetchone()
-            if row:
-                candidates.append({
-                    "dekid": dekid,
-                    "dezmid": dezmid,
-                    "subitem_code": row[0],
-                    "subitem_name": row[1],
-                    "unit": row[2],
-                    "work_content": row[3],
-                })
-
-    return {
-        "item_code": item_code,
-        "base_code": base_code,
-        "candidates": candidates,
-        "found": len(candidates) > 0,
-    }
 
 
 _TOOL_GET_QUOTA_CANDIDATES = {
