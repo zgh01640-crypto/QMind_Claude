@@ -1,5 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_task
 

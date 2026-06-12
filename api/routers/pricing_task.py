@@ -326,6 +326,18 @@ class SinglePricingRequest(BaseModel):
     manual_project_id: Optional[int] = None
 
 
+@router.get("/pricing-task/test-api-key")
+def test_api_key():
+    """测试 API Key 是否已设置"""
+    import os
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if api_key:
+        masked_key = api_key[:10] + "***" + api_key[-4:]
+        return {"status": "ok", "api_key": masked_key}
+    else:
+        return {"status": "error", "message": "DEEPSEEK_API_KEY 未设置"}
+
+
 @router.post("/pricing-task/match-item-stream")
 def pricing_task_match_item_stream(req: SinglePricingRequest):
     from db.connection import get_connection
@@ -357,8 +369,10 @@ def pricing_task_match_item_stream(req: SinglePricingRequest):
             sp = build_system_prompt()
             yield f"data: {json.dumps({'type':'item_info','item':boq_item}, ensure_ascii=False)}\n\n"
 
+            print(f"DEBUG: 即将调用 stream_pricing_item，boq_item_id={req.boq_item_id}")
             final_results = []
             for event_type, data in stream_pricing_item(boq_item, sp, conn):
+                print(f"DEBUG: 收到事件 {event_type}: {str(data)[:100]}")
                 if event_type == "reasoning_token":
                     yield f"data: {json.dumps({'type':'reasoning_token','token':data}, ensure_ascii=False)}\n\n"
                 elif event_type == "code_check":
