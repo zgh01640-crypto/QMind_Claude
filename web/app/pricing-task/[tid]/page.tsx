@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { fetchAllBoqItems, BoqItem, streamBS2024MatchItem, BS2024MatchEvent } from '@/lib/api'
+import { fetchAllBoqItems, BoqItem, streamPricingTaskItem, PricingTaskEvent, PricingTaskMatch } from '@/lib/api'
 
 interface PricingTask {
   id: string
@@ -19,8 +19,7 @@ interface PricingTask {
 interface RightState {
   phase: 'idle' | 'reasoning' | 'done' | 'error'
   reasoning: string
-  codeCheck?: { item_code: string; base_code: string; item_name: string; standard_names: string[]; found: boolean }
-  judgment?: { is_consistent: boolean; reasoning: string }
+  matches: PricingTaskMatch[]
   error?: string
 }
 
@@ -35,7 +34,7 @@ export default function PricingTaskDetailPage() {
   const [loading, setLoading] = useState(true)
 
   // 右侧面板状态
-  const [rightState, setRightState] = useState<RightState>({ phase: 'idle', reasoning: '' })
+  const [rightState, setRightState] = useState<RightState>({ phase: 'idle', reasoning: '', matches: [] })
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -71,32 +70,19 @@ export default function PricingTaskDetailPage() {
 
   const handleMatch = async (itemId: number) => {
     if (!task) return
-    setRightState({ phase: 'reasoning', reasoning: '' })
+    setRightState({ phase: 'reasoning', reasoning: '', matches: [] })
 
     try {
-      await streamBS2024MatchItem(itemId, task.chapter_ids, task.manual_project_id, (evt) => {
+      await streamPricingTaskItem(itemId, task.chapter_ids, task.manual_project_id, (evt: PricingTaskEvent) => {
         if (evt.type === 'reasoning_token') {
           setRightState(s => ({ ...s, reasoning: s.reasoning + evt.token }))
-        } else if (evt.type === 'code_check') {
+        } else if (evt.type === 'result') {
           setRightState(s => ({
             ...s,
-            codeCheck: {
-              item_code: evt.item_code,
-              base_code: evt.base_code,
-              item_name: evt.item_name,
-              standard_names: evt.standard_names,
-              found: evt.found,
-            },
+            matches: evt.matches,
           }))
-        } else if (evt.type === 'judgment') {
-          setRightState(s => ({
-            ...s,
-            phase: 'done',
-            judgment: {
-              is_consistent: evt.is_consistent,
-              reasoning: evt.reasoning,
-            },
-          }))
+        } else if (evt.type === 'done') {
+          setRightState(s => ({ ...s, phase: 'done' }))
         } else if (evt.type === 'error') {
           setRightState(s => ({ ...s, phase: 'error', error: evt.error }))
         }
@@ -250,52 +236,46 @@ export default function PricingTaskDetailPage() {
                   </div>
                 </div>
 
-                {/* Step 1 校验结果和判断 - 可滚动下方区域 */}
+                {/* 匹配结果卡片区 - 可滚动下方区域 */}
                 <div className="overflow-y-auto flex-shrink-0 max-h-1/3">
-                  {rightState.codeCheck && (
-                    <div className="px-4 py-4 bg-blue-50 border-t border-blue-200">
-                      <div className="font-semibold text-blue-900 text-sm mb-3">📝 Step 1 编码核查</div>
-                      <div className="space-y-2 text-xs">
-                        <div>
-                          <span className="text-gray-600">原始编码：</span>
-                          <span className="font-mono text-blue-700 font-semibold">{rightState.codeCheck.item_code}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-600">基准编码：</span>
-                          <span className="font-mono text-blue-600">{rightState.codeCheck.base_code}</span>
-                          <span className="text-gray-400 text-xs ml-2">（去掉末尾3位）</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-600">工程清单名称：</span>
-                          <span className="text-gray-900">{rightState.codeCheck.item_name}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-600">标准名称：</span>
-                          {rightState.codeCheck.found ? (
-                            <div className="mt-1 space-y-1">
-                              {rightState.codeCheck.standard_names.map((name, i) => (
-                                <div key={i} className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs mr-2 mb-1">
-                                  ✅ {name}
-                                </div>
-                              ))}
+                  {rightState.matches.length > 0 && (
+                    <div className="px-4 py-4 bg-green-50 border-t border-green-200 space-y-3">
+                      <div className="font-semibold text-green-900 text-sm">✅ 匹配结果</div>
+                      {rightState.matches.map((match, idx) => (
+                        <div key={idx} className="p-3 bg-white rounded border border-green-100 text-xs space-y-1">
+                          <div>
+                            <span className="text-gray-600">定额编号：</span>
+                            <span className="font-mono text-green-700">{match.subitem_code}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">定额名称：</span>
+                            <span className="text-gray-900">{match.subitem_name}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">工序：</span>
+                            <span className="text-gray-900">{match.work_procedure}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">换算系数：</span>
+                            <span className="font-mono text-gray-900">{match.qty_factor}</span>
+                          </div>
+                          <div>
+                            <span className={`inline-block px-2 py-1 rounded text-xs font-semibold ${
+                              match.confidence === 'high' ? 'bg-green-100 text-green-800' :
+                              match.confidence === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-orange-100 text-orange-800'
+                            }`}>
+                              {match.confidence === 'high' ? '高置信度' :
+                               match.confidence === 'medium' ? '中置信度' : '低置信度'}
+                            </span>
+                          </div>
+                          {match.missing_info && (
+                            <div className="text-orange-600 text-xs">
+                              ⚠️ {match.missing_info}
                             </div>
-                          ) : (
-                            <div className="text-orange-600">⚠️ 标准库未找到该编码</div>
                           )}
                         </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* AI 的判断结论 */}
-                  {rightState.judgment && (
-                    <div className={`px-4 py-4 border-t ${rightState.judgment.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
-                      <div className={`font-semibold text-sm mb-3 ${rightState.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
-                        {rightState.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
-                      </div>
-                      <div className="text-xs text-gray-700 whitespace-pre-wrap">
-                        {rightState.judgment.reasoning}
-                      </div>
+                      ))}
                     </div>
                   )}
                 </div>

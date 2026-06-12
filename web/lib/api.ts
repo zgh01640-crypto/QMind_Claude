@@ -1167,6 +1167,82 @@ export interface QuotaTreeResource {
   quantity: number | null
 }
 
+// ── 单条组价 — 新版接口 ────────────────────────────────────────────
+
+export interface PricingTaskMatch {
+  dezmid: number
+  dekid: number
+  subitem_code: string
+  subitem_name: string
+  qty_factor: number
+  work_procedure: string
+  confidence: 'high' | 'medium' | 'low'
+  missing_info?: string
+}
+
+export type PricingTaskEvent =
+  | { type: 'item_info'; item: BoqItem }
+  | { type: 'reasoning_token'; token: string }
+  | { type: 'tool_call'; tool_name: string; result: any }
+  | { type: 'result'; matches: PricingTaskMatch[] }
+  | { type: 'done' }
+  | { type: 'error'; error: string }
+
+export async function streamPricingTaskItem(
+  boq_item_id: number,
+  chapter_ids: number[],
+  manual_project_id: number | null,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  const url = `${API}/pricing-task/match-item-stream`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      boq_item_id,
+      chapter_ids,
+      manual_project_id,
+    }),
+  })
+
+  if (!response.ok) {
+    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    onEvent({ type: 'error', error: 'No response body' })
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const jsonStr = line.slice(6)
+        try {
+          const evt = JSON.parse(jsonStr)
+          onEvent(evt)
+        } catch (e) {
+          console.error('Parse error:', e, jsonStr)
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 export interface QuotaTreeConversionRule {
   prompt: string | null
   description: string | null
