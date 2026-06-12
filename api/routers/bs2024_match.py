@@ -331,6 +331,7 @@ def build_bs2024_system_prompt(conn, chapter_ids: int | list[int]) -> tuple[str,
 
 
 def _build_boq_user_msg(boq_item: dict) -> str:
+    """用于完整套定额流程的用户消息（包含 submit_matches）"""
     return f"""## 待套定额的清单项
 
 - 项目编码：{boq_item.get('item_code', '')}
@@ -341,6 +342,20 @@ def _build_boq_user_msg(boq_item: dict) -> str:
 {boq_item.get('item_description') or '（无）'}
 
 请按推理步骤分析，调用 submit_matches 函数返回匹配结果。"""
+
+
+def _build_boq_user_msg_round1(boq_item: dict) -> str:
+    """Round 1 特殊用户消息：仅调用 check_item_code 工具核查编码一致性"""
+    return f"""## 待套定额的清单项
+
+- 项目编码：{boq_item.get('item_code', '')}
+- 项目名称：{boq_item.get('item_name', '')}
+- 计量单位：{boq_item.get('unit', '')}
+- 工程量：{boq_item.get('quantity', '')}
+- 项目特征描述：
+{boq_item.get('item_description') or '（无）'}
+
+【第一步】请先调用 check_item_code 工具核查该编码是否与标准库中的编码一致。"""
 
 
 def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
@@ -358,16 +373,7 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
 
     # Round 1 特殊用户消息：要求调用 check_item_code
-    user_msg = f"""## 待套定额的清单项
-
-- 项目编码：{boq_item.get('item_code', '')}
-- 项目名称：{boq_item.get('item_name', '')}
-- 计量单位：{boq_item.get('unit', '')}
-- 工程量：{boq_item.get('quantity', '')}
-- 项目特征描述：
-{boq_item.get('item_description') or '（无）'}
-
-【第一步】请先调用 check_item_code 工具核查该编码是否与标准库中的编码一致。"""
+    user_msg = _build_boq_user_msg_round1(boq_item)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -816,7 +822,7 @@ def bs2024_match_item_stream(req: SingleMatchRequest):
 
             # 2. 构建提示词
             chapter_name, sp = build_bs2024_system_prompt(conn, req.chapter_ids)
-            user_msg = _build_boq_user_msg(boq_item)
+            user_msg = _build_boq_user_msg_round1(boq_item)
 
             # 3. item_info 事件
             yield f"data: {json.dumps({'type':'item_info','item':boq_item,'system_prompt':sp[:2000],'system_prompt_len':len(sp),'user_message':user_msg,'chapter_name':chapter_name},ensure_ascii=False)}\n\n"
