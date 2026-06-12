@@ -157,8 +157,8 @@ export default function PricingTaskDetailPage() {
                     const result = itemResults.get(item.id)
                     const badge = result?.phase === 'done' && result.judgment
                       ? result.judgment.is_consistent
-                        ? <span className="ml-auto flex-shrink-0 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full bg-green-500 text-white">1</span>
-                        : <span className="ml-auto flex-shrink-0 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full bg-red-500 text-white">1</span>
+                        ? <span className="ml-auto flex-shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full bg-green-500 text-white">1</span>
+                        : <span className="ml-auto flex-shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full bg-red-500 text-white">1</span>
                       : null
                     return (
                       <div
