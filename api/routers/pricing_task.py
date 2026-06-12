@@ -103,9 +103,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
                 f"工具已返回查询结果。\n"
                 f"工程清单名称：{boq_item['item_name']}\n"
                 f"标准清单名称：{standard_names_str}\n\n"
-                f"请比对工程清单名称与标准清单名称是否一致，给出明确结论：\n"
-                f"1. 判断：一致 / 不一致\n"
-                f"2. 说明原因（如名称完全相同、表述相近但含义一致、或存在明显差异等）"
+                f"请比对工程清单名称与标准清单名称是否一致，给出明确结论：一致 / 不一致。"
             )
         else:
             compare_msg = (
