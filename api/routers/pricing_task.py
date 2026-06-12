@@ -96,8 +96,6 @@ _TOOL_CHECK_ITEM_CODE = {
 }
 
 
-
-
 _TOOL_GET_QUOTA_CANDIDATES = {
     "type": "function",
     "function": {
@@ -162,14 +160,20 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
     from openai import OpenAI
     import os
 
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url="https://api.deepseek.com",
-        timeout=120.0,
-    )
+    try:
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            yield ("error", "未设置 DEEPSEEK_API_KEY 环境变量")
+            return
 
-    # ── Round 1.1: 第一次调用 AI 获取编码检索工具参数 ─────────────────────────
-    user_msg = f"""请对以下清单项进行编码一致性审查：
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com",
+            timeout=120.0,
+        )
+
+        # ── Round 1.1: 第一次调用 AI 获取编码检索工具参数 ─────────────────────────
+        user_msg = f"""请对以下清单项进行编码一致性审查：
 
 - 清单编码：{boq_item['item_code']}
 - 清单名称：{boq_item['item_name']}
@@ -178,88 +182,93 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
 
 【第一步】请调用"编码检索工具"查询该编码对应的标准清单名称。"""
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
-    ]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
 
-    stream1 = client.chat.completions.create(
-        model="deepseek-v4-pro",
-        messages=messages,
-        tools=[_TOOL_CHECK_ITEM_CODE],
-        tool_choice={"type": "function", "function": {"name": "check_item_code"}},
-        reasoning_effort="high",
-        extra_body={"thinking": {"type": "enabled"}},
-        max_tokens=8000,
-        stream=True,
-    )
+        yield ("reasoning_token", "[开始调用 DeepSeek API Round 1.1...]\n")
 
-    # 收集 Round 1.1 的思考内容、工具调用、和完整 message
-    tool_call_id = ""
-    tool_call_args = ""
-    reasoning_content = ""
-    assistant_message = {"role": "assistant", "content": "", "reasoning_content": "", "tool_calls": []}
+        stream1 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages,
+            tools=[_TOOL_CHECK_ITEM_CODE],
+            tool_choice={"type": "function", "function": {"name": "check_item_code"}},
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=8000,
+            stream=True,
+        )
 
-    for chunk in stream1:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
+        # 收集 Round 1.1 的思考内容、工具调用、和完整 message
+        tool_call_id = ""
+        tool_call_args = ""
+        reasoning_content = ""
+        content = ""
 
-        # 思考内容
-        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-            reasoning_content += delta.reasoning_content
-            assistant_message["reasoning_content"] += delta.reasoning_content
-            yield ("reasoning_token", delta.reasoning_content)
+        for chunk in stream1:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
 
-        # 内容 token（流式文本）
-        if delta.content:
-            assistant_message["content"] += delta.content
-            yield ("reasoning_token", delta.content)
+            # 思考内容
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                reasoning_content += delta.reasoning_content
+                yield ("reasoning_token", delta.reasoning_content)
 
-        # 工具调用
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                if tc.id:
-                    tool_call_id = tc.id
-                if tc.function and tc.function.arguments:
-                    tool_call_args += tc.function.arguments
+            # 内容 token（流式文本）
+            if delta.content:
+                content += delta.content
+                yield ("reasoning_token", delta.content)
 
-    # 添加工具调用到 assistant message
-    if tool_call_id:
-        assistant_message["tool_calls"] = [{
-            "id": tool_call_id,
-            "type": "function",
-            "function": {"name": "check_item_code", "arguments": tool_call_args},
-        }]
+            # 工具调用
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.id:
+                        tool_call_id = tc.id
+                    if tc.function and tc.function.arguments:
+                        tool_call_args += tc.function.arguments
 
-    # 执行编码检索工具
-    try:
-        call_input = json.loads(tool_call_args)
-        code_check_result = exec_check_item_code(conn, call_input.get("item_code", ""))
-    except Exception as e:
-        code_check_result = {
-            "item_code": boq_item['item_code'],
-            "base_code": "",
-            "standard_names": [],
-            "found": False,
-            "error": str(e),
+        # 保存完整的 assistant message（包括 reasoning_content），后续回传
+        assistant_message = {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning_content,
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {"name": "check_item_code", "arguments": tool_call_args},
+            }] if tool_call_id else None,
         }
 
-    yield ("code_check", code_check_result)
+        # 执行编码检索工具
+        try:
+            call_input = json.loads(tool_call_args)
+            code_check_result = exec_check_item_code(conn, call_input.get("item_code", ""))
+        except Exception as e:
+            code_check_result = {
+                "item_code": boq_item['item_code'],
+                "base_code": "",
+                "standard_names": [],
+                "found": False,
+                "error": str(e),
+            }
 
-    # ── Round 1.2: 第二次调用 AI 进行名称比对和结论 ───────────────────────────
-    standard_names_str = ", ".join(code_check_result.get("standard_names", [])) or "（未找到标准名称）"
+        yield ("code_check", code_check_result)
 
-    # 添加工具调用结果到对话历史（必须包含 reasoning_content）
-    messages.append(assistant_message)
-    messages.append({
-        "role": "tool",
-        "tool_call_id": tool_call_id,
-        "content": json.dumps(code_check_result, ensure_ascii=False),
-    })
+        # ── Round 1.2: 第二次调用 AI 进行名称比对和结论 ───────────────────────────
+        standard_names_str = ", ".join(code_check_result.get("standard_names", [])) or "（未找到标准名称）"
 
-    # 第二轮用户消息
-    user_msg_round2 = f"""现在你已经查询了编码对应的标准清单名称。请完成以下任务：
+        # 添加工具调用结果到对话历史（必须包含 reasoning_content）
+        messages.append(assistant_message)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(code_check_result, ensure_ascii=False),
+        })
+
+        # 第二轮用户消息
+        user_msg_round2 = f"""现在你已经查询了编码对应的标准清单名称。请完成以下任务：
 
 【第二步】比对以下两个名称是否一致，并给出结论：
 - 工程清单名称：{boq_item['item_name']}
@@ -269,41 +278,44 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
 1. 是否一致（一致/不一致/存疑）
 2. 详细理由说明"""
 
-    messages.append({"role": "user", "content": user_msg_round2})
+        messages.append({"role": "user", "content": user_msg_round2})
 
-    stream2 = client.chat.completions.create(
-        model="deepseek-v4-pro",
-        messages=messages,
-        reasoning_effort="high",
-        extra_body={"thinking": {"type": "enabled"}},
-        max_tokens=8000,
-        stream=True,
-    )
+        yield ("reasoning_token", "\n[开始调用 DeepSeek API Round 1.2...]\n")
 
-    # 收集 Round 1.2 的思考内容和最终结论
-    final_reasoning = ""
-    final_reasoning_content = ""
-    for chunk in stream2:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
+        stream2 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=8000,
+            stream=True,
+        )
 
-        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-            final_reasoning_content += delta.reasoning_content
-            yield ("reasoning_token", delta.reasoning_content)
+        # 收集 Round 1.2 的思考内容和最终结论
+        final_reasoning = ""
+        for chunk in stream2:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
 
-        if delta.content:
-            yield ("reasoning_token", delta.content)
-            final_reasoning += delta.content
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield ("reasoning_token", delta.reasoning_content)
 
-    # 解析最终结论（简单判断：包含"一致"则为 True）
-    is_consistent = "一致" in final_reasoning and "不一致" not in final_reasoning
+            if delta.content:
+                yield ("reasoning_token", delta.content)
+                final_reasoning += delta.content
 
-    yield ("judgment", {
-        "is_consistent": is_consistent,
-        "reasoning": final_reasoning,
-    })
+        # 解析最终结论（简单判断：包含"一致"则为 True）
+        is_consistent = "一致" in final_reasoning and "不一致" not in final_reasoning
 
+        yield ("judgment", {
+            "is_consistent": is_consistent,
+            "reasoning": final_reasoning,
+        })
+
+    except Exception as e:
+        import traceback
+        yield ("error", f"流程异常: {str(e)}\n{traceback.format_exc()}")
 
 
 # ─── SSE 端点 ────────────────────────────────────────────────────────
@@ -353,6 +365,8 @@ def pricing_task_match_item_stream(req: SinglePricingRequest):
                     yield f"data: {json.dumps({'type':'code_check',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "judgment":
                     yield f"data: {json.dumps({'type':'judgment',**data}, ensure_ascii=False)}\n\n"
+                elif event_type == "error":
+                    yield f"data: {json.dumps({'type':'error','error':data}, ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'type':'done'})}\n\n"
 
