@@ -21,6 +21,7 @@ interface ItemResult {
   reasoning: string
   codeCheck?: { item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   judgment?: { is_consistent: boolean; reasoning: string }
+  featureCheck?: { is_complete: boolean; missing_features: string[]; analysis: string }
   error?: string
 }
 
@@ -99,8 +100,13 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'judgment') {
           updateResult(itemId, s => ({
             ...s,
-            phase: 'done',
             judgment: { is_consistent: evt.is_consistent, reasoning: evt.reasoning },
+          }))
+        } else if (evt.type === 'feature_check') {
+          updateResult(itemId, s => ({
+            ...s,
+            phase: 'done',
+            featureCheck: { is_complete: evt.is_complete, missing_features: evt.missing_features, analysis: evt.analysis },
           }))
         } else if (evt.type === 'error') {
           updateResult(itemId, s => ({ ...s, phase: 'error', error: evt.error }))
@@ -155,10 +161,11 @@ export default function PricingTaskDetailPage() {
                 <div className="divide-y divide-gray-200">
                   {items.map(item => {
                     const result = itemResults.get(item.id)
-                    const badge = result?.phase === 'done' && result.judgment
-                      ? result.judgment.is_consistent
-                        ? <span className="ml-auto flex-shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full bg-green-500 text-white">1</span>
-                        : <span className="ml-auto flex-shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full bg-red-500 text-white">1</span>
+                    const badge1 = result?.judgment
+                      ? <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${result.judgment.is_consistent ? 'bg-green-500' : 'bg-red-500'}`}>1</span>
+                      : null
+                    const badge2 = result?.featureCheck
+                      ? <span className={`text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded-full text-white ${result.featureCheck.is_complete ? 'bg-green-500' : 'bg-red-500'}`}>2</span>
                       : null
                     return (
                       <div
@@ -185,7 +192,10 @@ export default function PricingTaskDetailPage() {
                               {item.item_name}
                             </div>
                           </div>
-                          {badge}
+                          <div className="ml-auto flex-shrink-0 flex gap-1">
+                            {badge1}
+                            {badge2}
+                          </div>
                         </div>
 
                         {/* 详情（展开时显示）*/}
@@ -299,6 +309,23 @@ export default function PricingTaskDetailPage() {
                       <div className={`font-semibold text-sm ${currentResult.judgment.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
                         {currentResult.judgment.is_consistent ? '✅ 编码名称一致' : '⚠️ 编码名称不一致'}
                       </div>
+                    </div>
+                  )}
+
+                  {/* 项目特征完整性结果 */}
+                  {currentResult.featureCheck && (
+                    <div className={`px-4 py-4 border-t ${currentResult.featureCheck.is_complete ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+                      <div className={`font-semibold text-sm mb-2 ${currentResult.featureCheck.is_complete ? 'text-green-900' : 'text-orange-900'}`}>
+                        {currentResult.featureCheck.is_complete ? '✅ 项目特征完整' : '⚠️ 项目特征不完整'}
+                      </div>
+                      {currentResult.featureCheck.missing_features.length > 0 && (
+                        <ul className="text-xs text-orange-800 space-y-1 list-disc list-inside mb-2">
+                          {currentResult.featureCheck.missing_features.map((f, i) => (
+                            <li key={i}>{f}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <p className="text-xs text-gray-600">{currentResult.featureCheck.analysis}</p>
                     </div>
                   )}
                 </div>

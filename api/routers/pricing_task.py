@@ -29,6 +29,29 @@ def exec_check_item_code(conn, item_code: str, item_name: str) -> dict:
         "is_consistent": is_consistent,
     }
 
+_TOOL_SUBMIT_FEATURE_ANALYSIS = {
+    "type": "function",
+    "function": {
+        "name": "submit_feature_analysis",
+        "description": "提交项目特征完整性分析结果，说明当前项目特征描述是否足以支撑套定额，并列出缺失的必要特征。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "is_complete": {"type": "boolean", "description": "项目特征描述是否完整充分，可满足套定额要求"},
+                "missing_features": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "缺少的必要特征信息列表，若完整则为空数组",
+                },
+                "analysis": {"type": "string", "description": "简短分析说明（1-2句）"},
+            },
+            "required": ["is_complete", "missing_features", "analysis"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 _TOOL_CHECK_ITEM_CODE = {
     "type": "function",
     "function": {
@@ -108,6 +131,45 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             "is_consistent": code_check_result["is_consistent"],
             "reasoning": f"标准清单名称：{code_check_result['standard_name'] or '未找到'}",
         })
+        # Round 2 — 全新对话，不需携带 Round 1 的 reasoning_content
+        print("[stream] round2", file=sys.stderr, flush=True)
+        user_msg_r2 = (
+            f"请分析以下工程量清单项的项目特征描述是否完整充分，能否满足套定额要求：\n\n"
+            f"清单编码：{boq_item['item_code']}\n"
+            f"清单名称：{boq_item['item_name']}\n"
+            f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n"
+            f"计量单位：{boq_item.get('unit') or '无'}\n\n"
+            f"请调用工具提交你的分析结果，列出缺少的必要特征信息。"
+        )
+        messages_r2 = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg_r2},
+        ]
+        stream2 = client.chat.completions.create(
+            model="deepseek-v4-pro",
+            messages=messages_r2,
+            tools=[_TOOL_SUBMIT_FEATURE_ANALYSIS],
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+            max_tokens=4000,
+            stream=True,
+        )
+        tool_args_r2 = ""
+        for chunk in stream2:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield ("reasoning_token", delta.reasoning_content)
+            if delta.content:
+                yield ("reasoning_token", delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        tool_args_r2 += tc.function.arguments
+        feature_result = json.loads(tool_args_r2)
+        print("[stream] round2_done", file=sys.stderr, flush=True)
+        yield ("feature_check", feature_result)
     except Exception as e:
         import traceback
         print(f"[stream] error: {str(e)}", file=sys.stderr, flush=True)
@@ -140,6 +202,8 @@ def pricing_task_match_item_stream(req: dict):
                     yield f"data: {json.dumps({'type':'code_check',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "judgment":
                     yield f"data: {json.dumps({'type':'judgment',**data}, ensure_ascii=False)}\n\n"
+                elif event_type == "feature_check":
+                    yield f"data: {json.dumps({'type':'feature_check',**data}, ensure_ascii=False)}\n\n"
                 elif event_type == "error":
                     yield f"data: {json.dumps({'type':'error','error':data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type':'done'})}\n\n"
