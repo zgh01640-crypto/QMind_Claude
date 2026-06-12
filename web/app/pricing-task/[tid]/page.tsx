@@ -115,7 +115,6 @@ export default function PricingTaskDetailPage() {
                             </div>
                           </div>
                         </div>
-                      </div>
 
                       {/* 详情（展开时显示） */}
                       {expandedItemId === item.id && (
