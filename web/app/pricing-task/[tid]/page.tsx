@@ -301,12 +301,15 @@ export default function PricingTaskDetailPage() {
                   )}
                 </div>
 
-                {/* 单一滚动区：推理文字 + 结果卡片顺序排列 */}
-                <div ref={reasoningRef} className="flex-1 overflow-y-auto">
-                  {/* 推理文字 */}
+                {/* 推理文字区（固定高度，独立滚动，始终可见）*/}
+                <div ref={reasoningRef} className="h-52 flex-shrink-0 overflow-y-auto border-b border-amber-100 bg-amber-50/20">
                   <div className="px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono">
                     {currentResult.reasoning || '…'}
                   </div>
+                </div>
+
+                {/* 结果卡片区（独立滚动，占剩余空间）*/}
+                <div className="flex-1 overflow-y-auto">
 
                   {/* 编码核查结果 */}
                   {currentResult.codeCheck && (
