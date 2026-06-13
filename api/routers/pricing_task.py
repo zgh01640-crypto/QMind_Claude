@@ -359,29 +359,63 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             f"请调用工具提交套定额结果，选出匹配的定额子目并说明理由，同时列出影响套定额的模糊问题。"
         )
         messages_r5 = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg_r5}]
-        # Round 5 非流式，不启用 thinking（thinking tokens 会吃掉 max_tokens 导致 JSON 截断）
-        resp5 = client.chat.completions.create(
-            model="deepseek-v4-pro",
-            messages=messages_r5,
-            tools=[_TOOL_SUBMIT_QUOTA_MATCH],
-            tool_choice={"type": "function", "function": {"name": "submit_quota_match"}},
-            max_tokens=8000,
-            stream=False,
+        # Round 5 使用非流式响应，并显式关闭 thinking：
+        # thinking 模式不支持强制指定 function tool_choice。
+        strict_client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com/beta",
+            timeout=120.0,
         )
-        msg5 = resp5.choices[0].message
-        finish5 = resp5.choices[0].finish_reason
-        print(f"[stream] round5_finish_reason: {finish5}", file=sys.stderr, flush=True)
-        if hasattr(msg5, 'reasoning_content') and msg5.reasoning_content:
-            yield ("reasoning_token", msg5.reasoning_content)
-        if not msg5.tool_calls:
-            raise ValueError(f"Round 5: AI did not call tool (finish_reason={finish5}, content={msg5.content!r})")
-        raw_args = msg5.tool_calls[0].function.arguments
-        print(f"[stream] round5_args_len: {len(raw_args)}", file=sys.stderr, flush=True)
-        try:
-            match_result = json.loads(raw_args)
-        except Exception as e:
-            print(f"[stream] round5_json_error raw: {raw_args[:600]}", file=sys.stderr, flush=True)
-            raise
+        match_result = None
+        for attempt in range(2):
+            resp5 = strict_client.chat.completions.create(
+                model="deepseek-v4-pro",
+                messages=messages_r5,
+                tools=[_TOOL_SUBMIT_QUOTA_MATCH],
+                tool_choice={"type": "function", "function": {"name": "submit_quota_match"}},
+                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=8000,
+                stream=False,
+            )
+            msg5 = resp5.choices[0].message
+            finish5 = resp5.choices[0].finish_reason
+            print(
+                f"[stream] round5_finish_reason: {finish5} attempt={attempt + 1}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if hasattr(msg5, 'reasoning_content') and msg5.reasoning_content:
+                yield ("reasoning_token", msg5.reasoning_content)
+            if not msg5.tool_calls:
+                raise ValueError(
+                    f"Round 5: AI did not call tool "
+                    f"(finish_reason={finish5}, content={msg5.content!r})"
+                )
+            tool_call = msg5.tool_calls[0]
+            if tool_call.function.name != "submit_quota_match":
+                raise ValueError(
+                    f"Round 5: unexpected tool call {tool_call.function.name!r}"
+                )
+            raw_args = tool_call.function.arguments
+            print(
+                f"[stream] round5_args_len: {len(raw_args)} attempt={attempt + 1}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                match_result = json.loads(raw_args)
+                break
+            except json.JSONDecodeError:
+                print(
+                    f"[stream] round5_json_error attempt={attempt + 1} "
+                    f"raw: {raw_args[:600]}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if attempt == 1:
+                    raise
+        if match_result is None:
+            raise ValueError("Round 5: empty match result")
         print("[stream] round5_done", file=sys.stderr, flush=True)
         yield ("quota_match", match_result)
     except Exception as e:
