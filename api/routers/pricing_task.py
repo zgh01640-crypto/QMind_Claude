@@ -364,6 +364,7 @@ def stream_pricing_item(boq_item: dict, system_prompt: str, conn):
             model="deepseek-v4-pro",
             messages=messages_r5,
             tools=[_TOOL_SUBMIT_QUOTA_MATCH],
+            tool_choice={"type": "function", "function": {"name": "submit_quota_match"}},
             max_tokens=8000,
             stream=False,
         )
