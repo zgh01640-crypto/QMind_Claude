@@ -1259,6 +1259,8 @@ export interface PricingTaskRun {
   quota_candidates: { candidates?: QuotaCandidate[]; total?: number } | null
   quota_match: { matches?: QuotaMatch[]; issues?: string[] } | null
   evaluation: PricingTaskEvaluation | null
+  conversion_check: PricingTaskConversionCheck | null
+  step_timings: Record<string, PricingTaskStepTiming> | null
   error_message: string | null
   created_at: string
   finished_at: string | null
@@ -1280,6 +1282,38 @@ export interface PricingTaskEvaluation {
   extra_count: number
   manual_count: number
   ai_count: number
+}
+
+export interface PricingTaskStepTiming {
+  step_no: number
+  name: string
+  duration_ms: number
+  started_at: string
+  finished_at: string
+}
+
+export interface PricingTaskConversionRule {
+  prompt: string
+  description: string
+  group_no: number
+}
+
+export interface PricingTaskConversionItem {
+  dekid: number
+  dezmid: number
+  quota_code: string
+  quota_name: string
+  needs_conversion: boolean
+  suggested_qty_factor: number
+  reason: string
+  matched_rules: PricingTaskConversionRule[]
+  missing_inputs: string[]
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface PricingTaskConversionCheck {
+  items: PricingTaskConversionItem[]
+  issues: string[]
 }
 
 export interface PricingTaskMatch {
@@ -1304,6 +1338,9 @@ export type PricingTaskEvent =
   | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
+  | { type: 'conversion_check_start'; run_id: number; total: number }
+  | { type: 'conversion_check'; conversion_check: PricingTaskConversionCheck }
+  | { type: 'step_timing'; step_no: number; name: string; duration_ms: number; started_at: string; finished_at: string }
   | { type: 'done'; run_id?: number }
   | { type: 'error'; error: string }
 
@@ -1423,6 +1460,49 @@ export async function streamPricingTaskRunItem(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ boq_item_id: boqItemId }),
+  })
+
+  if (!response.ok) {
+    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    onEvent({ type: 'error', error: 'No response body' })
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          onEvent(JSON.parse(line.slice(6)) as PricingTaskEvent)
+        } catch (e) {
+          console.error('Parse error:', e, line.slice(6))
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export async function streamPricingTaskConversionCheck(
+  runId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API}/api/pricing-task-runs/${runId}/conversion-check-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
   })
 
   if (!response.ok) {

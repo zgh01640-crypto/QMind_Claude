@@ -404,7 +404,7 @@ export default function QuotaManagementPage() {
     try {
       const data = await fetchPricingKbQuotaItems({
         q: query,
-        library_id: selectedLibrary?.dekid ?? null,
+        library_id: null,
         page: 1,
         page_size: 80,
       })

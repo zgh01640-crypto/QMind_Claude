@@ -382,11 +382,7 @@ function TreeNode({
   )
 }
 
-function ProcessManagementPanel({
-  libraryId,
-}: {
-  libraryId: number | null
-}) {
+function ProcessManagementPanel() {
   const [searchInput, setSearchInput] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const [appendixCode, setAppendixCode] = useState('')
@@ -402,7 +398,7 @@ function ProcessManagementPanel({
       const result = await fetchBoqProcesses({
         q: searchQuery,
         appendix_code: appendixCode || null,
-        library_id: libraryId,
+        library_id: null,
         page,
         page_size: PROCESS_PAGE_SIZE,
       })
@@ -412,7 +408,7 @@ function ProcessManagementPanel({
     } finally {
       setLoading(false)
     }
-  }, [appendixCode, libraryId, page, searchQuery])
+  }, [appendixCode, page, searchQuery])
 
   useEffect(() => {
     loadProcesses().catch(() => undefined)
@@ -686,7 +682,7 @@ export default function BoqStandardManagementPage() {
     try {
       const data = await fetchPricingKbBoqItems({
         q: query,
-        library_id: selectedCategory?.qdkid ?? null,
+        library_id: null,
         page: 1,
         page_size: 80,
       })
@@ -796,7 +792,7 @@ export default function BoqStandardManagementPage() {
 
         <main className="min-w-0 p-4 sm:p-5">
           {activeTab === 'process' ? (
-            <ProcessManagementPanel libraryId={selectedCategory?.qdkid ?? 1020025} />
+            <ProcessManagementPanel />
           ) : (
           <>
           <div className="mb-4 border border-gray-200 bg-white px-4 py-3">

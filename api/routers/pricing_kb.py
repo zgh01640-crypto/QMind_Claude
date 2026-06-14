@@ -533,7 +533,7 @@ def list_boq_processes(
     q: str | None = Query(None, max_length=200),
     code: str | None = Query(None, max_length=64),
     appendix_code: str | None = Query(None, max_length=16),
-    library_id: int | None = 1020025,
+    library_id: int | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ):

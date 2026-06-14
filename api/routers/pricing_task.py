@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from time import perf_counter
 from typing import Any, Iterable, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -67,6 +68,8 @@ def _ensure_schema(conn):
                 quota_candidates    JSONB,
                 quota_match         JSONB,
                 evaluation          JSONB,
+                conversion_check    JSONB,
+                step_timings        JSONB,
                 error_message       TEXT,
                 created_at          TIMESTAMP DEFAULT NOW(),
                 finished_at         TIMESTAMP
@@ -98,6 +101,8 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS run_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS match_reason TEXT")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS evaluation JSONB")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_project ON pricing_tasks(boq_project_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_boq_item ON pricing_task_results(boq_item_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_run ON pricing_task_results(run_id)")
@@ -226,6 +231,67 @@ _TOOL_CHECK_ITEM_CODE = {
                 "item_name": {"type": "string", "description": "工程量清单名称"},
             },
             "required": ["item_code", "item_name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+_TOOL_SUBMIT_CONVERSION_CHECK = {
+    "type": "function",
+    "function": {
+        "name": "submit_conversion_check",
+        "description": "提交确认定额的换算判断建议。只给建议，不修改已确认定额和工程量系数。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dekid": {"type": "integer"},
+                            "dezmid": {"type": "integer"},
+                            "quota_code": {"type": "string"},
+                            "quota_name": {"type": "string"},
+                            "needs_conversion": {"type": "boolean"},
+                            "suggested_qty_factor": {"type": "number"},
+                            "reason": {"type": "string"},
+                            "matched_rules": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "prompt": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "group_no": {"type": "integer"},
+                                    },
+                                    "required": ["prompt", "description", "group_no"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "missing_inputs": {"type": "array", "items": {"type": "string"}},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        },
+                        "required": [
+                            "dekid",
+                            "dezmid",
+                            "quota_code",
+                            "quota_name",
+                            "needs_conversion",
+                            "suggested_qty_factor",
+                            "reason",
+                            "matched_rules",
+                            "missing_inputs",
+                            "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "issues": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["items", "issues"],
             "additionalProperties": False,
         },
     },
@@ -491,6 +557,32 @@ def _run_submit_match(messages: list[dict[str, Any]]) -> dict[str, Any]:
     raise last_error or RuntimeError("submit match failed")
 
 
+def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = _client(thinking=False).chat.completions.create(
+                model=_model(),
+                messages=messages,
+                tools=[_TOOL_SUBMIT_CONVERSION_CHECK],
+                tool_choice={"type": "function", "function": {"name": "submit_conversion_check"}},
+                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=8000,
+                stream=False,
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                raise ValueError(f"AI did not call submit_conversion_check: {msg.content!r}")
+            call = msg.tool_calls[0]
+            if call.function.name != "submit_conversion_check":
+                raise ValueError(f"unexpected tool call {call.function.name!r}")
+            return json.loads(call.function.arguments)
+        except Exception as exc:
+            last_error = exc
+            print(f"[pricing-task] submit conversion check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+    raise last_error or RuntimeError("submit conversion check failed")
+
+
 def _normalize_matches(raw_match: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
     candidate_by_key = {(int(c["dekid"]), int(c["dezmid"])): c for c in candidates}
     normalized = []
@@ -576,6 +668,154 @@ def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]
     }
 
 
+def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id, r.status, i.item_code, i.item_name, i.item_description, i.unit
+            FROM pricing_task_runs r
+            JOIN boq_items i ON i.id = r.boq_item_id
+            WHERE r.id = %s
+            """,
+            (run_id,),
+        )
+        run_row = cur.fetchone()
+        if not run_row:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run_row[1] != "confirmed":
+            raise HTTPException(status_code=400, detail="run must be confirmed before conversion check")
+        boq_item = {
+            "run_id": run_row[0],
+            "status": run_row[1],
+            "item_code": run_row[2],
+            "item_name": run_row[3],
+            "item_description": run_row[4] or "",
+            "unit": run_row[5] or "",
+        }
+        cur.execute(
+            """
+            SELECT r.dekid, r.dezmid, r.subitem_code, r.subitem_name, r.qty_factor,
+                   r.confidence, r.match_reason, q.dw, q.gznr, l.mc
+            FROM pricing_task_results r
+            LEFT JOIN tdek_tdezm q ON q.dekid = r.dekid AND q.id = r.dezmid
+            LEFT JOIN tlibs l ON l.id = r.dekid
+            WHERE r.run_id = %s AND r.status = 'confirmed'
+            ORDER BY r.id
+            """,
+            (run_id,),
+        )
+        result_rows = cur.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in result_rows:
+            dekid = int(row[0])
+            dezmid = int(row[1])
+            cur.execute(
+                """
+                SELECT tsxx, hssm, COALESCE(groupno, 0)
+                FROM tdek_tznhs
+                WHERE dekid=%s AND dezmid=%s
+                ORDER BY groupno NULLS LAST, source_rowid
+                """,
+                (dekid, dezmid),
+            )
+            conversion_rules = [
+                {"prompt": r[0] or "", "description": r[1] or "", "group_no": int(r[2] or 0)}
+                for r in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT tsxx
+                FROM tdek_tzhhs
+                WHERE dekid=%s AND dezmid=%s
+                ORDER BY source_rowid
+                """,
+                (dekid, dezmid),
+            )
+            input_prompts = [r[0] for r in cur.fetchall() if r[0]]
+            items.append(
+                {
+                    "dekid": dekid,
+                    "dezmid": dezmid,
+                    "quota_code": row[2] or "",
+                    "quota_name": row[3] or "",
+                    "current_qty_factor": float(row[4]) if row[4] is not None else 1.0,
+                    "confidence": row[5] or "",
+                    "match_reason": row[6] or "",
+                    "unit": row[7] or "",
+                    "work_content": row[8] or "",
+                    "library_name": row[9] or "",
+                    "conversion_rules": conversion_rules,
+                    "input_prompts": input_prompts,
+                }
+            )
+    return boq_item, items
+
+
+def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = None) -> dict[str, Any]:
+    return {
+        "items": [
+            {
+                "dekid": item["dekid"],
+                "dezmid": item["dezmid"],
+                "quota_code": item["quota_code"],
+                "quota_name": item["quota_name"],
+                "needs_conversion": False,
+                "suggested_qty_factor": item.get("current_qty_factor") or 1.0,
+                "reason": "未查询到换算说明，默认不建议换算。",
+                "matched_rules": [],
+                "missing_inputs": [],
+                "confidence": "medium",
+            }
+            for item in items
+        ],
+        "issues": [issue] if issue else [],
+    }
+
+
+def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[str, Any]]) -> dict[str, Any]:
+    by_key = {(item["dekid"], item["dezmid"]): item for item in confirmed_items}
+    raw_by_key = {}
+    for item in raw.get("items", []):
+        try:
+            raw_by_key[(int(item.get("dekid")), int(item.get("dezmid")))] = item
+        except Exception:
+            continue
+    normalized = []
+    for key, confirmed in by_key.items():
+        item = raw_by_key.get(key)
+        if not item:
+            normalized.extend(_default_conversion_check([confirmed])["items"])
+            continue
+        matched_rules = [
+            {
+                "prompt": str(rule.get("prompt") or ""),
+                "description": str(rule.get("description") or ""),
+                "group_no": int(rule.get("group_no") or 0),
+            }
+            for rule in item.get("matched_rules", [])
+        ]
+        confidence = item.get("confidence") if item.get("confidence") in {"high", "medium", "low"} else "low"
+        try:
+            suggested_qty_factor = float(item.get("suggested_qty_factor", confirmed.get("current_qty_factor") or 1.0) or 1.0)
+        except Exception:
+            suggested_qty_factor = confirmed.get("current_qty_factor") or 1.0
+        normalized.append(
+            {
+                "dekid": confirmed["dekid"],
+                "dezmid": confirmed["dezmid"],
+                "quota_code": confirmed["quota_code"],
+                "quota_name": confirmed["quota_name"],
+                "needs_conversion": bool(item.get("needs_conversion")),
+                "suggested_qty_factor": suggested_qty_factor,
+                "reason": str(item.get("reason") or ""),
+                "matched_rules": matched_rules,
+                "missing_inputs": [str(v) for v in item.get("missing_inputs", []) if v],
+                "confidence": confidence,
+            }
+        )
+    return {"items": normalized, "issues": [str(v) for v in raw.get("issues", []) if v]}
+
+
 def _create_run(conn, task_id: int | None, boq_item: dict[str, Any]) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -599,12 +839,48 @@ def _update_run(conn, run_id: int, **fields: Any) -> None:
     for key, value in fields.items():
         assignments.append(f"{key} = %s")
         values.append(Json(value, dumps=_json_dumps) if key in {
-            "code_check", "feature_check", "work_procedures", "quota_candidates", "quota_match", "evaluation"
+            "code_check",
+            "feature_check",
+            "work_procedures",
+            "quota_candidates",
+            "quota_match",
+            "evaluation",
+            "conversion_check",
+            "step_timings",
         } else value)
     values.append(run_id)
     with conn.cursor() as cur:
         cur.execute(f"UPDATE pricing_task_runs SET {', '.join(assignments)} WHERE id = %s", values)
     conn.commit()
+
+
+def _load_step_timings(conn, run_id: int) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT step_timings FROM pricing_task_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    return dict(row[0] or {}) if row else {}
+
+
+def _finish_step_timing(
+    conn,
+    run_id: int,
+    timings: dict[str, Any],
+    step_no: int,
+    name: str,
+    started_at: datetime,
+    started_perf: float,
+) -> dict[str, Any]:
+    finished_at = datetime.now()
+    timing = {
+        "step_no": step_no,
+        "name": name,
+        "duration_ms": int(round((perf_counter() - started_perf) * 1000)),
+        "started_at": started_at.isoformat(timespec="milliseconds"),
+        "finished_at": finished_at.isoformat(timespec="milliseconds"),
+    }
+    timings[str(step_no)] = timing
+    _update_run(conn, run_id, step_timings=timings)
+    return timing
 
 
 def _save_pending_results(
@@ -655,12 +931,18 @@ def _stream_pricing_item(
     run_id: int,
 ) -> Iterable[tuple[str, Any]]:
     system_prompt = build_system_prompt()
+    step_timings: dict[str, Any] = {}
 
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     code_check = exec_check_item_code(conn, boq_item["item_code"], boq_item["item_name"])
     yield ("code_check", code_check)
     yield ("judgment", {"is_consistent": code_check["is_consistent"], "reasoning": f"标准清单名称：{code_check['standard_name'] or '未找到'}"})
     _update_run(conn, run_id, code_check=code_check)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 1, "编码核查", step_started_at, step_started_perf))
 
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     messages_r2 = [
         {"role": "system", "content": system_prompt},
         {
@@ -681,15 +963,24 @@ def _stream_pricing_item(
             feature_result = data
     yield ("feature_check", feature_result)
     _update_run(conn, run_id, feature_check=feature_result)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 2, "项目特征", step_started_at, step_started_perf))
 
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     procedures_result = exec_fetch_standard_work_procedure(conn, boq_item["item_code"])
     yield ("work_procedures", procedures_result)
     _update_run(conn, run_id, work_procedures=procedures_result)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "标准工序", step_started_at, step_started_perf))
 
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     candidates_data = exec_fetch_quota_candidates(conn, boq_item["item_code"], quota_library_ids)
     yield ("quota_candidates", candidates_data)
     _update_run(conn, run_id, quota_candidates=candidates_data)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "定额候选", step_started_at, step_started_perf))
 
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     candidates = candidates_data["candidates"]
     candidate_text = "\n".join(
         f"[{i + 1}] dekid={c['dekid']} dezmid={c['dezmid']} 编码={c['zmbh']} 名称={c['zmmc']} 单位={c['dw']} "
@@ -744,12 +1035,18 @@ def _stream_pricing_item(
     ]
     raw_match = _run_submit_match(messages_r5_submit) if candidates else {"matches": [], "issues": ["未找到候选定额子目"]}
     match_result = _normalize_matches(raw_match, candidates)
+    _update_run(conn, run_id, quota_match=match_result)
+    yield ("quota_match", match_result)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "套定额结果", step_started_at, step_started_perf))
+
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     manual = _manual_quotas(conn, manual_project_id, boq_item.get("item_code"))
     evaluation = _evaluate(match_result["matches"], manual)
-    _update_run(conn, run_id, quota_match=match_result, evaluation=evaluation)
+    _update_run(conn, run_id, evaluation=evaluation)
     _save_pending_results(conn, task_id, run_id, boq_item, match_result, evaluation)
-    yield ("quota_match", match_result)
     yield ("evaluation", evaluation)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 6, "人工对比", step_started_at, step_started_perf))
 
 
 def _row_to_task(row) -> dict[str, Any]:
@@ -902,7 +1199,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
             cur.execute(
                 """
                 SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
-                       quota_match, evaluation, error_message, created_at, finished_at, reasoning_text
+                       quota_match, evaluation, conversion_check, step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s AND boq_item_id=%s
                 ORDER BY created_at DESC
@@ -920,10 +1217,12 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "quota_candidates": r[5],
                 "quota_match": r[6],
                 "evaluation": r[7],
-                "error_message": r[8],
-                "created_at": r[9],
-                "finished_at": r[10],
-                "reasoning_text": r[11],
+                "conversion_check": r[8],
+                "step_timings": r[9],
+                "error_message": r[10],
+                "created_at": r[11],
+                "finished_at": r[12],
+                "reasoning_text": r[13],
             }
             for r in rows
         ]
@@ -946,7 +1245,7 @@ def list_latest_task_runs(task_id: int):
                 """
                 SELECT DISTINCT ON (boq_item_id)
                        boq_item_id, id, status, code_check, feature_check, work_procedures,
-                       quota_candidates, quota_match, evaluation, error_message, created_at, finished_at,
+                       quota_candidates, quota_match, evaluation, conversion_check, step_timings, error_message, created_at, finished_at,
                        reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s
@@ -967,10 +1266,12 @@ def list_latest_task_runs(task_id: int):
                     "quota_candidates": r[6],
                     "quota_match": r[7],
                     "evaluation": r[8],
-                    "error_message": r[9],
-                    "created_at": r[10],
-                    "finished_at": r[11],
-                    "reasoning_text": r[12],
+                    "conversion_check": r[9],
+                    "step_timings": r[10],
+                    "error_message": r[11],
+                    "created_at": r[12],
+                    "finished_at": r[13],
+                    "reasoning_text": r[14],
                 },
             }
             for r in rows
@@ -1040,6 +1341,95 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
             if run_id:
                 _update_run(conn, run_id, status="failed", error_message=str(exc), finished_at=datetime.now())
             print(f"[pricing-task] SSE error: {exc}", file=sys.stderr, flush=True)
+            yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/pricing-task-runs/{run_id}/conversion-check-stream")
+def pricing_task_conversion_check_stream(run_id: int):
+    from db.connection import get_connection
+
+    def generate():
+        conn = get_connection()
+        try:
+            _ensure_schema(conn)
+            step_timings = _load_step_timings(conn, run_id)
+            step_started_at = datetime.now()
+            step_started_perf = perf_counter()
+            boq_item, confirmed_items = _confirmed_conversion_context(conn, run_id)
+            yield _sse({"type": "conversion_check_start", "run_id": run_id, "total": len(confirmed_items)})
+
+            if not confirmed_items:
+                result = {"items": [], "issues": ["未找到已确认定额，无法进行换算判断。"]}
+                _update_run(conn, run_id, conversion_check=result)
+                yield _sse({"type": "conversion_check", "conversion_check": result})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": run_id})
+                return
+
+            has_conversion_context = any(item.get("conversion_rules") or item.get("input_prompts") for item in confirmed_items)
+            if not has_conversion_context:
+                result = _default_conversion_check(confirmed_items, "所有已确认定额均未查询到换算说明。")
+                _update_run(conn, run_id, conversion_check=result)
+                yield _sse({"type": "conversion_check", "conversion_check": result})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": run_id})
+                return
+
+            input_payload = {
+                "boq_item": boq_item,
+                "confirmed_quotas": confirmed_items,
+            }
+            context_text = _json_dumps(input_payload)
+            system_prompt = build_system_prompt()
+            analysis_prompt = (
+                "请对已人工确认的定额进行第七轮换算判断。先进行分析，不要调用工具，不要输出 JSON。\n"
+                "只允许根据项目特征、已确认定额、换算说明和实际值提示判断是否建议换算。\n"
+                "第七轮结果只作为换算建议，不允许修改已确认定额，也不要改写工程量系数。\n"
+                "如果某条定额未查询到换算说明，应明确说明默认不建议换算。\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            conversion_analysis = ""
+            for event_type, data in _stream_text_completion(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": analysis_prompt},
+                ],
+                6000,
+            ):
+                if event_type == "reasoning_token":
+                    yield _sse({"type": "reasoning_token", "token": data})
+                elif event_type == "text_result":
+                    conversion_analysis = data
+
+            submit_prompt = (
+                "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
+                "必须覆盖每一条已确认定额。\n"
+                "matched_rules 只能填写命中的换算说明；没有命中时填写空数组。\n"
+                "没有换算说明时 needs_conversion=false，reason 写明“未查询到换算说明，默认不建议换算”。\n"
+                "suggested_qty_factor 只是建议值，不代表写回，也不要修改已确认结果。\n"
+                "confidence 只能是 high、medium、low。\n\n"
+                f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            raw_result = _run_submit_conversion_check(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": submit_prompt},
+                ]
+            )
+            result = _normalize_conversion_check(raw_result, confirmed_items)
+            _update_run(conn, run_id, conversion_check=result)
+            yield _sse({"type": "conversion_check", "conversion_check": result})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
+            yield _sse({"type": "done", "run_id": run_id})
+        except HTTPException as exc:
+            yield _sse({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            print(f"[pricing-task] conversion check SSE error: {exc}", file=sys.stderr, flush=True)
             yield _sse({"type": "error", "error": str(exc)})
         finally:
             conn.close()
