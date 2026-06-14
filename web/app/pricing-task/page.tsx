@@ -1,109 +1,113 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { fetchBoqProjects, BoqProject, fetchManualBoqProjects, ManualBoqProject } from '@/lib/api'
-
-interface PricingTask {
-  id: string
-  name: string
-  project_id: number
-  project_name: string
-  chapter_ids: number[]
-  chapter_names: string[]
-  manual_project_id: number | null
-  manual_project_name: string | null
-  created_at: string
-}
-
-interface BS2024Chapter {
-  id: number
-  chapter_no: number
-  title: string
-  subitem_count: number
-}
+import { useRouter } from 'next/navigation'
+import {
+  BoqProject,
+  ManualBoqProject,
+  PricingKbLibrary,
+  PricingTask,
+  createPricingTask,
+  fetchBoqProjects,
+  fetchManualBoqProjects,
+  fetchPricingKbLibraries,
+  fetchPricingTasks,
+  importLocalPricingTasks,
+} from '@/lib/api'
 
 export default function PricingTaskPage() {
+  const router = useRouter()
   const [tasks, setTasks] = useState<PricingTask[]>([])
   const [showModal, setShowModal] = useState(false)
-
-  // Modal 状态
   const [projects, setProjects] = useState<BoqProject[]>([])
-  const [chapters, setChapters] = useState<BS2024Chapter[]>([])
+  const [libraries, setLibraries] = useState<PricingKbLibrary[]>([])
   const [manualProjects, setManualProjects] = useState<ManualBoqProject[]>([])
-
   const [selectedProject, setSelectedProject] = useState<number | null>(null)
   const [taskName, setTaskName] = useState('')
-  const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set())
+  const [selectedLibraries, setSelectedLibraries] = useState<Set<number>>(new Set())
   const [selectedManualProject, setSelectedManualProject] = useState<number | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [modalLoading, setModalLoading] = useState(false)
 
-  // 初始化：加载 tasks 和 API 数据
   useEffect(() => {
-    const stored = localStorage.getItem('pricing_tasks')
-    if (stored) setTasks(JSON.parse(stored))
+    bootstrap()
   }, [])
 
-  // Modal 打开时加载数据
-  const handleOpenModal = async () => {
-    setShowModal(true)
+  const bootstrap = async () => {
     setLoading(true)
     try {
-      const [projectsRes, chaptersRes, manualRes] = await Promise.all([
-        fetchBoqProjects(),
-        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/bs2024-match/chapters`).then(r => r.json()),
-        fetchManualBoqProjects(),
-      ])
-      setProjects(projectsRes)
-      setChapters(chaptersRes)
-      setManualProjects(manualRes)
-    } catch (err) {
-      console.error('加载数据失败', err)
+      await migrateLocalTasks()
+      const data = await fetchPricingTasks()
+      setTasks(data)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleCreateTask = () => {
-    if (!selectedProject || !taskName.trim() || selectedChapters.size === 0) {
-      alert('请填写必填字段')
+  const migrateLocalTasks = async () => {
+    if (typeof window === 'undefined') return
+    if (localStorage.getItem('pricing_tasks_migrated_v1') === '1') return
+    const raw = localStorage.getItem('pricing_tasks')
+    if (!raw) {
+      localStorage.setItem('pricing_tasks_migrated_v1', '1')
       return
     }
-
-    const project = projects.find(p => p.id === selectedProject)
-    const selectedChapterObjs = chapters.filter(c => selectedChapters.has(c.id))
-    const manualProject = manualProjects.find(p => p.id === selectedManualProject)
-
-    const newTask: PricingTask = {
-      id: `task_${Date.now()}`,
-      name: taskName,
-      project_id: selectedProject,
-      project_name: project?.project_name || '',
-      chapter_ids: Array.from(selectedChapters),
-      chapter_names: selectedChapterObjs.map(c => c.title),
-      manual_project_id: selectedManualProject,
-      manual_project_name: manualProject?.project_name || null,
-      created_at: new Date().toISOString(),
+    try {
+      const localTasks = JSON.parse(raw)
+      if (Array.isArray(localTasks) && localTasks.length > 0) {
+        await importLocalPricingTasks(localTasks)
+      }
+      localStorage.setItem('pricing_tasks_migrated_v1', '1')
+    } catch (err) {
+      console.warn('旧任务迁移失败', err)
     }
+  }
 
-    const updatedTasks = [newTask, ...tasks]
-    setTasks(updatedTasks)
-    localStorage.setItem('pricing_tasks', JSON.stringify(updatedTasks))
+  const handleOpenModal = async () => {
+    setShowModal(true)
+    setModalLoading(true)
+    try {
+      const [projectsRes, libsRes, manualRes] = await Promise.all([
+        fetchBoqProjects(),
+        fetchPricingKbLibraries(),
+        fetchManualBoqProjects(),
+      ])
+      setProjects(projectsRes)
+      setLibraries(libsRes)
+      setManualProjects(manualRes)
+    } finally {
+      setModalLoading(false)
+    }
+  }
 
-    // 重置 modal
+  const handleCreateTask = async () => {
+    if (!selectedProject || !taskName.trim()) {
+      alert('请填写工程和任务名称')
+      return
+    }
+    const created = await createPricingTask({
+      name: taskName.trim(),
+      boq_project_id: selectedProject,
+      quota_library_ids: Array.from(selectedLibraries),
+      manual_project_id: selectedManualProject,
+    })
     setShowModal(false)
-    setSelectedProject(null)
-    setTaskName('')
-    setSelectedChapters(new Set())
-    setSelectedManualProject(null)
+    router.push(`/pricing-task/${created.id}`)
+  }
+
+  if (loading) {
+    return <div className="min-h-screen bg-gray-50 flex items-center justify-center text-gray-500">加载中...</div>
   }
 
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-6xl mx-auto px-6 py-8">
-        {/* 页面头 */}
         <div className="flex items-center justify-between mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">单条组价</h1>
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">单条组价</h1>
+            <p className="mt-2 text-sm text-gray-500">任务和组价结果已迁移到后端，可刷新恢复历史。</p>
+          </div>
           <button
             onClick={handleOpenModal}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -112,7 +116,6 @@ export default function PricingTaskPage() {
           </button>
         </div>
 
-        {/* 任务列表 */}
         {tasks.length === 0 ? (
           <div className="text-center py-16">
             <p className="text-gray-500 text-lg mb-4">暂无任务，点击新增开始</p>
@@ -126,12 +129,13 @@ export default function PricingTaskPage() {
                     <h3 className="font-semibold text-lg text-gray-900 mb-2">{task.name}</h3>
                     <div className="text-sm text-gray-600 space-y-1">
                       <p>工程：{task.project_name}</p>
-                      <p>定额库：{task.chapter_names.join('、')}</p>
-                      {task.manual_project_name && (
-                        <p>对比工程：{task.manual_project_name}</p>
-                      )}
+                      <p>
+                        定额库：
+                        {task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'}
+                      </p>
+                      {task.manual_project_id && <p>对比工程：#{task.manual_project_id}</p>}
                       <p className="text-xs text-gray-400 mt-2">
-                        创建于 {new Date(task.created_at).toLocaleString()}
+                        创建于 {new Date(task.created_at).toLocaleString()} · 运行 {task.latest_run_count} 次
                       </p>
                     </div>
                   </div>
@@ -146,110 +150,96 @@ export default function PricingTaskPage() {
           </div>
         )}
 
-        {/* 创建任务 Modal */}
         {showModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
               <h2 className="text-xl font-bold mb-6">新增组价任务</h2>
 
-              {loading ? (
+              {modalLoading ? (
                 <div className="text-center py-8">加载中...</div>
               ) : (
                 <div className="space-y-4">
-                  {/* 工程 */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      工程 <span className="text-red-500">*</span>
-                    </label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">工程 *</label>
                     <select
                       value={selectedProject || ''}
                       onChange={e => setSelectedProject(e.target.value ? Number(e.target.value) : null)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     >
                       <option value="">请选择工程</option>
                       {projects.map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.project_name}
-                        </option>
+                        <option key={p.id} value={p.id}>{p.project_name}</option>
                       ))}
                     </select>
                   </div>
 
-                  {/* 任务名称 */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      任务名称 <span className="text-red-500">*</span>
-                    </label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">任务名称 *</label>
                     <input
                       type="text"
                       value={taskName}
                       onChange={e => setTaskName(e.target.value)}
                       placeholder="输入任务名称"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     />
                   </div>
 
-                  {/* 定额专业 */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      定额专业 <span className="text-red-500">*</span>
+                      定额库 <span className="text-gray-400">(不选表示全部)</span>
                     </label>
-                    <div className="max-h-48 overflow-y-auto border border-gray-300 rounded-lg p-3 space-y-2">
-                      {chapters.map(ch => (
-                        <label key={ch.id} className="flex items-center">
+                    <div className="max-h-52 overflow-y-auto border border-gray-300 rounded-lg p-3 space-y-2">
+                      {libraries.map(lib => (
+                        <label key={lib.id} className="flex items-start">
                           <input
                             type="checkbox"
-                            checked={selectedChapters.has(ch.id)}
+                            checked={selectedLibraries.has(lib.id)}
                             onChange={e => {
-                              const newSet = new Set(selectedChapters)
-                              if (e.target.checked) {
-                                newSet.add(ch.id)
-                              } else {
-                                newSet.delete(ch.id)
-                              }
-                              setSelectedChapters(newSet)
+                              const next = new Set(selectedLibraries)
+                              if (e.target.checked) next.add(lib.id)
+                              else next.delete(lib.id)
+                              setSelectedLibraries(next)
                             }}
-                            className="rounded"
+                            className="rounded mt-1"
                           />
-                          <span className="ml-2 text-sm">{ch.title}</span>
+                          <span className="ml-2 text-sm">
+                            {lib.name}
+                            <span className="ml-1 text-xs text-gray-400">({lib.quota_count} 条)</span>
+                          </span>
                         </label>
                       ))}
                     </div>
                   </div>
 
-                  {/* 对比工程 */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      对比工程 <span className="text-gray-400">(可选)</span>
+                      对比工程 <span className="text-gray-400">(仅用于评测)</span>
                     </label>
                     <select
                       value={selectedManualProject || ''}
                       onChange={e => setSelectedManualProject(e.target.value ? Number(e.target.value) : null)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                     >
                       <option value="">不对比</option>
                       {manualProjects.map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.project_name}
-                        </option>
+                        <option key={p.id} value={p.id}>{p.project_name}</option>
                       ))}
                     </select>
                   </div>
                 </div>
               )}
 
-              {/* 按钮 */}
               <div className="flex gap-3 mt-6">
                 <button
                   onClick={() => setShowModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                 >
                   取消
                 </button>
                 <button
                   onClick={handleCreateTask}
-                  disabled={loading}
-                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                  disabled={modalLoading}
+                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
                   创建并进入
                 </button>

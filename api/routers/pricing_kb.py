@@ -528,6 +528,120 @@ def list_boq_items(
         conn.close()
 
 
+@router.get("/pricing-kb/boq-processes")
+def list_boq_processes(
+    q: str | None = Query(None, max_length=200),
+    code: str | None = Query(None, max_length=64),
+    appendix_code: str | None = Query(None, max_length=16),
+    library_id: int | None = 1020025,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if library_id:
+        clauses.append("p.qdkid = %s")
+        params.append(library_id)
+    if q:
+        like = f"%{q.strip()}%"
+        clauses.append(
+            "(p.zmbh ILIKE %s OR p.zmmc ILIKE %s OR p.procedure_text ILIKE %s)"
+        )
+        params.extend([like, like, like])
+    if code:
+        clauses.append("p.zmbh ILIKE %s")
+        params.append(f"{code.strip()}%")
+    if appendix_code:
+        clauses.append("p.appendix_code = %s")
+        params.append(appendix_code.strip().upper())
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    limit, offset = page_bounds(page, page_size)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM tqdk_tqdgx p {where_sql}", params)
+            total = cur.fetchone()[0]
+            cur.execute(
+                f"""
+                SELECT COUNT(*) FROM (
+                    SELECT p.qdkid, p.zmbh, p.source_file_sha256, p.source_sheet, p.source_rowid
+                    FROM tqdk_tqdgx p
+                    {where_sql}
+                    GROUP BY p.qdkid, p.zmbh, p.source_file_sha256, p.source_sheet, p.source_rowid
+                ) s
+                """,
+                params,
+            )
+            item_total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT appendix_code, appendix_name, COUNT(*) AS process_count,
+                       COUNT(DISTINCT zmbh) AS item_count
+                FROM tqdk_tqdgx p
+                WHERE (%s::BIGINT IS NULL OR p.qdkid = %s)
+                GROUP BY appendix_code, appendix_name
+                ORDER BY appendix_code NULLS LAST
+                """,
+                (library_id, library_id),
+            )
+            appendix_rows = cur.fetchall()
+            cur.execute(
+                f"""
+                SELECT p.id, p.qdkid, COALESCE(l.mc, '') AS library_name,
+                       p.qdzmid, p.zmbh, p.zmmc, q.dw, c.zjmc AS chapter_name,
+                       p.appendix_code, p.appendix_name,
+                       p.procedure_text,
+                       p.source_sheet, p.source_rowid, p.qdzmid IS NOT NULL AS linked
+                FROM tqdk_tqdgx p
+                LEFT JOIN tlibs l ON l.id = p.qdkid
+                LEFT JOIN tqdk_tqdzm q ON q.qdkid = p.qdkid AND q.id = p.qdzmid
+                LEFT JOIN tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
+                {where_sql}
+                ORDER BY p.appendix_code NULLS LAST, p.zmbh, p.source_rowid
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            rows = cur.fetchall()
+        return {
+            "total": total,
+            "item_total": item_total,
+            "page": page,
+            "page_size": page_size,
+            "appendices": [
+                {
+                    "appendix_code": r[0],
+                    "appendix_name": r[1],
+                    "process_count": r[2],
+                    "item_count": r[3],
+                }
+                for r in appendix_rows
+            ],
+            "items": [
+                {
+                    "id": r[0],
+                    "qdkid": r[1],
+                    "library_name": r[2],
+                    "qdzmid": r[3],
+                    "zmbh": r[4],
+                    "zmmc": r[5],
+                    "unit": r[6],
+                    "chapter_name": r[7],
+                    "appendix_code": r[8],
+                    "appendix_name": r[9],
+                    "procedure_text": r[10],
+                    "source_sheet": r[11],
+                    "source_rowid": r[12],
+                    "linked": r[13],
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/pricing-kb/quota-items")
 def list_quota_items(
     q: str | None = Query(None, max_length=200),

@@ -20,6 +20,10 @@ from importer.boq_matcher import build_system_prompt, match_boq_item, stream_mat
 router = APIRouter()
 
 
+class BoqItemDescriptionUpdate(BaseModel):
+    item_description: Optional[str] = None
+
+
 @router.get("/boq/prompt-template")
 def get_prompt_template():
     return {"role_desc": _ROLE_DESC, "tool_schema": _MATCH_TOOL}
@@ -228,6 +232,45 @@ def get_all_boq_items(project_id: int = Query(...)):
 
 
 # ── 匹配运行记录 ──────────────────────────────────────────────────────────────
+
+@router.patch("/boq/items/{item_id}/description", response_model=BoqItem)
+def update_boq_item_description(item_id: int, body: BoqItemDescriptionUpdate):
+    conn = get_connection()
+    try:
+        new_description = body.item_description.strip() if body.item_description else None
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE boq_items SET item_description = %s WHERE id = %s",
+                (new_description, item_id),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="BOQ item not found")
+            cur.execute("""
+                SELECT i.id, i.section_id, s.section_name,
+                       i.item_seq, i.item_code, i.item_name,
+                       i.item_description, i.unit, i.quantity,
+                       i.unit_price, i.total_price, i.provisional_price
+                FROM boq_items i
+                LEFT JOIN boq_sections s ON s.id = i.section_id
+                WHERE i.id = %s
+            """, (item_id,))
+            r = cur.fetchone()
+        conn.commit()
+        return BoqItem(
+            id=r[0], section_id=r[1], section_name=r[2],
+            item_seq=r[3], item_code=r[4], item_name=r[5],
+            item_description=r[6], unit=r[7],
+            quantity=float(r[8]) if r[8] is not None else None,
+            unit_price=float(r[9]) if r[9] is not None else None,
+            total_price=float(r[10]) if r[10] is not None else None,
+            provisional_price=float(r[11]) if r[11] is not None else None,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 
 @router.get("/boq/runs", response_model=list[BoqMatchRun])
 def get_boq_runs(project_id: int = Query(...)):

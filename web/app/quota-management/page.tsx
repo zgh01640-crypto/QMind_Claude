@@ -1,11 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import {
+  PricingKbQuotaItem,
   QuotaTreeCategory,
   QuotaTreeChapterResponse,
   QuotaTreeItem,
   QuotaTreeItemDetail,
+  fetchPricingKbQuotaItems,
   fetchQuotaTreeChapter,
   fetchQuotaTreeItemDetail,
   fetchQuotaTreeTopLibraries,
@@ -284,6 +287,11 @@ export default function QuotaManagementPage() {
   const [detailData, setDetailData] = useState<Record<string, QuotaTreeItemDetail>>({})
   const [detailExpandedKeys, setDetailExpandedKeys] = useState<Set<string>>(new Set())
   const [detailLoadingKeys, setDetailLoadingKeys] = useState<Set<string>>(new Set())
+  const [searchInput, setSearchInput] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<PricingKbQuotaItem[]>([])
+  const [searchTotal, setSearchTotal] = useState(0)
+  const [searchLoading, setSearchLoading] = useState(false)
   const [error, setError] = useState('')
 
   const selectedKey = selectedLibrary ? nodeKey(selectedLibrary.dekid, selectedLibrary.id) : ''
@@ -384,6 +392,57 @@ export default function QuotaManagementPage() {
     }
   }
 
+  async function handleSearch(event?: FormEvent) {
+    event?.preventDefault()
+    const query = searchInput.trim()
+    setSearchQuery(query)
+    setSearchResults([])
+    setSearchTotal(0)
+    if (!query) return
+    setSearchLoading(true)
+    setError('')
+    try {
+      const data = await fetchPricingKbQuotaItems({
+        q: query,
+        library_id: selectedLibrary?.dekid ?? null,
+        page: 1,
+        page_size: 80,
+      })
+      setSearchResults(data.items)
+      setSearchTotal(data.total)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '搜索定额失败')
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
+  function clearSearch() {
+    setSearchInput('')
+    setSearchQuery('')
+    setSearchResults([])
+    setSearchTotal(0)
+  }
+
+  function searchResultToTreeItem(item: PricingKbQuotaItem): QuotaTreeItem {
+    return {
+      id: item.id,
+      dekid: item.source_library_id,
+      zmbh: item.code,
+      zmmc: item.name,
+      dw: item.unit,
+      gznr: null,
+      zjh: 0,
+      chapter_name: item.chapter_name,
+      resource_count: 0,
+      conversion_rule_count: 0,
+      input_prompt_count: 0,
+      link_status: item.link_status,
+      target_table: item.target_table,
+      target_item_id: item.target_item_id,
+    }
+  }
+
   return (
     <div className="min-h-[calc(100vh-104px)] bg-gray-50">
       <div className="border-b border-gray-200 bg-white px-5 py-4">
@@ -417,8 +476,51 @@ export default function QuotaManagementPage() {
             <div className="mt-1 text-xs text-gray-500">
               点击章节左侧的 + 展开下一层；出现定额子目后可展开查看完整工料机和换算信息。
             </div>
+            <form onSubmit={handleSearch} className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                value={searchInput}
+                onChange={event => setSearchInput(event.target.value)}
+                placeholder="搜索定额编码或名称，例如 010001-32、加气混凝土"
+                className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+              <button type="submit" disabled={searchLoading} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                {searchLoading ? '搜索中...' : '搜索'}
+              </button>
+              {searchQuery && (
+                <button type="button" onClick={clearSearch} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+                  清除
+                </button>
+              )}
+            </form>
           </div>
 
+          {searchQuery ? (
+            <div className="overflow-hidden border border-gray-200 bg-white">
+              <div className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs font-medium text-gray-600">
+                搜索结果：{searchLoading ? '搜索中...' : `共 ${searchTotal} 条，显示前 ${searchResults.length} 条`}
+              </div>
+              {!searchLoading && searchResults.length === 0 && (
+                <div className="px-4 py-12 text-center text-sm text-gray-400">未找到匹配定额</div>
+              )}
+              <div className="divide-y divide-gray-100">
+                {searchResults.map(item => {
+                  const treeItem = searchResultToTreeItem(item)
+                  const itemKey = nodeKey(treeItem.dekid, treeItem.id)
+                  return (
+                    <ItemRow
+                      key={itemKey}
+                      item={treeItem}
+                      depth={0}
+                      detail={detailData[itemKey]}
+                      loading={detailLoadingKeys.has(itemKey)}
+                      expanded={detailExpandedKeys.has(itemKey)}
+                      onToggle={toggleItem}
+                    />
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
           <div className="overflow-hidden border border-gray-200 bg-white">
             <div className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs font-medium text-gray-600">
               定额章节树 / 定额子目
@@ -441,6 +543,7 @@ export default function QuotaManagementPage() {
               />
             )}
           </div>
+          )}
         </main>
       </div>
     </div>

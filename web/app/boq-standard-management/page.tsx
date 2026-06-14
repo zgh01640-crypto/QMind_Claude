@@ -1,20 +1,26 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import {
+  BoqProcessList,
   BoqTreeCategory,
   BoqTreeChapterResponse,
   BoqTreeItem,
   PricingKbCandidate,
   PricingKbCandidateResponse,
+  PricingKbBoqItem,
   QuotaTreeItemDetail,
   fetchBoqTreeChapter,
   fetchBoqTreeTopCategories,
+  fetchBoqProcesses,
+  fetchPricingKbBoqItems,
   fetchPricingKbCandidates,
   fetchQuotaTreeItemDetail,
 } from '@/lib/api'
 
 const DEFAULT_CHAPTER_ID = 228
+const PROCESS_PAGE_SIZE = 80
 
 function splitTitle(title: string) {
   const match = title.match(/^([0-9A-Z]+)\s+(.+)$/)
@@ -376,8 +382,198 @@ function TreeNode({
   )
 }
 
+function ProcessManagementPanel({
+  libraryId,
+}: {
+  libraryId: number | null
+}) {
+  const [searchInput, setSearchInput] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [appendixCode, setAppendixCode] = useState('')
+  const [page, setPage] = useState(1)
+  const [data, setData] = useState<BoqProcessList | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadProcesses = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await fetchBoqProcesses({
+        q: searchQuery,
+        appendix_code: appendixCode || null,
+        library_id: libraryId,
+        page,
+        page_size: PROCESS_PAGE_SIZE,
+      })
+      setData(result)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '加载清单工序失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [appendixCode, libraryId, page, searchQuery])
+
+  useEffect(() => {
+    loadProcesses().catch(() => undefined)
+  }, [loadProcesses])
+
+  function handleSearch(event?: FormEvent) {
+    event?.preventDefault()
+    setSearchQuery(searchInput.trim())
+    setPage(1)
+  }
+
+  function handleAppendixChange(value: string) {
+    setAppendixCode(value)
+    setPage(1)
+  }
+
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PROCESS_PAGE_SIZE))
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-gray-200 bg-white px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-gray-900">清单工序管理</div>
+            <div className="mt-1 text-xs text-gray-500">按清单编码、项目名称、工序名称检索标准施工工序。</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <StatPill label="工序链条" value={loading ? '加载中' : data?.total ?? '-'} />
+            <StatPill label="清单" value={loading ? '加载中' : data?.item_total ?? '-'} />
+            <StatPill label="附录" value={data?.appendices.length ?? '-'} />
+          </div>
+        </div>
+
+        <form onSubmit={handleSearch} className="mt-3 grid gap-2 lg:grid-cols-[minmax(260px,1fr)_180px_auto_auto]">
+          <input
+            value={searchInput}
+            onChange={event => setSearchInput(event.target.value)}
+            placeholder="搜索编码、名称或工序链条，例如 010102001、砌块墙、开挖"
+            className="min-w-0 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+          <select
+            value={appendixCode}
+            onChange={event => handleAppendixChange(event.target.value)}
+            className="rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">全部附录</option>
+            {(data?.appendices ?? []).map(appendix => (
+              <option key={appendix.appendix_code ?? 'none'} value={appendix.appendix_code ?? ''}>
+                {appendix.appendix_code ? `${appendix.appendix_code} ${appendix.appendix_name ?? ''}` : appendix.appendix_name ?? '未分组'}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={loading} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+            {loading ? '查询中...' : '查询'}
+          </button>
+          {(searchQuery || appendixCode) && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchInput('')
+                setSearchQuery('')
+                setAppendixCode('')
+                setPage(1)
+              }}
+              className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+            >
+              清除
+            </button>
+          )}
+        </form>
+
+        {error && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {(data?.appendices ?? []).slice(0, 8).map(appendix => (
+          <button
+            key={appendix.appendix_code ?? 'none'}
+            onClick={() => handleAppendixChange(appendix.appendix_code ?? '')}
+            className={`border px-3 py-2 text-left text-sm transition ${
+              appendixCode === (appendix.appendix_code ?? '')
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-200 bg-white hover:border-blue-200 hover:bg-blue-50/40'
+            }`}
+          >
+            <div className="font-semibold text-gray-900">
+              {appendix.appendix_code ? `附录 ${appendix.appendix_code}` : '未分组'}
+            </div>
+            <div className="mt-1 truncate text-xs text-gray-500">{appendix.appendix_name ?? '-'}</div>
+            <div className="mt-2 flex gap-2 text-xs text-gray-500">
+              <span>清单 {appendix.item_count}</span>
+              <span>链条 {appendix.process_count}</span>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="overflow-hidden border border-gray-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs text-gray-600">
+          <span>工序链条：{loading ? '加载中...' : `共 ${data?.total ?? 0} 条，当前第 ${page}/${totalPages} 页`}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage(current => Math.max(1, current - 1))}
+              disabled={page <= 1 || loading}
+              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 disabled:opacity-40"
+            >
+              上一页
+            </button>
+            <button
+              onClick={() => setPage(current => Math.min(totalPages, current + 1))}
+              disabled={page >= totalPages || loading}
+              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 disabled:opacity-40"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+        {!loading && (data?.items.length ?? 0) === 0 && (
+          <div className="px-4 py-12 text-center text-sm text-gray-400">暂无工序链条数据</div>
+        )}
+        <div className="divide-y divide-gray-100">
+          {(data?.items ?? []).map(item => (
+            <div key={item.id} className="px-4 py-3">
+              <div className="grid gap-3 text-sm xl:grid-cols-[120px_minmax(220px,1fr)_80px_minmax(320px,1.6fr)_110px] xl:items-start">
+                <div>
+                  <div className="font-mono font-semibold text-blue-700">{item.zmbh}</div>
+                  <div className="mt-1 text-xs text-gray-400">源行 {item.source_rowid}</div>
+                </div>
+                <div>
+                  <div className="font-medium text-gray-900">{item.zmmc}</div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {item.appendix_code ? `附录${item.appendix_code} ${item.appendix_name ?? ''}` : item.appendix_name ?? '-'}
+                  </div>
+                </div>
+                <div className="text-gray-500">单位：{item.unit ?? '-'}</div>
+                <div>
+                  <div className="text-xs font-semibold text-gray-500">标准施工工序</div>
+                  <div className="mt-1 leading-6 text-gray-800">{item.procedure_text}</div>
+                </div>
+                <div>
+                  <span className={`rounded border px-2 py-0.5 text-xs ${
+                    item.linked
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }`}>
+                    {item.linked ? '已关联清单' : '未关联清单'}
+                  </span>
+                  <div className="mt-1 text-xs text-gray-400">{item.chapter_name ?? item.library_name}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function BoqStandardManagementPage() {
   const [categories, setCategories] = useState<BoqTreeCategory[]>([])
+  const [activeTab, setActiveTab] = useState<'tree' | 'process'>('tree')
   const [selectedCategory, setSelectedCategory] = useState<BoqTreeCategory | null>(null)
   const [chapterData, setChapterData] = useState<Record<number, BoqTreeChapterResponse>>({})
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
@@ -388,6 +584,11 @@ export default function BoqStandardManagementPage() {
   const [quotaDetails, setQuotaDetails] = useState<Record<string, QuotaTreeItemDetail>>({})
   const [expandedQuotaDetailKeys, setExpandedQuotaDetailKeys] = useState<Set<string>>(new Set())
   const [loadingQuotaDetailKeys, setLoadingQuotaDetailKeys] = useState<Set<string>>(new Set())
+  const [searchInput, setSearchInput] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<PricingKbBoqItem[]>([])
+  const [searchTotal, setSearchTotal] = useState(0)
+  const [searchLoading, setSearchLoading] = useState(false)
   const [error, setError] = useState('')
 
   const selectedData = selectedCategory ? chapterData[selectedCategory.id] : null
@@ -472,6 +673,52 @@ export default function BoqStandardManagementPage() {
     }
   }
 
+  async function handleSearch(event?: FormEvent) {
+    event?.preventDefault()
+    const query = searchInput.trim()
+    setSearchQuery(query)
+    setSearchResults([])
+    setSearchTotal(0)
+    setSelectedItem(null)
+    if (!query) return
+    setSearchLoading(true)
+    setError('')
+    try {
+      const data = await fetchPricingKbBoqItems({
+        q: query,
+        library_id: selectedCategory?.qdkid ?? null,
+        page: 1,
+        page_size: 80,
+      })
+      setSearchResults(data.items)
+      setSearchTotal(data.total)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '搜索国标清单失败')
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
+  function clearSearch() {
+    setSearchInput('')
+    setSearchQuery('')
+    setSearchResults([])
+    setSearchTotal(0)
+  }
+
+  function selectSearchResult(item: PricingKbBoqItem) {
+    void handleItemSelect({
+      id: item.id,
+      qdkid: item.source_library_id,
+      zmbh: item.code ?? '',
+      zmmc: item.name,
+      dw: item.unit,
+      zjh: 0,
+      chapter_name: item.chapter_name,
+      candidate_count: item.candidate_count,
+    })
+  }
+
   async function toggleCandidateDetail(candidate: PricingKbCandidate) {
     const key = `${candidate.quota_item.source_library_id}:${candidate.quota_item.id}`
     if (expandedQuotaDetailKeys.has(key)) {
@@ -514,6 +761,30 @@ export default function BoqStandardManagementPage() {
           </div>
         </div>
         {error && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('tree')}
+            className={`rounded border px-3 py-1.5 text-sm font-medium transition ${
+              activeTab === 'tree'
+                ? 'border-blue-600 bg-blue-600 text-white'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            国标清单管理
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('process')}
+            className={`rounded border px-3 py-1.5 text-sm font-medium transition ${
+              activeTab === 'process'
+                ? 'border-blue-600 bg-blue-600 text-white'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            清单工序管理
+          </button>
+        </div>
       </div>
 
       <div className="grid min-h-[calc(100vh-210px)] lg:grid-cols-[300px_minmax(0,1fr)]">
@@ -524,6 +795,10 @@ export default function BoqStandardManagementPage() {
         />
 
         <main className="min-w-0 p-4 sm:p-5">
+          {activeTab === 'process' ? (
+            <ProcessManagementPanel libraryId={selectedCategory?.qdkid ?? 1020025} />
+          ) : (
+          <>
           <div className="mb-4 border border-gray-200 bg-white px-4 py-3">
             <div className="text-sm font-semibold text-gray-900">
               {selectedCategory?.zjmc ?? '01 房屋建筑与装饰工程'}
@@ -531,8 +806,53 @@ export default function BoqStandardManagementPage() {
             <div className="mt-1 text-xs text-gray-500">
               点击章节左侧的 + 展开下一层，最末级显示清单项目。
             </div>
+            <form onSubmit={handleSearch} className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                value={searchInput}
+                onChange={event => setSearchInput(event.target.value)}
+                placeholder="搜索清单编码或名称，例如 010402001、砌块墙"
+                className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+              <button type="submit" disabled={searchLoading} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                {searchLoading ? '搜索中...' : '搜索'}
+              </button>
+              {searchQuery && (
+                <button type="button" onClick={clearSearch} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+                  清除
+                </button>
+              )}
+            </form>
           </div>
 
+          {searchQuery ? (
+            <div className="overflow-hidden border border-gray-200 bg-white">
+              <div className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs font-medium text-gray-600">
+                搜索结果：{searchLoading ? '搜索中...' : `共 ${searchTotal} 条，显示前 ${searchResults.length} 条`}
+              </div>
+              {!searchLoading && searchResults.length === 0 && (
+                <div className="px-4 py-12 text-center text-sm text-gray-400">未找到匹配清单</div>
+              )}
+              <div className="divide-y divide-gray-100">
+                {searchResults.map(item => (
+                  <button
+                    key={`${item.source_library_id}:${item.id}`}
+                    onClick={() => selectSearchResult(item)}
+                    className={`w-full px-4 py-3 text-left text-sm hover:bg-blue-50/40 ${selectedItem?.id === item.id ? 'bg-blue-50/70' : 'bg-white'}`}
+                  >
+                    <div className="grid gap-2 md:grid-cols-[140px_minmax(220px,1fr)_90px_120px] md:items-center">
+                      <div className="font-mono font-semibold text-blue-700">{item.code ?? '-'}</div>
+                      <div>
+                        <div className="font-medium text-gray-900">{item.name}</div>
+                        <div className="mt-1 text-xs text-gray-400">{item.chapter_name ?? item.library_name}</div>
+                      </div>
+                      <div className="text-gray-500">单位：{item.unit ?? '-'}</div>
+                      <div className="text-gray-500">候选：<span className="font-semibold text-gray-800">{item.candidate_count}</span></div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
           <div className="overflow-hidden border border-gray-200 bg-white">
             <div className="border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs font-medium text-gray-600">
               章节树 / 清单项目
@@ -553,6 +873,9 @@ export default function BoqStandardManagementPage() {
               />
             )}
           </div>
+          )}
+          </>
+          )}
         </main>
       </div>
 

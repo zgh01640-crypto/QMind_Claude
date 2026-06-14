@@ -291,6 +291,14 @@ export const fetchBoqSections = (projectId: number) =>
 export const fetchAllBoqItems = (projectId: number) =>
   req<BoqItem[]>(`/api/boq/all-items?project_id=${projectId}`)
 
+export async function updateBoqItemDescription(itemId: number, item_description: string | null) {
+  return req<BoqItem>(`/api/boq/items/${itemId}/description`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ item_description }),
+  })
+}
+
 export function fetchBoqItems(params: {
   project_id: number
   section_id?: number | null
@@ -997,6 +1005,39 @@ export interface PricingKbBoqItem {
   candidate_count: number
 }
 
+export interface BoqProcessAppendixSummary {
+  appendix_code: string | null
+  appendix_name: string | null
+  process_count: number
+  item_count: number
+}
+
+export interface BoqProcessItem {
+  id: number
+  qdkid: number
+  library_name: string
+  qdzmid: number | null
+  zmbh: string
+  zmmc: string
+  unit: string | null
+  chapter_name: string | null
+  appendix_code: string | null
+  appendix_name: string | null
+  procedure_text: string
+  source_sheet: string
+  source_rowid: number
+  linked: boolean
+}
+
+export interface BoqProcessList {
+  total: number
+  item_total: number
+  page: number
+  page_size: number
+  appendices: BoqProcessAppendixSummary[]
+  items: BoqProcessItem[]
+}
+
 export interface PricingKbQuotaItem {
   id: number
   source_library_id: number
@@ -1063,6 +1104,7 @@ export interface PricingKbImportRun {
   error_message: string | null
   created_at: string
   finished_at: string | null
+  reasoning_text?: string | null
 }
 
 export interface PricingKbImportIssue {
@@ -1171,19 +1213,73 @@ export interface QuotaTreeResource {
 
 export interface QuotaCandidate {
   id: number
+  dezmid?: number
   dekid: number
+  library_name?: string
   zmbh: string
   zmmc: string
   dw: string
   gznr: string
+  chapter_name?: string | null
 }
 
 export interface QuotaMatch {
+  dekid?: number
+  dezmid?: number
   zmbh: string
   zmmc: string
+  dw?: string | null
+  library_name?: string | null
+  chapter_name?: string | null
   qty_factor: number
   confidence: 'high' | 'medium' | 'low'
   match_reason: string
+}
+
+export interface PricingTask {
+  id: number
+  name: string
+  boq_project_id: number
+  project_id: number
+  project_name: string
+  manual_project_id: number | null
+  quota_library_ids: number[]
+  quota_library_names: string[]
+  legacy_local_id: string | null
+  created_at: string
+  latest_run_count: number
+}
+
+export interface PricingTaskRun {
+  id: number
+  status: string
+  code_check: any
+  feature_check: any
+  work_procedures: { procedures?: string[]; procedure_text?: string; found?: boolean; base_code?: string } | null
+  quota_candidates: { candidates?: QuotaCandidate[]; total?: number } | null
+  quota_match: { matches?: QuotaMatch[]; issues?: string[] } | null
+  evaluation: PricingTaskEvaluation | null
+  error_message: string | null
+  created_at: string
+  finished_at: string | null
+  reasoning_text?: string | null
+}
+
+export interface PricingTaskLatestRun {
+  boq_item_id: number
+  run: PricingTaskRun
+}
+
+export interface PricingTaskEvaluation {
+  manual_quotas: DebugManualQuota[]
+  hit_codes: string[]
+  missed_codes: string[]
+  extra_codes: string[]
+  hit_count: number
+  missed_count: number
+  extra_count: number
+  manual_count: number
+  ai_count: number
 }
 
 export interface PricingTaskMatch {
@@ -1198,16 +1294,70 @@ export interface PricingTaskMatch {
 }
 
 export type PricingTaskEvent =
+  | { type: 'run_started'; run_id: number }
   | { type: 'item_info'; item: BoqItem }
   | { type: 'reasoning_token'; token: string }
   | { type: 'code_check'; item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | { type: 'feature_check'; is_complete: boolean; missing_features: string[]; analysis: string }
-  | { type: 'work_procedures'; procedures: string[] }
+  | { type: 'work_procedures'; procedures: string[]; procedure_text?: string; found?: boolean; base_code?: string }
   | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
-  | { type: 'done' }
+  | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
+  | { type: 'done'; run_id?: number }
   | { type: 'error'; error: string }
+
+export interface LocalPricingTask {
+  id: string
+  name: string
+  project_id: number
+  manual_project_id: number | null
+  chapter_ids?: number[]
+}
+
+export const fetchPricingTasks = () => req<PricingTask[]>('/api/pricing-tasks')
+
+export const fetchPricingTask = (id: number) => req<PricingTask>(`/api/pricing-tasks/${id}`)
+
+export async function createPricingTask(body: {
+  name: string
+  boq_project_id: number
+  quota_library_ids: number[]
+  manual_project_id: number | null
+  legacy_local_id?: string | null
+}): Promise<{ id: number }> {
+  return req<{ id: number }>('/api/pricing-tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function importLocalPricingTasks(tasks: LocalPricingTask[]) {
+  return req<{ imported: { legacy_local_id: string; id: number }[] }>('/api/pricing-tasks/import-local', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tasks }),
+  })
+}
+
+export const fetchPricingTaskItemRuns = (taskId: number, itemId: number) =>
+  req<PricingTaskRun[]>(`/api/pricing-tasks/${taskId}/items/${itemId}/runs`)
+
+export const fetchPricingTaskLatestRuns = (taskId: number) =>
+  req<PricingTaskLatestRun[]>(`/api/pricing-tasks/${taskId}/runs/latest`)
+
+export async function confirmPricingTaskRun(runId: number, results?: QuotaMatch[]) {
+  return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ results: results ?? null }),
+  })
+}
+
+export async function rejectPricingTaskRun(runId: number) {
+  return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
+}
 
 export async function streamPricingTaskItem(
   boq_item_id: number,
@@ -1256,6 +1406,51 @@ export async function streamPricingTaskItem(
           onEvent(evt)
         } catch (e) {
           console.error('Parse error:', e, jsonStr)
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export async function streamPricingTaskRunItem(
+  taskId: number,
+  boqItemId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API}/api/pricing-tasks/${taskId}/items/${boqItemId}/run-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boq_item_id: boqItemId }),
+  })
+
+  if (!response.ok) {
+    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    onEvent({ type: 'error', error: 'No response body' })
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          onEvent(JSON.parse(line.slice(6)) as PricingTaskEvent)
+        } catch (e) {
+          console.error('Parse error:', e, line.slice(6))
         }
       }
     }
@@ -1314,6 +1509,24 @@ export function fetchPricingKbBoqItems(params: {
   if (params.page) query.set('page', String(params.page))
   if (params.page_size) query.set('page_size', String(params.page_size))
   return req<PricingKbList<PricingKbBoqItem>>(`/api/pricing-kb/boq-items?${query}`)
+}
+
+export function fetchBoqProcesses(params: {
+  q?: string
+  code?: string
+  appendix_code?: string | null
+  library_id?: number | null
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.code) query.set('code', params.code)
+  if (params.appendix_code) query.set('appendix_code', params.appendix_code)
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<BoqProcessList>(`/api/pricing-kb/boq-processes?${query}`)
 }
 
 export function fetchPricingKbQuotaItems(params: {
