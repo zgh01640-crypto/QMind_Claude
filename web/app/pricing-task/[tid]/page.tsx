@@ -132,6 +132,21 @@ function StepDuration({ result, stepNo }: { result: ItemResult; stepNo: number }
   )
 }
 
+function conversionCategoryLabel(category?: string) {
+  if (category === 'material') return '材料类'
+  if (category === 'process') return '工艺类'
+  if (category === 'measurement') return '计量类'
+  if (category === 'none') return '无换算'
+  return '待判断'
+}
+
+function resourceTypeLabel(type?: number | null) {
+  if (type === 1) return '人工'
+  if (type === 2) return '材料'
+  if (type === 3) return '机械'
+  return '其他'
+}
+
 function stepBadges(result?: ItemResult) {
   return [
     {
@@ -898,10 +913,27 @@ export default function PricingTaskDetailPage() {
                                   </span>
                                 </div>
                                 <div className="mb-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+                                  <span>分类：{conversionCategoryLabel(item.conversion_category)}</span>
+                                  <span>类型：{item.conversion_type || '-'}</span>
                                   <span>建议系数：{item.suggested_qty_factor}</span>
                                   <span>置信度：{item.confidence}</span>
+                                  {item.requires_manual_review && <span className="font-semibold text-amber-700">需人工复核</span>}
                                 </div>
                                 <p className="text-gray-600">{item.reason || '未给出判断理由'}</p>
+                                {(item.difference_points?.length ?? 0) > 0 && (
+                                  <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-800">
+                                    <div className="mb-1 font-semibold">差异点</div>
+                                    <ul className="space-y-0.5 list-disc list-inside">
+                                      {(item.difference_points ?? []).map((point, idx) => <li key={idx}>{point}</li>)}
+                                    </ul>
+                                  </div>
+                                )}
+                                {(item.basis || item.suggested_action) && (
+                                  <div className="mt-2 rounded bg-white px-2 py-1 text-gray-700">
+                                    {item.basis && <div><span className="font-semibold text-gray-800">依据：</span>{item.basis}</div>}
+                                    {item.suggested_action && <div className="mt-1"><span className="font-semibold text-gray-800">建议动作：</span>{item.suggested_action}</div>}
+                                  </div>
+                                )}
                                 {item.matched_rules.length > 0 && (
                                   <div className="mt-2 rounded bg-cyan-50 px-2 py-1">
                                     <div className="mb-1 font-semibold text-cyan-900">命中的换算说明</div>
@@ -916,6 +948,78 @@ export default function PricingTaskDetailPage() {
                                     </ul>
                                   </div>
                                 )}
+                                <details className="mt-2 rounded border border-cyan-100 bg-cyan-50/60 px-2 py-1">
+                                  <summary className="cursor-pointer select-none text-xs font-semibold text-cyan-900">
+                                    换算说明信息
+                                    <span className="ml-1 font-normal text-cyan-700">
+                                      （说明 {item.conversion_rules?.length ?? 0} 条，实际值提示 {item.input_prompts?.length ?? 0} 条）
+                                    </span>
+                                  </summary>
+                                  {(item.conversion_rules?.length ?? 0) === 0 && (item.input_prompts?.length ?? 0) === 0 ? (
+                                    <div className="mt-2 text-gray-500">未查询到换算说明，默认不建议换算。</div>
+                                  ) : (
+                                    <div className="mt-2 space-y-2">
+                                      {(item.conversion_rules ?? []).length > 0 && (
+                                        <div>
+                                          <div className="mb-1 font-semibold text-cyan-900">换算说明</div>
+                                          <ul className="space-y-1">
+                                            {(item.conversion_rules ?? []).map((rule, idx) => (
+                                              <li key={idx} className="rounded bg-white px-2 py-1">
+                                                <span className="text-cyan-800">{rule.prompt || '-'}</span>
+                                                {rule.description && <span className="text-gray-500">：{rule.description}</span>}
+                                                {rule.group_no ? <span className="ml-1 text-gray-400">#{rule.group_no}</span> : null}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                      {(item.input_prompts ?? []).length > 0 && (
+                                        <div>
+                                          <div className="mb-1 font-semibold text-cyan-900">实际值/输入提示</div>
+                                          <ul className="space-y-1">
+                                            {(item.input_prompts ?? []).map((prompt, idx) => (
+                                              <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">{prompt}</li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </details>
+                                <details className="mt-2 rounded border border-slate-100 bg-slate-50 px-2 py-1">
+                                  <summary className="cursor-pointer select-none text-xs font-semibold text-slate-800">
+                                    工料机显示
+                                    <span className="ml-1 font-normal text-slate-500">（{item.resources?.length ?? 0} 条）</span>
+                                  </summary>
+                                  {(item.resources?.length ?? 0) === 0 ? (
+                                    <div className="mt-2 text-gray-500">未查询到工料机明细。</div>
+                                  ) : (
+                                    <div className="mt-2 overflow-x-auto">
+                                      <table className="min-w-full text-left text-[11px]">
+                                        <thead className="text-slate-500">
+                                          <tr>
+                                            <th className="px-2 py-1">类别</th>
+                                            <th className="px-2 py-1">编码</th>
+                                            <th className="px-2 py-1">名称</th>
+                                            <th className="px-2 py-1">单位</th>
+                                            <th className="px-2 py-1 text-right">含量</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                          {(item.resources ?? []).map((resource, idx) => (
+                                            <tr key={`${resource.code}-${idx}`} className="bg-white">
+                                              <td className="px-2 py-1 text-slate-500">{resourceTypeLabel(resource.type)}</td>
+                                              <td className="px-2 py-1 font-mono text-slate-600">{resource.code || '-'}</td>
+                                              <td className="px-2 py-1 text-slate-800">{resource.name || '-'}</td>
+                                              <td className="px-2 py-1 text-slate-500">{resource.unit || '-'}</td>
+                                              <td className="px-2 py-1 text-right text-slate-700">{resource.quantity ?? '-'}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                </details>
                                 {item.missing_inputs.length > 0 && (
                                   <div className="mt-2 text-amber-700">
                                     缺失实际值信息：{item.missing_inputs.join('、')}
@@ -937,7 +1041,7 @@ export default function PricingTaskDetailPage() {
                         disabled={!canConfirm || actionBusy}
                         className="flex-1 px-3 py-2 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
                       >
-                        确认结果
+                        确认定额并换算判定
                       </button>
                       <button
                         onClick={handleReject}

@@ -1306,7 +1306,22 @@ export interface PricingTaskConversionItem {
   needs_conversion: boolean
   suggested_qty_factor: number
   reason: string
+  difference_points?: string[]
+  conversion_category?: 'material' | 'process' | 'measurement' | 'none' | 'unknown'
+  conversion_type?: string
+  basis?: string
+  suggested_action?: string
+  requires_manual_review?: boolean
   matched_rules: PricingTaskConversionRule[]
+  resources?: Array<{
+    code: string
+    name: string
+    unit: string
+    quantity: number | null
+    type: number | null
+  }>
+  conversion_rules?: PricingTaskConversionRule[]
+  input_prompts?: string[]
   missing_inputs: string[]
   confidence: 'high' | 'medium' | 'low'
 }

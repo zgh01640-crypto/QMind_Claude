@@ -1,4 +1,4 @@
-"""单条组价路由.
+﻿"""单条组价路由.
 
 当前阶段完成“套定额闭环”：任务入库、单条运行入库、AI 结果候选校验、
 人工确认/拒绝、人工对比工程评测。不在本阶段计算综合单价。
@@ -258,6 +258,18 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                             "needs_conversion": {"type": "boolean"},
                             "suggested_qty_factor": {"type": "number"},
                             "reason": {"type": "string"},
+                            "difference_points": {"type": "array", "items": {"type": "string"}},
+                            "conversion_category": {
+                                "type": "string",
+                                "enum": ["material", "process", "measurement", "none", "unknown"],
+                            },
+                            "conversion_type": {
+                                "type": "string",
+                                "enum": ["强度换算", "厚度换算", "配合比换算", "材料种类换算", "定额子目借用", "部位调整", "系数调整", "单位换算", "none", "unknown"],
+                            },
+                            "basis": {"type": "string"},
+                            "suggested_action": {"type": "string"},
+                            "requires_manual_review": {"type": "boolean"},
                             "matched_rules": {
                                 "type": "array",
                                 "items": {
@@ -282,6 +294,12 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                             "needs_conversion",
                             "suggested_qty_factor",
                             "reason",
+                            "difference_points",
+                            "conversion_category",
+                            "conversion_type",
+                            "basis",
+                            "suggested_action",
+                            "requires_manual_review",
                             "matched_rules",
                             "missing_inputs",
                             "confidence",
@@ -421,6 +439,25 @@ def build_system_prompt() -> str:
         "置信度：high 表示特征与定额充分匹配；medium 表示主要特征匹配但仍有疑问；low 表示关键特征缺失。\n"
         "请全程使用中文分析。"
     )
+
+
+CONVERSION_RULE_GUIDE = """
+第七步定额换算通用规则：
+1. 强度换算（material）：设计强度 vs 定额默认强度，例如 C25 混凝土 → C30 混凝土。
+2. 厚度换算（material）：设计厚度 vs 定额默认厚度，例如 12mm → 15mm。
+3. 配合比换算（material）：设计砂浆/混凝土配合比 vs 定额默认配合比，例如 1:2 → 1:3。
+4. 材料种类换算（material）：设计材料 vs 定额默认材料，例如普通水泥 → 白水泥。
+5. 定额子目借用（process）：无更适用专用子目时，借用相似工艺子目。
+6. 部位调整（process）：设计部位 vs 定额部位不一致，例如外墙不能直接套内墙子目。
+7. 系数调整（process）：按定额说明或规范，对人工/材料/机械乘系数，例如高空、洞内、洞库等。
+8. 单位换算（measurement）：清单单位 vs 定额单位不一致，例如 m3、m2、t、kg、10m 与 m。
+
+判定要求：
+- 逐条对比项目特征、定额工作内容、工料机显示，列出差异点。
+- 定额库换算说明（tdek_tznhs/tdek_tzhhs）优先级最高，命中时必须写入 matched_rules 和 basis。
+- 没有定额库换算说明时，不允许编造依据；如仍认为存在差异，只能给换算建议并标记 requires_manual_review=true。
+- 第七步只输出建议，不修改已确认定额、工程量系数或工料机。
+""".strip()
 
 
 def _collect_stream_tool_args(stream, reasoning_parts: list[str]) -> str:
@@ -732,6 +769,25 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 (dekid, dezmid),
             )
             input_prompts = [r[0] for r in cur.fetchall() if r[0]]
+            cur.execute(
+                """
+                SELECT zmbh, zmmc, dw, gcl, lx
+                FROM tdek_tzmgc
+                WHERE dekid=%s AND dezmid=%s
+                ORDER BY lx NULLS LAST, source_rowid
+                """,
+                (dekid, dezmid),
+            )
+            resources = [
+                {
+                    "code": r[0] or "",
+                    "name": r[1] or "",
+                    "unit": r[2] or "",
+                    "quantity": float(r[3]) if r[3] is not None else None,
+                    "type": int(r[4]) if r[4] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
             items.append(
                 {
                     "dekid": dekid,
@@ -744,6 +800,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                     "unit": row[7] or "",
                     "work_content": row[8] or "",
                     "library_name": row[9] or "",
+                    "resources": resources,
                     "conversion_rules": conversion_rules,
                     "input_prompts": input_prompts,
                 }
@@ -762,7 +819,16 @@ def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = N
                 "needs_conversion": False,
                 "suggested_qty_factor": item.get("current_qty_factor") or 1.0,
                 "reason": "未查询到换算说明，默认不建议换算。",
+                "difference_points": [],
+                "conversion_category": "none",
+                "conversion_type": "none",
+                "basis": "未查询到定额库换算说明。",
+                "suggested_action": "不自动换算，必要时人工复核。",
+                "requires_manual_review": bool(item.get("resources")),
                 "matched_rules": [],
+                "resources": item.get("resources", []),
+                "conversion_rules": item.get("conversion_rules", []),
+                "input_prompts": item.get("input_prompts", []),
                 "missing_inputs": [],
                 "confidence": "medium",
             }
@@ -799,6 +865,14 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
             suggested_qty_factor = float(item.get("suggested_qty_factor", confirmed.get("current_qty_factor") or 1.0) or 1.0)
         except Exception:
             suggested_qty_factor = confirmed.get("current_qty_factor") or 1.0
+        category = item.get("conversion_category")
+        if category not in {"material", "process", "measurement", "none", "unknown"}:
+            category = "unknown"
+        conversion_type = str(item.get("conversion_type") or "unknown")
+        allowed_types = {"强度换算", "厚度换算", "配合比换算", "材料种类换算", "定额子目借用", "部位调整", "系数调整", "单位换算", "none", "unknown"}
+        if conversion_type not in allowed_types:
+            conversion_type = "unknown"
+        has_matched_rules = bool(matched_rules)
         normalized.append(
             {
                 "dekid": confirmed["dekid"],
@@ -808,7 +882,32 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
                 "needs_conversion": bool(item.get("needs_conversion")),
                 "suggested_qty_factor": suggested_qty_factor,
                 "reason": str(item.get("reason") or ""),
+                "difference_points": [str(v) for v in item.get("difference_points", []) if v],
+                "conversion_category": category,
+                "conversion_type": conversion_type,
+                "basis": str(item.get("basis") or ("命中定额库换算说明。" if has_matched_rules else "未查询到定额库换算说明。")),
+                "suggested_action": str(item.get("suggested_action") or ""),
+                "requires_manual_review": bool(item.get("requires_manual_review") or (item.get("needs_conversion") and not has_matched_rules)),
                 "matched_rules": matched_rules,
+                "resources": [
+                    {
+                        "code": str(resource.get("code") or ""),
+                        "name": str(resource.get("name") or ""),
+                        "unit": str(resource.get("unit") or ""),
+                        "quantity": resource.get("quantity"),
+                        "type": resource.get("type"),
+                    }
+                    for resource in confirmed.get("resources", [])
+                ],
+                "conversion_rules": [
+                    {
+                        "prompt": str(rule.get("prompt") or ""),
+                        "description": str(rule.get("description") or ""),
+                        "group_no": int(rule.get("group_no") or 0),
+                    }
+                    for rule in confirmed.get("conversion_rules", [])
+                ],
+                "input_prompts": [str(v) for v in confirmed.get("input_prompts", []) if v],
                 "missing_inputs": [str(v) for v in item.get("missing_inputs", []) if v],
                 "confidence": confidence,
             }
@@ -1022,7 +1121,7 @@ def _stream_pricing_item(
             "content": (
                 f"请根据以下套定额分析和候选定额，严格调用 submit_quota_match 提交最终结构化结果。\n"
                 f"只能提交候选中的 dekid/dezmid，不允许编造候选外子目。\n\n"
-                f"套定额原则：原则上工序会对应一条或多条定额，请你注意拆解和判断。\n\n"
+                f"套定额原则：用清单项目特征信息+标准施工工序和候选定额名称+工作内容进行匹配分析和判断。\n\n"
                 f"【清单项】\n编码：{boq_item['item_code']}\n名称：{boq_item['item_name']}\n"
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
                 f"【编码核查】{_json_dumps(code_check)}\n"
@@ -1370,26 +1469,19 @@ def pricing_task_conversion_check_stream(run_id: int):
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
-            has_conversion_context = any(item.get("conversion_rules") or item.get("input_prompts") for item in confirmed_items)
-            if not has_conversion_context:
-                result = _default_conversion_check(confirmed_items, "所有已确认定额均未查询到换算说明。")
-                _update_run(conn, run_id, conversion_check=result)
-                yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
-                yield _sse({"type": "done", "run_id": run_id})
-                return
-
             input_payload = {
                 "boq_item": boq_item,
                 "confirmed_quotas": confirmed_items,
+                "conversion_rule_guide": CONVERSION_RULE_GUIDE,
             }
             context_text = _json_dumps(input_payload)
             system_prompt = build_system_prompt()
             analysis_prompt = (
                 "请对已人工确认的定额进行第七轮换算判断。先进行分析，不要调用工具，不要输出 JSON。\n"
-                "只允许根据项目特征、已确认定额、换算说明和实际值提示判断是否建议换算。\n"
+                "只允许根据项目特征、已确认定额、定额工作内容、工料机显示、定额库换算说明、实际值提示和通用换算规则判断是否建议换算。\n"
+                "请逐条识别差异点，并按强度换算、厚度换算、配合比换算、材料种类换算、定额子目借用、部位调整、系数调整、单位换算进行分类。\n"
                 "第七轮结果只作为换算建议，不允许修改已确认定额，也不要改写工程量系数。\n"
-                "如果某条定额未查询到换算说明，应明确说明默认不建议换算。\n\n"
+                "定额库换算说明优先级最高；未查询到定额库换算说明时，不允许编造依据，如仍建议换算必须明确需要人工复核。\n\n"
                 f"【输入数据】\n{context_text}"
             )
             conversion_analysis = ""
@@ -1408,8 +1500,13 @@ def pricing_task_conversion_check_stream(run_id: int):
             submit_prompt = (
                 "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
                 "必须覆盖每一条已确认定额。\n"
+                "difference_points 填写项目特征与定额工作内容/工料机显示的差异点；无差异填空数组。\n"
+                "conversion_category 只能是 material、process、measurement、none、unknown。\n"
+                "conversion_type 只能是强度换算、厚度换算、配合比换算、材料种类换算、定额子目借用、部位调整、系数调整、单位换算、none、unknown。\n"
+                "basis 必须写明依据。命中定额库换算说明时引用说明；没有定额库依据时写明“未查询到定额库换算说明”。\n"
+                "suggested_action 写清建议处理动作。requires_manual_review 表示是否需要人工复核。\n"
                 "matched_rules 只能填写命中的换算说明；没有命中时填写空数组。\n"
-                "没有换算说明时 needs_conversion=false，reason 写明“未查询到换算说明，默认不建议换算”。\n"
+                "没有定额库换算说明时，不允许伪造依据；如 needs_conversion=true，则 requires_manual_review 必须为 true。\n"
                 "suggested_qty_factor 只是建议值，不代表写回，也不要修改已确认结果。\n"
                 "confidence 只能是 high、medium、low。\n\n"
                 f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
