@@ -1,4 +1,4 @@
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8005'
 
 export interface Period {
   id: number
@@ -1002,6 +1002,7 @@ export interface PricingKbBoqItem {
   name: string
   unit: string | null
   chapter_name: string | null
+  chapter_path: string[]
   candidate_count: number
 }
 
@@ -1066,6 +1067,28 @@ export interface PricingKbConversionRule {
   group_no: number | null
 }
 
+export interface QuotaCostBreakdown {
+  dj: number | null
+  rgf: number | null
+  clf: number | null
+  jxf: number | null
+  zcf: number | null
+  sbf: number | null
+  glf: number | null
+  lr: number | null
+  aqwmsgf: number | null
+  qtcsf: number | null
+  gf: number | null
+  sj: number | null
+}
+
+export interface QuotaInputPromptRule {
+  prompt: string | null
+  adjustment_code: string | null
+  base_value: number | null
+  increment_unit: number | null
+}
+
 export interface PricingKbCandidate {
   candidate_id: number
   quota_item: {
@@ -1077,6 +1100,7 @@ export interface PricingKbCandidate {
     unit: string | null
     work_content: string | null
     chapter_name: string | null
+    cost_breakdown: QuotaCostBreakdown
   }
   target_link: {
     link_status: string
@@ -1087,6 +1111,7 @@ export interface PricingKbCandidate {
   resource_summary: PricingKbResourceSummary[]
   resource_count: number
   conversion_rules: PricingKbConversionRule[]
+  input_prompt_rules: QuotaInputPromptRule[]
 }
 
 export interface PricingKbCandidateResponse {
@@ -1322,6 +1347,20 @@ export interface PricingTaskConversionResourceChange {
   note: string
 }
 
+export interface PricingTaskResourceAdjustment {
+  action: 'replace' | 'update_quantity' | 'add' | 'remove'
+  source_code: string
+  source_name: string
+  target_code: string
+  target_name: string
+  target_unit: string
+  resource_type: number
+  original_quantity: number
+  suggested_quantity: number
+  reason: string
+  requires_manual_review: boolean
+}
+
 export interface PricingTaskConfirmedResult {
   dekid: number
   dezmid: number
@@ -1351,6 +1390,7 @@ export interface PricingTaskConversionItem {
   suggested_action?: string
   requires_manual_review?: boolean
   matched_rules: PricingTaskConversionRule[]
+  resource_adjustments?: PricingTaskResourceAdjustment[]
   resources?: PricingTaskConversionResource[]
   conversion_rules?: PricingTaskConversionRule[]
   input_prompts?: string[]
@@ -1614,9 +1654,23 @@ export interface QuotaTreeItemDetail {
   item: QuotaTreeItem & {
     review_message: string | null
   }
+  cost_breakdown: QuotaCostBreakdown
   resources: QuotaTreeResource[]
   conversion_rules: QuotaTreeConversionRule[]
   input_prompts: string[]
+  input_prompt_rules: QuotaInputPromptRule[]
+}
+
+export interface QuotaInputPromptItem {
+  dekid: number
+  library_name: string
+  quota_item_id: number
+  quota_code: string | null
+  quota_name: string
+  unit: string | null
+  chapter_name: string | null
+  prompt_count: number
+  prompt_rules: QuotaInputPromptRule[]
 }
 
 export const fetchPricingKbSummary = () =>
@@ -1639,6 +1693,23 @@ export const fetchQuotaTreeChapter = (dekid: number, chapterId: number) =>
 
 export const fetchQuotaTreeItemDetail = (dekid: number, itemId: number) =>
   req<QuotaTreeItemDetail>(`/api/pricing-kb/quota-tree/items/${itemId}?dekid=${dekid}`)
+
+export const fetchQuotaTreeItemDetailByCode = (dekid: number, code: string) =>
+  req<QuotaTreeItemDetail>(`/api/pricing-kb/quota-tree/item-by-code/${encodeURIComponent(code)}?dekid=${dekid}`)
+
+export function fetchQuotaInputPrompts(params: {
+  library_id?: number | null
+  q?: string
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.q) query.set('q', params.q)
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<PricingKbList<QuotaInputPromptItem>>(`/api/pricing-kb/quota-input-prompts?${query}`)
+}
 
 export function fetchPricingKbBoqItems(params: {
   q?: string
@@ -1690,8 +1761,10 @@ export function fetchPricingKbQuotaItems(params: {
   return req<PricingKbList<PricingKbQuotaItem>>(`/api/pricing-kb/quota-items?${query}`)
 }
 
-export const fetchPricingKbCandidates = (boqItemId: number) =>
-  req<PricingKbCandidateResponse>(`/api/pricing-kb/boq-items/${boqItemId}/candidates`)
+export const fetchPricingKbCandidates = (boqItemId: number, libraryId: number) =>
+  req<PricingKbCandidateResponse>(
+    `/api/pricing-kb/boq-items/${boqItemId}/candidates?qdkid=${libraryId}`,
+  )
 
 export function fetchPricingKbImportRuns(page = 1, pageSize = 20) {
   return req<PricingKbList<PricingKbImportRun>>(

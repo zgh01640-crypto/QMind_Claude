@@ -26,6 +26,17 @@ def _json_dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
+def _parse_json_content(content: str | None) -> dict[str, Any]:
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0].strip()
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON result must be an object")
+    return parsed
+
+
 def _sse(data: dict[str, Any]) -> str:
     return f"data: {_json_dumps(data)}\n\n"
 
@@ -292,6 +303,42 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                                     "additionalProperties": False,
                                 },
                             },
+                            "resource_adjustments": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "action": {
+                                            "type": "string",
+                                            "enum": ["replace", "update_quantity", "add", "remove"],
+                                        },
+                                        "source_code": {"type": "string"},
+                                        "source_name": {"type": "string"},
+                                        "target_code": {"type": "string"},
+                                        "target_name": {"type": "string"},
+                                        "target_unit": {"type": "string"},
+                                        "resource_type": {"type": "integer"},
+                                        "original_quantity": {"type": "number"},
+                                        "suggested_quantity": {"type": "number"},
+                                        "reason": {"type": "string"},
+                                        "requires_manual_review": {"type": "boolean"},
+                                    },
+                                    "required": [
+                                        "action",
+                                        "source_code",
+                                        "source_name",
+                                        "target_code",
+                                        "target_name",
+                                        "target_unit",
+                                        "resource_type",
+                                        "original_quantity",
+                                        "suggested_quantity",
+                                        "reason",
+                                        "requires_manual_review",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                            },
                             "missing_inputs": {"type": "array", "items": {"type": "string"}},
                             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                         },
@@ -310,6 +357,7 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                             "suggested_action",
                             "requires_manual_review",
                             "matched_rules",
+                            "resource_adjustments",
                             "missing_inputs",
                             "confidence",
                         ],
@@ -626,7 +674,29 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] submit conversion check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
-    raise last_error or RuntimeError("submit conversion check failed")
+    try:
+        json_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    "工具参数生成失败。请改用 JSON Output，仅输出一个合法 JSON 对象，不要使用 Markdown。"
+                    "JSON 顶层必须包含 items 和 issues，字段结构与 submit_conversion_check 完全一致。"
+                ),
+            },
+        ]
+        resp = _client(thinking=False).chat.completions.create(
+            model=_model(),
+            messages=json_messages,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+            max_tokens=8000,
+            stream=False,
+        )
+        return _parse_json_content(resp.choices[0].message.content)
+    except Exception as exc:
+        print(f"[pricing-task] conversion JSON fallback error: {exc}", file=sys.stderr, flush=True)
+        raise exc from last_error
 
 
 def _normalize_matches(raw_match: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -835,6 +905,7 @@ def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = N
                 "suggested_action": "不自动换算，必要时人工复核。",
                 "requires_manual_review": bool(item.get("resources")),
                 "matched_rules": [],
+                "resource_adjustments": [],
                 "resources": item.get("resources", []),
                 "conversion_rules": item.get("conversion_rules", []),
                 "input_prompts": item.get("input_prompts", []),
@@ -882,6 +953,55 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
         if conversion_type not in allowed_types:
             conversion_type = "unknown"
         has_matched_rules = bool(matched_rules)
+        resource_by_code = {
+            str(resource.get("code") or ""): resource
+            for resource in confirmed.get("resources", [])
+            if resource.get("code")
+        }
+        resource_adjustments = []
+        for adjustment in item.get("resource_adjustments", []):
+            if not isinstance(adjustment, dict):
+                continue
+            action = str(adjustment.get("action") or "")
+            if action not in {"replace", "update_quantity", "add", "remove"}:
+                continue
+            source_code = str(adjustment.get("source_code") or "")
+            source = resource_by_code.get(source_code)
+            if action != "add" and not source:
+                continue
+            try:
+                original_quantity = float(
+                    adjustment.get(
+                        "original_quantity",
+                        source.get("quantity") if source else 0,
+                    )
+                    or 0
+                )
+                suggested_quantity = float(adjustment.get("suggested_quantity", original_quantity) or 0)
+                resource_type = int(
+                    adjustment.get(
+                        "resource_type",
+                        source.get("type") if source else 2,
+                    )
+                    or 2
+                )
+            except Exception:
+                continue
+            resource_adjustments.append(
+                {
+                    "action": action,
+                    "source_code": source_code,
+                    "source_name": str(adjustment.get("source_name") or (source.get("name") if source else "")),
+                    "target_code": str(adjustment.get("target_code") or ""),
+                    "target_name": str(adjustment.get("target_name") or ""),
+                    "target_unit": str(adjustment.get("target_unit") or (source.get("unit") if source else "")),
+                    "resource_type": resource_type,
+                    "original_quantity": original_quantity,
+                    "suggested_quantity": suggested_quantity,
+                    "reason": str(adjustment.get("reason") or ""),
+                    "requires_manual_review": bool(adjustment.get("requires_manual_review", True)),
+                }
+            )
         normalized.append(
             {
                 "dekid": confirmed["dekid"],
@@ -898,6 +1018,7 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
                 "suggested_action": str(item.get("suggested_action") or ""),
                 "requires_manual_review": bool(item.get("requires_manual_review") or (item.get("needs_conversion") and not has_matched_rules)),
                 "matched_rules": matched_rules,
+                "resource_adjustments": resource_adjustments,
                 "resources": [
                     {
                         "code": str(resource.get("code") or ""),
@@ -1552,6 +1673,11 @@ def pricing_task_conversion_check_stream(run_id: int):
                 "difference_points 填写项目特征与定额工作内容/工料机显示的差异点；无差异填空数组。\n"
                 "conversion_category 只能是 material、process、measurement、none、unknown。\n"
                 "conversion_type 只能是强度换算、厚度换算、配合比换算、材料种类换算、定额子目借用、部位调整、系数调整、单位换算、none、unknown。\n"
+                "resource_adjustments 用于提交具体工料机调整建议。发现材料名称、牌号、强度、规格、直径、厚度或配合比与项目特征不一致时，不能只写人工复核，必须填写对应调整项。\n"
+                "replace 表示替换现有工料机；source_code/source_name 必须来自输入的 resources；target_name 必须按项目特征写出目标材料完整名称。库中无法确定目标编码时 target_code 填空字符串。\n"
+                "目标材料名称必须忠实保留项目特征中的牌号、规格和直径原文，不得自行把 HRB300 改成 HRB400E、HPB300 或其他牌号。若项目特征疑似矛盾，应在 reason/issues 中提示，但 resource_adjustments.target_name 仍按项目特征原文生成。\n"
+                "update_quantity 表示仅调整含量；add/remove 表示新增或删除工料机。未涉及工料机调整时 resource_adjustments 填空数组。\n"
+                "original_quantity 使用原工料机含量；没有明确依据改变含量时 suggested_quantity 保持原值，并标记 requires_manual_review=true。\n"
                 "basis 必须写明依据。命中定额库换算说明时引用说明；没有定额库依据时写明“未查询到定额库换算说明”。\n"
                 "suggested_action 写清建议处理动作。requires_manual_review 表示是否需要人工复核。\n"
                 "matched_rules 只能填写命中的换算说明；没有命中时填写空数组。\n"

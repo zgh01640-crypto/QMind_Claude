@@ -24,10 +24,18 @@ SQLITE_TABLES = {
     "TQDK_TZJMC": ("tqdk_tzjmc", ["qdkid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, QDKID, ID, PID, ZJMC, ZJSM FROM TQDK_TZJMC"),
     "TDEK_TZJMC": ("tdek_tzjmc", ["dekid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, DEKID, ID, PID, ZJMC, ZJSM FROM TDEK_TZJMC"),
     "TQDK_TQDZM": ("tqdk_tqdzm", ["qdkid", "id", "zmbh", "zmmc", "dw", "zjh"], "SELECT rowid, QDKID, ID, ZMBH, ZMMC, DW, ZJH FROM TQDK_TQDZM"),
-    "TDEK_TDEZM": ("tdek_tdezm", ["dekid", "id", "zmbh", "zmmc", "dw", "gznr", "zjh"], "SELECT rowid, DEKID, ID, ZMBH, ZMMC, DW, GZNR, ZJH FROM TDEK_TDEZM"),
+    "TDEK_TDEZM": (
+        "tdek_tdezm",
+        ["dekid", "id", "zmbh", "zmmc", "dw", "gznr", "zjh", "dj", "rgf", "clf", "jxf", "zcf", "sbf", "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj"],
+        "SELECT rowid, DEKID, ID, ZMBH, ZMMC, DW, GZNR, ZJH, DJ, RGF, CLF, JXF, ZCF, SBF, GLF, LR, AQWMSGF, QTCSF, GF, SJ FROM TDEK_TDEZM",
+    ),
     "TDEK_TZMGC": ("tdek_tzmgc", ["dekid", "dezmid", "zmbh", "zmmc", "dw", "gcl", "lx"], "SELECT rowid, DEKID, DEZMID, ZMBH, ZMMC, DW, GCL, LX FROM TDEK_TZMGC"),
     "TDEK_TZNHS": ("tdek_tznhs", ["dekid", "dezmid", "tsxx", "hssm", "groupno"], "SELECT rowid, DEKID, DEZMID, TSXX, HSSM, GROUPNO FROM TDEK_TZNHS"),
-    "TDEK_TZHHS": ("tdek_tzhhs", ["dekid", "dezmid", "tsxx"], "SELECT rowid, DEKID, DEZMID, TSXX FROM TDEK_TZHHS"),
+    "TDEK_TZHHS": (
+        "tdek_tzhhs",
+        ["dekid", "dezmid", "tsxx", "zmbh", "jcz", "zjdw"],
+        "SELECT rowid, DEKID, DEZMID, TSXX, ZMBH, JCZ, ZJDW FROM TDEK_TZHHS",
+    ),
     "TQDK_TQDZY": ("tqdk_tqdzy", ["qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"], "SELECT rowid, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY"),
 }
 
@@ -40,6 +48,11 @@ RESOURCE_TYPES = {
     6: "设备",
     22: "使用费",
 }
+
+QUOTA_COST_COLUMNS = [
+    "dj", "rgf", "clf", "jxf", "zcf", "sbf",
+    "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj",
+]
 
 
 def sha256_file(path: Path) -> str:
@@ -146,7 +159,15 @@ def import_source_table(sqlite_cur: sqlite3.Cursor, pg, source_hash: str, source
     """
 
     total = 0
-    sqlite_cur.execute(select_sql)
+    source_columns = {
+        str(row[1]).upper()
+        for row in sqlite_cur.execute(f"PRAGMA table_info({source_table})")
+    }
+    select_columns = [
+        col.upper() if col.upper() in source_columns else f"NULL AS {col.upper()}"
+        for col in pg_columns
+    ]
+    sqlite_cur.execute(f"SELECT rowid, {', '.join(select_columns)} FROM {source_table}")
     while True:
         rows = sqlite_cur.fetchmany(10000)
         if not rows:
@@ -158,6 +179,250 @@ def import_source_table(sqlite_cur: sqlite3.Cursor, pg, source_hash: str, source
             execute_values(cur, insert_sql, values, page_size=10000)
         total += len(rows)
     return total
+
+
+def load_replacement_staging(
+    sqlite_cur: sqlite3.Cursor,
+    pg,
+    source_hash: str,
+    source_table: str,
+    staging_table: str,
+) -> int:
+    _, pg_columns, _ = SQLITE_TABLES[source_table]
+    all_columns = pg_columns + ["source_file_sha256", "source_rowid"]
+    source_columns = {
+        str(row[1]).upper()
+        for row in sqlite_cur.execute(f"PRAGMA table_info({source_table})")
+    }
+    missing = [col for col in pg_columns if col.upper() not in source_columns]
+    if missing:
+        raise RuntimeError(f"{source_table} is missing required columns: {', '.join(missing)}")
+    sqlite_cur.execute(
+        f"SELECT rowid, {', '.join(col.upper() for col in pg_columns)} FROM {source_table}"
+    )
+    insert_sql = f"""
+        INSERT INTO {staging_table} ({", ".join(all_columns)})
+        VALUES %s
+    """
+    total = 0
+    while True:
+        rows = sqlite_cur.fetchmany(10000)
+        if not rows:
+            break
+        values = [
+            tuple(row[col.upper()] for col in pg_columns) + (source_hash, row["rowid"])
+            for row in rows
+        ]
+        with pg.cursor() as cur:
+            execute_values(cur, insert_sql, values, page_size=10000)
+        total += len(rows)
+    return total
+
+
+def validate_replacement_staging(pg, expected_quota: int, expected_prompts: int) -> dict[str, int]:
+    with pg.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM staging_tdek_tdezm")
+        quota_count = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) FROM staging_tdek_tzhhs")
+        prompt_count = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT dekid, id
+                FROM staging_tdek_tdezm
+                GROUP BY dekid, id
+                HAVING COUNT(*) > 1
+            ) duplicates
+            """
+        )
+        duplicate_quota_keys = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM staging_tdek_tzhhs h
+            LEFT JOIN staging_tdek_tdezm q
+              ON q.dekid=h.dekid AND q.id=h.dezmid
+            WHERE q.id IS NULL
+            """
+        )
+        missing_prompt_items = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM staging_tdek_tzhhs h
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM staging_tdek_tdezm q
+                WHERE q.dekid=h.dekid AND q.zmbh=h.zmbh
+            )
+            """
+        )
+        missing_adjustment_codes = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM staging_tdek_tdezm
+            WHERE dj IS NULL OR rgf IS NULL OR clf IS NULL OR jxf IS NULL
+               OR zcf IS NULL OR sbf IS NULL OR glf IS NULL OR lr IS NULL
+               OR aqwmsgf IS NULL OR qtcsf IS NULL OR gf IS NULL OR sj IS NULL
+            """
+        )
+        null_cost_rows = int(cur.fetchone()[0])
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM staging_tdek_tdezm
+            WHERE ABS(
+                dj - (rgf + clf + jxf + zcf + sbf + glf + lr
+                      + aqwmsgf + qtcsf + gf + sj)
+            ) > 0.02
+            """
+        )
+        cost_mismatch_rows = int(cur.fetchone()[0])
+
+    validation = {
+        "quota_count": quota_count,
+        "prompt_count": prompt_count,
+        "duplicate_quota_keys": duplicate_quota_keys,
+        "missing_prompt_items": missing_prompt_items,
+        "missing_adjustment_codes": missing_adjustment_codes,
+        "null_cost_rows": null_cost_rows,
+        "cost_mismatch_rows": cost_mismatch_rows,
+    }
+    if quota_count != expected_quota or prompt_count != expected_prompts:
+        raise RuntimeError(f"replacement count mismatch: {validation}")
+    if any(validation[key] for key in validation if key not in {"quota_count", "prompt_count"}):
+        raise RuntimeError(f"replacement validation failed: {validation}")
+    return validation
+
+
+def replace_quota_tables(source: Path, should_link: bool) -> dict[str, Any]:
+    source = resolve_source(source).resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    source_hash = sha256_file(source)
+    inspection = inspect_sqlite(source)
+    if inspection["quick_check"] != "ok":
+        raise RuntimeError(f"SQLite quick_check failed: {inspection['quick_check']}")
+
+    load_dotenv(".env")
+    sqlite_conn = sqlite_connect(source)
+    pg = get_connection()
+    run_id: int | None = None
+    try:
+        apply_schema(pg)
+        run_id = insert_run(pg, source, source_hash)
+        pg.commit()
+
+        with pg.cursor() as cur:
+            cur.execute("CREATE TEMP TABLE staging_tdek_tdezm (LIKE tdek_tdezm INCLUDING DEFAULTS) ON COMMIT DROP")
+            cur.execute("CREATE TEMP TABLE staging_tdek_tzhhs (LIKE tdek_tzhhs INCLUDING DEFAULTS) ON COMMIT DROP")
+
+        sqlite_cur = sqlite_conn.cursor()
+        quota_count = load_replacement_staging(
+            sqlite_cur, pg, source_hash, "TDEK_TDEZM", "staging_tdek_tdezm"
+        )
+        prompt_count = load_replacement_staging(
+            sqlite_cur, pg, source_hash, "TDEK_TZHHS", "staging_tdek_tzhhs"
+        )
+        validation = validate_replacement_staging(
+            pg,
+            int(inspection["quota_items"]),
+            int(inspection["input_prompts"]),
+        )
+
+        quota_columns = [
+            "zmbh", "zmmc", "dw", "gznr", "zjh", *QUOTA_COST_COLUMNS,
+            "source_file_sha256", "source_rowid",
+        ]
+        with pg.cursor() as cur:
+            assignments = ", ".join(f"{col}=s.{col}" for col in quota_columns)
+            cur.execute(
+                f"""
+                UPDATE tdek_tdezm t
+                SET {assignments}, updated_at=NOW()
+                FROM staging_tdek_tdezm s
+                WHERE t.dekid=s.dekid AND t.id=s.id
+                """
+            )
+            updated_quota = cur.rowcount
+            cur.execute(
+                """
+                INSERT INTO tdek_tdezm
+                    (dekid, id, zmbh, zmmc, dw, gznr, zjh,
+                     dj, rgf, clf, jxf, zcf, sbf, glf, lr, aqwmsgf, qtcsf, gf, sj,
+                     source_file_sha256, source_rowid)
+                SELECT s.dekid, s.id, s.zmbh, s.zmmc, s.dw, s.gznr, s.zjh,
+                       s.dj, s.rgf, s.clf, s.jxf, s.zcf, s.sbf, s.glf, s.lr,
+                       s.aqwmsgf, s.qtcsf, s.gf, s.sj,
+                       s.source_file_sha256, s.source_rowid
+                FROM staging_tdek_tdezm s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tdek_tdezm t
+                    WHERE t.dekid=s.dekid AND t.id=s.id
+                )
+                """
+            )
+            inserted_quota = cur.rowcount
+            cur.execute(
+                """
+                DELETE FROM tdek_tdezm t
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM staging_tdek_tdezm s
+                    WHERE s.dekid=t.dekid AND s.id=t.id
+                )
+                """
+            )
+            deleted_quota = cur.rowcount
+
+            cur.execute("DELETE FROM tdek_tzhhs")
+            deleted_prompts = cur.rowcount
+            cur.execute(
+                """
+                INSERT INTO tdek_tzhhs
+                    (dekid, dezmid, tsxx, zmbh, jcz, zjdw,
+                     source_file_sha256, source_rowid)
+                SELECT dekid, dezmid, tsxx, zmbh, jcz, zjdw,
+                       source_file_sha256, source_rowid
+                FROM staging_tdek_tzhhs
+                """
+            )
+            inserted_prompts = cur.rowcount
+
+        link_counts = link_targets(pg, source_hash) if should_link else {
+            "matched": 0, "review": 0, "unmatched": 0
+        }
+        stats = {
+            "mode": "replace_quota_tables",
+            "source_file_sha256": source_hash,
+            **inspection,
+            "validation": validation,
+            "tdek_tdezm": {
+                "updated": updated_quota,
+                "inserted": inserted_quota,
+                "deleted": deleted_quota,
+            },
+            "tdek_tzhhs": {
+                "deleted": deleted_prompts,
+                "inserted": inserted_prompts,
+            },
+            "target_links": link_counts,
+        }
+        finalize_run(pg, run_id, "done", stats)
+        pg.commit()
+        return stats
+    except Exception as exc:
+        pg.rollback()
+        if run_id is not None:
+            try:
+                finalize_run(pg, run_id, "error", {}, str(exc))
+                pg.commit()
+            except Exception:
+                pg.rollback()
+        raise
+    finally:
+        sqlite_conn.close()
+        pg.close()
 
 
 def record_import_issues(pg, sqlite_cur: sqlite3.Cursor, source_hash: str, run_id: int) -> dict[str, int]:
@@ -376,14 +641,30 @@ def main() -> None:
     parser.add_argument("--link-targets", action="store_true", default=True)
     parser.add_argument("--no-link-targets", action="store_false", dest="link_targets")
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument(
+        "--replace-quota-tables",
+        action="store_true",
+        help="Replace only TDEK_TDEZM and TDEK_TZHHS from the source database",
+    )
     args = parser.parse_args()
 
-    result = import_pricing_kb(
-        source=args.source,
-        force=args.force,
-        report_only=args.report_only,
-        should_link=args.link_targets,
-    )
+    if args.replace_quota_tables:
+        if args.report_only:
+            source = resolve_source(args.source).resolve()
+            result = {
+                "source": str(source),
+                "source_file_sha256": sha256_file(source),
+                **inspect_sqlite(source),
+            }
+        else:
+            result = replace_quota_tables(args.source, args.link_targets)
+    else:
+        result = import_pricing_kb(
+            source=args.source,
+            force=args.force,
+            report_only=args.report_only,
+            should_link=args.link_targets,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

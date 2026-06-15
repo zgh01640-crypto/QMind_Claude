@@ -26,6 +26,7 @@ function isActive(pathname: string, href: string) {
   // /boq 只匹配 /boq/[数字]（项目详情），不匹配 /boq/debug 等具名子路由
   if (href === '/boq') return /^\/boq\/\d/.test(pathname)
   if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
+  if (href === '/quota-management') return pathname.startsWith('/quota-management') || pathname.startsWith('/quota-input-prompts')
   return pathname.startsWith(href + '/')
 }
 

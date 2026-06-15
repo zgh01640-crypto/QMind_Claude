@@ -202,6 +202,64 @@ function draftResource(resource?: PricingTaskConversionResource): ConversionReso
   }
 }
 
+function applyResourceAdjustments(
+  resources: ConversionResourceDraft[],
+  adjustments: NonNullable<PricingTaskConversionCheck['items'][number]['resource_adjustments']>,
+) {
+  const next = resources.map(resource => ({ ...resource }))
+  for (const adjustment of adjustments) {
+    if (adjustment.action === 'add') {
+      next.push({
+        ...draftResource({
+          code: adjustment.target_code,
+          name: adjustment.target_name,
+          unit: adjustment.target_unit,
+          type: adjustment.resource_type,
+          quantity: adjustment.suggested_quantity,
+        }),
+        original_code: '',
+        original_name: '',
+        original_unit: '',
+        original_type: null,
+        original_quantity: null,
+        adjustment_note: adjustment.reason,
+      })
+      continue
+    }
+    const index = next.findIndex(resource =>
+      adjustment.source_code
+        ? resource.original_code === adjustment.source_code
+        : resource.original_name === adjustment.source_name,
+    )
+    if (index < 0) continue
+    const resource = next[index]
+    if (adjustment.action === 'replace') {
+      next[index] = {
+        ...resource,
+        code: adjustment.target_code,
+        name: adjustment.target_name || resource.name,
+        unit: adjustment.target_unit || resource.unit,
+        type: adjustment.resource_type ?? resource.type,
+        confirmed_quantity: adjustment.suggested_quantity,
+        adjustment_note: adjustment.reason,
+      }
+    } else if (adjustment.action === 'update_quantity') {
+      next[index] = {
+        ...resource,
+        confirmed_quantity: adjustment.suggested_quantity,
+        adjustment_note: adjustment.reason,
+      }
+    } else if (adjustment.action === 'remove') {
+      next[index] = {
+        ...resource,
+        confirmed_quantity: 0,
+        adjustment_note: adjustment.reason,
+      }
+    }
+  }
+  return next
+}
+
 function buildConversionDrafts(result: ItemResult): ConversionConfirmDraft[] {
   const confirmed = result.confirmedResults?.filter(item => item.conversion_confirmed) ?? []
   if (confirmed.length > 0) {
@@ -215,15 +273,18 @@ function buildConversionDrafts(result: ItemResult): ConversionConfirmDraft[] {
       resources: (item.conversion_resources ?? []).map(resource => draftResource(resource)),
     }))
   }
-  return (result.conversionCheck?.items ?? []).map(item => ({
-    dekid: item.dekid,
-    dezmid: item.dezmid,
-    quota_code: item.quota_code,
-    quota_name: item.quota_name,
-    confirmed_qty_factor: item.suggested_qty_factor || 1,
-    conversion_note: item.reason || item.suggested_action || '',
-    resources: (item.resources ?? []).map(resource => draftResource(resource)),
-  }))
+  return (result.conversionCheck?.items ?? []).map(item => {
+    const resources = (item.resources ?? []).map(resource => draftResource(resource))
+    return {
+      dekid: item.dekid,
+      dezmid: item.dezmid,
+      quota_code: item.quota_code,
+      quota_name: item.quota_name,
+      confirmed_qty_factor: item.suggested_qty_factor || 1,
+      conversion_note: item.reason || item.suggested_action || '',
+      resources: applyResourceAdjustments(resources, item.resource_adjustments ?? []),
+    }
+  })
 }
 
 function buildResourceChanges(draft: ConversionConfirmDraft): PricingTaskConversionResourceChange[] {
@@ -600,6 +661,11 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'reasoning_token') {
           updateResult(itemId, s => ({ ...s, reasoning: s.reasoning + evt.token }))
         } else if (evt.type === 'conversion_check') {
+          setConversionDrafts(prev => {
+            const next = new Map(prev)
+            next.delete(itemId)
+            return next
+          })
           updateResult(itemId, s => ({ ...s, conversionCheck: evt.conversion_check, conversionChecking: false }))
         } else if (evt.type === 'step_timing') {
           updateResult(itemId, s => ({
@@ -742,6 +808,15 @@ export default function PricingTaskDetailPage() {
   const canConfirm = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'confirmed'
   const canReject = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'rejected'
   const currentConversionDrafts = selectedItemId ? (conversionDrafts.get(selectedItemId) ?? (currentResult ? buildConversionDrafts(currentResult) : [])) : []
+  const currentActiveStepNo = activeStepNo(currentResult)
+  const currentActiveStep = currentActiveStepNo == null
+    ? undefined
+    : stepBadges(currentResult).find(step => step.no === currentActiveStepNo)
+  const isCurrentStepRunning = Boolean(
+    currentResult?.phase === 'reasoning'
+      || currentResult?.conversionChecking
+      || currentResult?.conversionSaving,
+  )
   const canConfirmConversion = Boolean(
     currentResult?.status === 'confirmed'
       && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))
@@ -892,8 +967,18 @@ export default function PricingTaskDetailPage() {
                     <div className="text-amber-700 font-semibold text-sm">
                       AI 推理过程
                     </div>
-                    {currentResult.phase === 'reasoning' ? (
-                      <span className="inline-block h-4 w-4 rounded-full border-2 border-amber-200 border-t-amber-600 animate-spin" title="运行中" />
+                    {isCurrentStepRunning ? (
+                      <div className="flex items-center gap-2 text-xs font-medium text-amber-700">
+                        <span
+                          className="inline-block h-4 w-4 rounded-full border-2 border-amber-200 border-t-amber-600 animate-spin"
+                          title={currentActiveStep ? `第 ${currentActiveStep.no} 步：${currentActiveStep.title}` : '运行中'}
+                        />
+                        <span>
+                          {currentActiveStep
+                            ? `第 ${currentActiveStep.no} 步：${currentActiveStep.title}`
+                            : '正在处理'}
+                        </span>
+                      </div>
                     ) : (
                       <span className="text-xs text-gray-500">{statusLabel(currentResult.status)}</span>
                     )}
@@ -1155,6 +1240,27 @@ export default function PricingTaskDetailPage() {
                                   <div className="mt-2 rounded bg-white px-2 py-1 text-gray-700">
                                     {item.basis && <div><span className="font-semibold text-gray-800">依据：</span>{item.basis}</div>}
                                     {item.suggested_action && <div className="mt-1"><span className="font-semibold text-gray-800">建议动作：</span>{item.suggested_action}</div>}
+                                  </div>
+                                )}
+                                {(item.resource_adjustments?.length ?? 0) > 0 && (
+                                  <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1">
+                                    <div className="mb-1 font-semibold text-amber-900">工料机调整建议</div>
+                                    <ul className="space-y-1">
+                                      {(item.resource_adjustments ?? []).map((adjustment, idx) => (
+                                        <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">
+                                          <div>
+                                            <span className="font-mono text-amber-800">{adjustment.source_code || '-'}</span>
+                                            <span className="ml-1">{adjustment.source_name || '-'}</span>
+                                            <span className="mx-2 text-amber-700">→</span>
+                                            <span className="font-semibold text-emerald-800">{adjustment.target_name || '删除'}</span>
+                                          </div>
+                                          <div className="mt-0.5 text-gray-500">
+                                            含量：{adjustment.original_quantity} → {adjustment.suggested_quantity}
+                                            {adjustment.reason && <span className="ml-2">依据：{adjustment.reason}</span>}
+                                          </div>
+                                        </li>
+                                      ))}
+                                    </ul>
                                   </div>
                                 )}
                                 {item.matched_rules.length > 0 && (

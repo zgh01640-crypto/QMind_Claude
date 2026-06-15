@@ -18,6 +18,18 @@ RESOURCE_TYPES = {
     22: "使用费",
 }
 
+COST_FIELDS = (
+    "dj", "rgf", "clf", "jxf", "zcf", "sbf",
+    "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj",
+)
+
+
+def cost_breakdown(values: tuple[Any, ...] | list[Any]) -> dict[str, float | None]:
+    return {
+        field: float(value) if value is not None else None
+        for field, value in zip(COST_FIELDS, values)
+    }
+
 
 def page_bounds(page: int, page_size: int) -> tuple[int, int]:
     return page_size, (page - 1) * page_size
@@ -275,7 +287,9 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
                 """
                 SELECT i.id, i.dekid, i.zmbh, i.zmmc, i.dw, i.gznr, i.zjh, c.zjmc AS chapter_name,
                        COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id, link.review_message
+                       link.target_table, link.target_item_id, link.review_message,
+                       i.dj, i.rgf, i.clf, i.jxf, i.zcf, i.sbf,
+                       i.glf, i.lr, i.aqwmsgf, i.qtcsf, i.gf, i.sj
                 FROM tdek_tdezm i
                 LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
                 LEFT JOIN pricing_kb_original_target_links link
@@ -301,6 +315,7 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
                 "target_item_id": row[10],
                 "review_message": row[11],
             }
+            item_cost_breakdown = cost_breakdown(row[12:24])
 
             cur.execute(
                 """
@@ -338,19 +353,149 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
 
             cur.execute(
                 """
-                SELECT tsxx
+                SELECT tsxx, zmbh, jcz, zjdw
                 FROM tdek_tzhhs
                 WHERE dekid=%s AND dezmid=%s
                 ORDER BY source_rowid
                 """,
                 (dekid, quota_item_id),
             )
-            input_prompts = [r[0] for r in cur.fetchall()]
+            input_prompt_rows = cur.fetchall()
+            input_prompts = [r[0] for r in input_prompt_rows]
+            input_prompt_rules = [
+                {
+                    "prompt": r[0],
+                    "adjustment_code": r[1],
+                    "base_value": float(r[2]) if r[2] is not None else None,
+                    "increment_unit": float(r[3]) if r[3] is not None else None,
+                }
+                for r in input_prompt_rows
+            ]
         return {
             "item": item,
+            "cost_breakdown": item_cost_breakdown,
             "resources": resources,
             "conversion_rules": conversion_rules,
             "input_prompts": input_prompts,
+            "input_prompt_rules": input_prompt_rules,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-kb/quota-tree/item-by-code/{quota_code}")
+def get_quota_tree_item_detail_by_code(quota_code: str, dekid: int):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM tdek_tdezm
+                WHERE dekid=%s AND zmbh=%s
+                ORDER BY id
+                LIMIT 1
+                """,
+                (dekid, quota_code),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="quota item not found")
+            quota_item_id = row[0]
+    finally:
+        conn.close()
+    return get_quota_tree_item_detail(quota_item_id, dekid)
+
+
+@router.get("/pricing-kb/quota-input-prompts")
+def list_quota_input_prompts(
+    library_id: int | None = None,
+    q: str | None = Query(None, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if library_id:
+        clauses.append("i.dekid=%s")
+        params.append(library_id)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        clauses.append("(i.zmbh ILIKE %s OR i.zmmc ILIKE %s OR h.tsxx ILIKE %s OR h.zmbh ILIKE %s)")
+        params.extend([like, like, like, like])
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    limit, offset = page_bounds(page, page_size)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM (
+                    SELECT i.dekid, i.id
+                    FROM tdek_tzhhs h
+                    JOIN tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
+                    {where_sql}
+                    GROUP BY i.dekid, i.id
+                ) s
+                """,
+                params,
+            )
+            total = cur.fetchone()[0]
+
+            cur.execute(
+                f"""
+                SELECT i.dekid, l.mc AS library_name, i.id, i.zmbh, i.zmmc, i.dw,
+                       c.zjmc AS chapter_name,
+                       COUNT(*) AS prompt_count,
+                       jsonb_agg(
+                         jsonb_build_object(
+                           'prompt', h.tsxx,
+                           'adjustment_code', h.zmbh,
+                           'base_value', h.jcz,
+                           'increment_unit', h.zjdw
+                         )
+                         ORDER BY h.source_rowid
+                       ) AS prompt_rules
+                FROM tdek_tzhhs h
+                JOIN tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
+                JOIN tlibs l ON l.id=i.dekid
+                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                {where_sql}
+                GROUP BY i.dekid, l.mc, i.id, i.zmbh, i.zmmc, i.dw, c.zjmc
+                ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            rows = cur.fetchall()
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "dekid": r[0],
+                    "library_name": r[1],
+                    "quota_item_id": r[2],
+                    "quota_code": r[3],
+                    "quota_name": r[4],
+                    "unit": r[5],
+                    "chapter_name": r[6],
+                    "prompt_count": r[7],
+                    "prompt_rules": [
+                        {
+                            "prompt": rule.get("prompt"),
+                            "adjustment_code": rule.get("adjustment_code"),
+                            "base_value": float(rule["base_value"]) if rule.get("base_value") is not None else None,
+                            "increment_unit": float(rule["increment_unit"]) if rule.get("increment_unit") is not None else None,
+                        }
+                        for rule in (r[8] or [])
+                    ],
+                }
+                for r in rows
+            ],
         }
     finally:
         conn.close()
@@ -491,15 +636,34 @@ def list_boq_items(
             total = cur.fetchone()[0]
             cur.execute(
                 f"""
+                WITH RECURSIVE chapter_paths AS (
+                    SELECT c.qdkid, c.id, c.pid, c.zjmc,
+                           ARRAY[c.id] AS path_ids,
+                           ARRAY[c.zjmc]::TEXT[] AS path_names
+                    FROM tqdk_tzjmc c
+                    WHERE COALESCE(c.pid, 0) = 0
+
+                    UNION ALL
+
+                    SELECT child.qdkid, child.id, child.pid, child.zjmc,
+                           parent.path_ids || child.id,
+                           parent.path_names || child.zjmc
+                    FROM tqdk_tzjmc child
+                    JOIN chapter_paths parent
+                      ON parent.qdkid = child.qdkid AND parent.id = child.pid
+                    WHERE NOT child.id = ANY(parent.path_ids)
+                )
                 SELECT i.id, i.qdkid, l.mc AS library_name,
                        i.zmbh, i.zmmc, i.dw, c.zjmc AS chapter_name,
-                       COUNT(cand.source_rowid) AS candidate_count
+                       COUNT(cand.source_rowid) AS candidate_count,
+                       COALESCE(cp.path_names, ARRAY[]::TEXT[]) AS chapter_path
                 FROM tqdk_tqdzm i
                 JOIN tlibs l ON l.id = i.qdkid
                 LEFT JOIN tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
+                LEFT JOIN chapter_paths cp ON cp.qdkid = i.qdkid AND cp.id = i.zjh
                 LEFT JOIN tqdk_tqdzy cand ON cand.qdkid = i.qdkid AND cand.qdzmid = i.id
                 {where_sql}
-                GROUP BY i.id, i.qdkid, l.mc, i.zmbh, i.zmmc, i.dw, c.zjmc
+                GROUP BY i.id, i.qdkid, l.mc, i.zmbh, i.zmmc, i.dw, c.zjmc, cp.path_names
                 ORDER BY i.qdkid, i.zmbh NULLS LAST, i.id
                 LIMIT %s OFFSET %s
                 """,
@@ -520,6 +684,7 @@ def list_boq_items(
                     "unit": r[5],
                     "chapter_name": r[6],
                     "candidate_count": r[7],
+                    "chapter_path": r[8] or [],
                 }
                 for r in rows
             ],
@@ -700,7 +865,7 @@ def list_quota_items(
 
 
 @router.get("/pricing-kb/boq-items/{boq_item_id}/candidates")
-def get_boq_item_candidates(boq_item_id: int):
+def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -710,9 +875,9 @@ def get_boq_item_candidates(boq_item_id: int):
                 FROM tqdk_tqdzm i
                 JOIN tlibs l ON l.id = i.qdkid
                 LEFT JOIN tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
-                WHERE i.id=%s
+                WHERE i.id=%s AND (%s::BIGINT IS NULL OR i.qdkid=%s)
                 """,
-                (boq_item_id,),
+                (boq_item_id, qdkid, qdkid),
             )
             row = cur.fetchone()
             if not row:
@@ -732,7 +897,9 @@ def get_boq_item_candidates(boq_item_id: int):
                 SELECT cand.source_rowid, qi.id, qi.dekid, l.mc AS quota_library_name,
                        qi.zmbh, qi.zmmc, qi.dw, qi.gznr, qc.zjmc AS quota_chapter_name,
                        COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id, link.review_message
+                       link.target_table, link.target_item_id, link.review_message,
+                       qi.dj, qi.rgf, qi.clf, qi.jxf, qi.zcf, qi.sbf,
+                       qi.glf, qi.lr, qi.aqwmsgf, qi.qtcsf, qi.gf, qi.sj
                 FROM tqdk_tqdzy cand
                 JOIN tdek_tdezm qi ON qi.dekid = cand.dekid AND qi.id = cand.dezmid
                 JOIN tlibs l ON l.id = qi.dekid
@@ -749,6 +916,7 @@ def get_boq_item_candidates(boq_item_id: int):
 
             resources_by_quota: dict[tuple[int, int], list[dict[str, Any]]] = {}
             rules_by_quota: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            prompt_rules_by_quota: dict[tuple[int, int], list[dict[str, Any]]] = {}
             if quota_keys:
                 cur.execute(
                     """
@@ -795,6 +963,24 @@ def get_boq_item_candidates(boq_item_id: int):
                         "group_no": group_no,
                     })
 
+                cur.execute(
+                    """
+                    SELECT r.dekid, r.dezmid, r.tsxx, r.zmbh, r.jcz, r.zjdw
+                    FROM tdek_tzhhs r
+                    JOIN (SELECT * FROM unnest(%s::bigint[], %s::bigint[]) AS k(dekid, dezmid)) k
+                      ON k.dekid = r.dekid AND k.dezmid = r.dezmid
+                    ORDER BY r.dekid, r.dezmid, r.source_rowid
+                    """,
+                    ([k[0] for k in quota_keys], [k[1] for k in quota_keys]),
+                )
+                for dekid, dezmid, prompt, adjustment_code, base_value, increment_unit in cur.fetchall():
+                    prompt_rules_by_quota.setdefault((dekid, dezmid), []).append({
+                        "prompt": prompt,
+                        "adjustment_code": adjustment_code,
+                        "base_value": float(base_value) if base_value is not None else None,
+                        "increment_unit": float(increment_unit) if increment_unit is not None else None,
+                    })
+
         candidates = []
         for r in candidate_rows:
             qid = r[1]
@@ -812,6 +998,7 @@ def get_boq_item_candidates(boq_item_id: int):
                     "unit": r[6],
                     "work_content": r[7],
                     "chapter_name": r[8],
+                    "cost_breakdown": cost_breakdown(r[13:25]),
                 },
                 "target_link": {
                     "link_status": r[9],
@@ -822,6 +1009,7 @@ def get_boq_item_candidates(boq_item_id: int):
                 "resource_summary": resources[:8],
                 "resource_count": len(resources),
                 "conversion_rules": rules_by_quota.get(key, []),
+                "input_prompt_rules": prompt_rules_by_quota.get(key, []),
             })
         return {"boq_item": boq_item, "total": len(candidates), "candidates": candidates}
     finally:

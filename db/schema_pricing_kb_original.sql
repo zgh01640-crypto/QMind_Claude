@@ -1,6 +1,8 @@
 -- SQLite-shaped smart pricing knowledge base tables.
 -- Table and column names mirror the SQLite source, lower-cased for PostgreSQL.
 
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE TABLE IF NOT EXISTS pricing_kb_import_runs (
     id                  BIGSERIAL PRIMARY KEY,
     source_file         TEXT NOT NULL,
@@ -91,9 +93,23 @@ CREATE TABLE IF NOT EXISTS tdek_tdezm (
     UNIQUE (source_file_sha256, source_rowid),
     UNIQUE (dekid, id)
 );
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS dj NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS rgf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS clf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS jxf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS zcf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS sbf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS glf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS lr NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS aqwmsgf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS qtcsf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS gf NUMERIC(18,2);
+ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS sj NUMERIC(18,2);
 CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_code ON tdek_tdezm(zmbh);
 CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_chapter ON tdek_tdezm(dekid, zjh);
 CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_name ON tdek_tdezm USING gin (to_tsvector('simple', COALESCE(zmmc, '')));
+CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_code_trgm ON tdek_tdezm USING gin (COALESCE(zmbh, '') gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_name_trgm ON tdek_tdezm USING gin (COALESCE(zmmc, '') gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS tdek_tzmgc (
     dekid               BIGINT,
@@ -136,7 +152,11 @@ CREATE TABLE IF NOT EXISTS tdek_tzhhs (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_file_sha256, source_rowid)
 );
+ALTER TABLE tdek_tzhhs ADD COLUMN IF NOT EXISTS zmbh VARCHAR(64);
+ALTER TABLE tdek_tzhhs ADD COLUMN IF NOT EXISTS jcz NUMERIC(20,6);
+ALTER TABLE tdek_tzhhs ADD COLUMN IF NOT EXISTS zjdw NUMERIC(20,6);
 CREATE INDEX IF NOT EXISTS idx_tdek_tzhhs_item ON tdek_tzhhs(dekid, dezmid);
+CREATE INDEX IF NOT EXISTS idx_tdek_tzhhs_adjustment_code ON tdek_tzhhs(dekid, zmbh);
 
 CREATE TABLE IF NOT EXISTS tqdk_tqdzy (
     qdkid               BIGINT,

@@ -19,6 +19,11 @@ import {
 } from '@/lib/api'
 
 const PAGE_SIZE = 50
+const COST_LABELS = [
+  ['dj', '综合单价'], ['rgf', '人工费'], ['clf', '材料费'], ['jxf', '机械费'],
+  ['zcf', '主材费'], ['sbf', '设备费'], ['glf', '管理费'], ['lr', '利润'],
+  ['aqwmsgf', '安全文明施工费'], ['qtcsf', '其他措施费'], ['gf', '规费'], ['sj', '税金'],
+] as const
 
 type TabKey = 'boq' | 'quota' | 'imports'
 
@@ -198,6 +203,19 @@ function CandidatePanel({
                   {candidate.quota_item.work_content}
                 </div>
               )}
+              <div className="mt-3">
+                <div className="mb-2 text-xs font-semibold text-gray-500">费用构成</div>
+                <div className="grid grid-cols-2 border-l border-t border-gray-200 sm:grid-cols-4 xl:grid-cols-6">
+                  {COST_LABELS.map(([key, label]) => (
+                    <div key={key} className="border-b border-r border-gray-200 px-2 py-1.5">
+                      <div className="text-[11px] text-gray-400">{label}</div>
+                      <div className="mt-0.5 font-mono text-xs font-medium text-gray-800">
+                        {candidate.quota_item.cost_breakdown?.[key]?.toFixed(2) ?? '-'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
               {candidate.resource_summary.length > 0 && (
                 <div className="mt-3 overflow-x-auto">
                   <table className="w-full min-w-[620px] border-collapse text-xs">
@@ -231,6 +249,30 @@ function CandidatePanel({
                       {rule.prompt || rule.description || rule.rule_type}
                     </span>
                   ))}
+                </div>
+              )}
+              {(candidate.input_prompt_rules?.length ?? 0) > 0 && (
+                <div className="mt-3 overflow-x-auto border border-gray-200">
+                  <table className="w-full min-w-[620px] border-collapse text-xs">
+                    <thead className="bg-gray-50 text-gray-500">
+                      <tr>
+                        <th className="px-2 py-1.5 text-left font-medium">实际值提示</th>
+                        <th className="px-2 py-1.5 text-left font-medium">关联换算编号</th>
+                        <th className="px-2 py-1.5 text-right font-medium">基准值</th>
+                        <th className="px-2 py-1.5 text-right font-medium">增减单位</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {(candidate.input_prompt_rules ?? []).map((rule, idx) => (
+                        <tr key={`${candidate.candidate_id}-prompt-${idx}`}>
+                          <td className="px-2 py-1.5 text-gray-700">{rule.prompt ?? '-'}</td>
+                          <td className="px-2 py-1.5 font-mono text-blue-700">{rule.adjustment_code ?? '-'}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">{rule.base_value ?? '-'}</td>
+                          <td className="px-2 py-1.5 text-right font-mono">{rule.increment_unit ?? '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
