@@ -6,12 +6,15 @@ import {
   BoqItem,
   PricingTask,
   PricingTaskConversionCheck,
+  PricingTaskConversionResource,
+  PricingTaskConversionResourceChange,
   PricingTaskEvaluation,
   PricingTaskEvent,
   PricingTaskRun,
   PricingTaskStepTiming,
   QuotaCandidate,
   QuotaMatch,
+  confirmPricingTaskConversion,
   confirmPricingTaskRun,
   fetchAllBoqItems,
   fetchPricingTaskLatestRuns,
@@ -48,6 +51,9 @@ interface ItemResult {
   conversionCheck?: PricingTaskConversionCheck
   conversionChecking?: boolean
   conversionError?: string
+  confirmedResults?: PricingTaskRun['confirmed_results']
+  conversionSaving?: boolean
+  conversionSaveError?: string
   stepTimings?: Record<string, PricingTaskStepTiming>
   error?: string
 }
@@ -73,6 +79,7 @@ function runToResult(run: PricingTaskRun): ItemResult {
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
     conversionCheck: run.conversion_check ?? undefined,
+    confirmedResults: run.confirmed_results ?? undefined,
     stepTimings: run.step_timings ?? undefined,
     error: run.error_message || undefined,
   }
@@ -147,6 +154,111 @@ function resourceTypeLabel(type?: number | null) {
   return '其他'
 }
 
+interface ConversionResourceDraft extends PricingTaskConversionResource {
+  original_code: string
+  original_name: string
+  original_unit: string
+  original_type: number | null
+  original_quantity: number | null
+  confirmed_quantity: number | null
+  adjustment_note: string
+}
+
+interface ConversionConfirmDraft {
+  dekid: number
+  dezmid: number
+  quota_code: string
+  quota_name: string
+  confirmed_qty_factor: number
+  conversion_note: string
+  resources: ConversionResourceDraft[]
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === '' || value == null) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function sameValue(left: unknown, right: unknown) {
+  return String(left ?? '') === String(right ?? '')
+}
+
+function draftResource(resource?: PricingTaskConversionResource): ConversionResourceDraft {
+  const quantity = toNullableNumber(resource?.confirmed_quantity ?? resource?.quantity ?? resource?.original_quantity)
+  const originalQuantity = toNullableNumber(resource?.original_quantity ?? resource?.quantity ?? quantity)
+  return {
+    code: resource?.code ?? '',
+    name: resource?.name ?? '',
+    unit: resource?.unit ?? '',
+    type: resource?.type ?? null,
+    original_code: resource?.code ?? '',
+    original_name: resource?.name ?? '',
+    original_unit: resource?.unit ?? '',
+    original_type: resource?.type ?? null,
+    original_quantity: originalQuantity,
+    confirmed_quantity: quantity,
+    adjustment_note: resource?.adjustment_note ?? '',
+  }
+}
+
+function buildConversionDrafts(result: ItemResult): ConversionConfirmDraft[] {
+  const confirmed = result.confirmedResults?.filter(item => item.conversion_confirmed) ?? []
+  if (confirmed.length > 0) {
+    return confirmed.map(item => ({
+      dekid: item.dekid,
+      dezmid: item.dezmid,
+      quota_code: item.subitem_code,
+      quota_name: item.subitem_name,
+      confirmed_qty_factor: item.qty_factor,
+      conversion_note: item.conversion_note || '',
+      resources: (item.conversion_resources ?? []).map(resource => draftResource(resource)),
+    }))
+  }
+  return (result.conversionCheck?.items ?? []).map(item => ({
+    dekid: item.dekid,
+    dezmid: item.dezmid,
+    quota_code: item.quota_code,
+    quota_name: item.quota_name,
+    confirmed_qty_factor: item.suggested_qty_factor || 1,
+    conversion_note: item.reason || item.suggested_action || '',
+    resources: (item.resources ?? []).map(resource => draftResource(resource)),
+  }))
+}
+
+function buildResourceChanges(draft: ConversionConfirmDraft): PricingTaskConversionResourceChange[] {
+  const changes: PricingTaskConversionResourceChange[] = []
+  for (const resource of draft.resources) {
+    const base = {
+      resource_code: resource.code || resource.original_code,
+      resource_name: resource.name || resource.original_name,
+      resource_type: resource.type ?? resource.original_type,
+      change_type: '人工确认换算',
+      basis: draft.conversion_note || '人工确认换算写回',
+      note: resource.adjustment_note || draft.conversion_note || '',
+    }
+    if (!resource.original_code && resource.code) {
+      changes.push({ ...base, field: 'resource', old_value: null, new_value: resource.name || resource.code })
+    }
+    if (!sameValue(resource.original_code, resource.code)) {
+      changes.push({ ...base, field: 'code', old_value: resource.original_code || null, new_value: resource.code || null })
+    }
+    if (!sameValue(resource.original_name, resource.name)) {
+      changes.push({ ...base, field: 'name', old_value: resource.original_name || null, new_value: resource.name || null })
+    }
+    if (!sameValue(resource.original_unit, resource.unit)) {
+      changes.push({ ...base, field: 'unit', old_value: resource.original_unit || null, new_value: resource.unit || null })
+    }
+    if (!sameValue(resource.original_type, resource.type)) {
+      changes.push({ ...base, field: 'type', old_value: resource.original_type, new_value: resource.type })
+    }
+    if (!sameValue(resource.original_quantity, resource.confirmed_quantity)) {
+      changes.push({ ...base, field: 'quantity', old_value: resource.original_quantity, new_value: resource.confirmed_quantity })
+    }
+  }
+  return changes
+}
+
 function stepBadges(result?: ItemResult) {
   return [
     {
@@ -196,10 +308,22 @@ function stepBadges(result?: ItemResult) {
             ? 'warning'
             : 'success',
     },
+    {
+      no: 8,
+      title: '换算写回',
+      tone: result?.conversionSaving
+        ? 'pending'
+        : result?.confirmedResults?.some(item => item.conversion_confirmed)
+          ? 'success'
+          : result?.status === 'confirmed' && result?.conversionCheck
+            ? 'warning'
+            : 'pending',
+    },
   ] as const
 }
 
 function activeStepNo(result?: ItemResult) {
+  if (result?.conversionSaving) return 8
   if (result?.conversionChecking) return 7
   if (!result || result.phase !== 'reasoning') return null
   if (!result.codeCheck) return 1
@@ -252,6 +376,7 @@ export default function PricingTaskDetailPage() {
   const [featureSaving, setFeatureSaving] = useState(false)
   const [featureEditError, setFeatureEditError] = useState('')
   const [featureImages, setFeatureImages] = useState<Array<{ url: string; name: string; size: number }>>([])
+  const [conversionDrafts, setConversionDrafts] = useState<Map<number, ConversionConfirmDraft[]>>(new Map())
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
@@ -271,6 +396,17 @@ export default function PricingTaskDetailPage() {
   useEffect(() => {
     setQuotaCandidatesExpanded(false)
   }, [selectedItemId])
+
+  useEffect(() => {
+    if (!selectedItemId || !currentResult) return
+    if (!currentResult.conversionCheck && !(currentResult.confirmedResults?.length)) return
+    setConversionDrafts(prev => {
+      if (prev.has(selectedItemId)) return prev
+      const drafts = buildConversionDrafts(currentResult)
+      if (drafts.length === 0) return prev
+      return new Map(prev).set(selectedItemId, drafts)
+    })
+  }, [selectedItemId, currentResult?.conversionCheck, currentResult?.confirmedResults])
 
   useEffect(() => {
     return () => {
@@ -489,6 +625,86 @@ export default function PricingTaskDetailPage() {
     }
   }
 
+  function updateConversionDraft(itemId: number, quotaIndex: number, updater: (draft: ConversionConfirmDraft) => ConversionConfirmDraft) {
+    setConversionDrafts(prev => {
+      const drafts = prev.get(itemId) ?? []
+      return new Map(prev).set(itemId, drafts.map((draft, index) => index === quotaIndex ? updater(draft) : draft))
+    })
+  }
+
+  function updateConversionResource(
+    itemId: number,
+    quotaIndex: number,
+    resourceIndex: number,
+    updater: (resource: ConversionResourceDraft) => ConversionResourceDraft,
+  ) {
+    updateConversionDraft(itemId, quotaIndex, draft => ({
+      ...draft,
+      resources: draft.resources.map((resource, index) => index === resourceIndex ? updater(resource) : resource),
+    }))
+  }
+
+  function addConversionResource(itemId: number, quotaIndex: number) {
+    updateConversionDraft(itemId, quotaIndex, draft => ({
+      ...draft,
+      resources: [...draft.resources, draftResource()],
+    }))
+  }
+
+  async function handleConversionConfirm() {
+    if (!selectedItemId || !currentResult?.runId) return
+    const drafts = conversionDrafts.get(selectedItemId) ?? buildConversionDrafts(currentResult)
+    if (drafts.length === 0) return
+    const itemId = selectedItemId
+    const runId = currentResult.runId
+    updateResult(itemId, s => ({ ...s, conversionSaving: true, conversionSaveError: undefined }))
+    try {
+      const payload = drafts.map(draft => {
+        const resources = draft.resources.map(resource => ({
+          code: resource.code,
+          name: resource.name,
+          unit: resource.unit,
+          type: resource.type,
+          original_quantity: resource.original_quantity,
+          confirmed_quantity: resource.confirmed_quantity,
+          adjustment_note: resource.adjustment_note,
+        }))
+        return {
+          dekid: draft.dekid,
+          dezmid: draft.dezmid,
+          confirmed_qty_factor: draft.confirmed_qty_factor || 1,
+          conversion_note: draft.conversion_note,
+          conversion_resources: resources,
+          conversion_resource_changes: buildResourceChanges(draft),
+        }
+      })
+      await confirmPricingTaskConversion(runId, payload)
+      updateResult(itemId, s => ({
+        ...s,
+        conversionSaving: false,
+        confirmedResults: payload.map(item => ({
+          dekid: item.dekid,
+          dezmid: item.dezmid,
+          subitem_code: drafts.find(draft => draft.dekid === item.dekid && draft.dezmid === item.dezmid)?.quota_code ?? '',
+          subitem_name: drafts.find(draft => draft.dekid === item.dekid && draft.dezmid === item.dezmid)?.quota_name ?? '',
+          qty_factor: item.confirmed_qty_factor,
+          status: 'confirmed',
+          conversion_confirmed: true,
+          conversion_note: item.conversion_note,
+          conversion_confirmed_at: new Date().toISOString(),
+          conversion_resources: item.conversion_resources,
+          conversion_resource_changes: item.conversion_resource_changes,
+        })),
+      }))
+    } catch (err) {
+      updateResult(itemId, s => ({
+        ...s,
+        conversionSaving: false,
+        conversionSaveError: err instanceof Error ? err.message : '换算写回失败',
+      }))
+    }
+  }
+
   async function handleConfirm() {
     if (!selectedItemId || !currentResult?.runId) return
     const itemId = selectedItemId
@@ -525,6 +741,12 @@ export default function PricingTaskDetailPage() {
   const libraryNames = task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'
   const canConfirm = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'confirmed'
   const canReject = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'rejected'
+  const currentConversionDrafts = selectedItemId ? (conversionDrafts.get(selectedItemId) ?? (currentResult ? buildConversionDrafts(currentResult) : [])) : []
+  const canConfirmConversion = Boolean(
+    currentResult?.status === 'confirmed'
+      && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))
+      && currentConversionDrafts.length > 0,
+  )
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -553,6 +775,7 @@ export default function PricingTaskDetailPage() {
                   <span>5结果</span>
                   <span>6对比</span>
                   <span>7换算</span>
+                  <span>8写回</span>
                 </div>
               </div>
               <span className="text-xs text-gray-500">{items.length} 条</span>
@@ -1028,6 +1251,194 @@ export default function PricingTaskDetailPage() {
                               </div>
                             ))}
                           </div>
+                        </div>
+                      )}
+                    </section>
+                  )}
+
+                  {(currentResult.status === 'confirmed' && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))) && (
+                    <section className="px-4 py-4 border-b bg-emerald-50 border-emerald-200">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h4 className="font-semibold text-sm text-emerald-900">8. 人工确认换算并写回</h4>
+                        {currentResult.conversionSaving && (
+                          <span className="inline-block h-4 w-4 rounded-full border-2 border-emerald-200 border-t-emerald-700 animate-spin" title="换算写回中" />
+                        )}
+                      </div>
+                      {currentResult.conversionSaveError && (
+                        <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                          换算写回失败：{currentResult.conversionSaveError}
+                        </div>
+                      )}
+                      {currentResult.confirmedResults?.some(item => item.conversion_confirmed) && (
+                        <div className="mb-3 rounded border border-emerald-200 bg-white px-3 py-2 text-xs text-emerald-800">
+                          已确认换算写回：
+                          {currentResult.confirmedResults.filter(item => item.conversion_confirmed).map(item => (
+                            <span key={`${item.dekid}-${item.dezmid}`} className="ml-2 font-mono">
+                              {item.subitem_code || `${item.dekid}/${item.dezmid}`} 系数 {item.qty_factor}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {currentConversionDrafts.length === 0 ? (
+                        <p className="text-xs text-emerald-700">暂无可写回的换算判定。</p>
+                      ) : (
+                        <div className="space-y-3 text-xs">
+                          {currentConversionDrafts.map((draft, quotaIndex) => {
+                            const changes = buildResourceChanges(draft)
+                            return (
+                              <div key={`${draft.dekid}-${draft.dezmid}`} className="rounded border border-emerald-100 bg-white px-3 py-2">
+                                <div className="mb-2">
+                                  <div className="font-mono font-semibold text-emerald-800">{draft.quota_code || '-'}</div>
+                                  <div className="font-medium text-gray-900 break-words">{draft.quota_name || '-'}</div>
+                                </div>
+                                <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)]">
+                                  <label className="text-gray-600">
+                                    <span className="mb-1 block font-semibold">最终系数</span>
+                                    <input
+                                      type="number"
+                                      step="0.000001"
+                                      min="0"
+                                      value={draft.confirmed_qty_factor}
+                                      onChange={event => selectedItemId && updateConversionDraft(selectedItemId, quotaIndex, current => ({
+                                        ...current,
+                                        confirmed_qty_factor: Number(event.target.value) || 1,
+                                      }))}
+                                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
+                                    />
+                                  </label>
+                                  <label className="text-gray-600">
+                                    <span className="mb-1 block font-semibold">换算说明</span>
+                                    <textarea
+                                      rows={2}
+                                      value={draft.conversion_note}
+                                      onChange={event => selectedItemId && updateConversionDraft(selectedItemId, quotaIndex, current => ({
+                                        ...current,
+                                        conversion_note: event.target.value,
+                                      }))}
+                                      className="w-full resize-y rounded border border-gray-300 px-2 py-1 text-xs"
+                                    />
+                                  </label>
+                                </div>
+                                <details className="mt-3 rounded border border-slate-100 bg-slate-50 px-2 py-1">
+                                  <summary className="cursor-pointer select-none font-semibold text-slate-800">
+                                    工料机换算明细
+                                    <span className="ml-1 font-normal text-slate-500">（{draft.resources.length} 条，变更 {changes.length} 条）</span>
+                                  </summary>
+                                  <div className="mt-2 overflow-x-auto">
+                                    <table className="min-w-[860px] text-left text-[11px]">
+                                      <thead className="text-slate-500">
+                                        <tr>
+                                          <th className="px-2 py-1">类别</th>
+                                          <th className="px-2 py-1">编码</th>
+                                          <th className="px-2 py-1">名称/参数</th>
+                                          <th className="px-2 py-1">单位</th>
+                                          <th className="px-2 py-1 text-right">原含量</th>
+                                          <th className="px-2 py-1 text-right">确认含量</th>
+                                          <th className="px-2 py-1">变更说明</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100">
+                                        {draft.resources.map((resource, resourceIndex) => (
+                                          <tr key={`${resource.original_code}-${resourceIndex}`} className="bg-white align-top">
+                                            <td className="px-2 py-1">
+                                              <select
+                                                value={resource.type ?? ''}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({
+                                                  ...current,
+                                                  type: event.target.value === '' ? null : Number(event.target.value),
+                                                }))}
+                                                className="w-16 rounded border border-gray-300 px-1 py-0.5"
+                                              >
+                                                <option value="">其他</option>
+                                                <option value="1">人工</option>
+                                                <option value="2">材料</option>
+                                                <option value="3">机械</option>
+                                              </select>
+                                            </td>
+                                            <td className="px-2 py-1">
+                                              <input
+                                                value={resource.code}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, code: event.target.value }))}
+                                                className="w-24 rounded border border-gray-300 px-1 py-0.5 font-mono"
+                                              />
+                                            </td>
+                                            <td className="px-2 py-1">
+                                              <input
+                                                value={resource.name}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, name: event.target.value }))}
+                                                className="w-48 rounded border border-gray-300 px-1 py-0.5"
+                                              />
+                                            </td>
+                                            <td className="px-2 py-1">
+                                              <input
+                                                value={resource.unit}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, unit: event.target.value }))}
+                                                className="w-16 rounded border border-gray-300 px-1 py-0.5"
+                                              />
+                                            </td>
+                                            <td className="px-2 py-1 text-right text-slate-500">{resource.original_quantity ?? '-'}</td>
+                                            <td className="px-2 py-1">
+                                              <input
+                                                type="number"
+                                                step="0.000001"
+                                                value={resource.confirmed_quantity ?? ''}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({
+                                                  ...current,
+                                                  confirmed_quantity: toNullableNumber(event.target.value),
+                                                }))}
+                                                className="w-24 rounded border border-gray-300 px-1 py-0.5 text-right"
+                                              />
+                                            </td>
+                                            <td className="px-2 py-1">
+                                              <input
+                                                value={resource.adjustment_note}
+                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, adjustment_note: event.target.value }))}
+                                                className="w-44 rounded border border-gray-300 px-1 py-0.5"
+                                                placeholder="如：强度/厚度/材料替换"
+                                              />
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => selectedItemId && addConversionResource(selectedItemId, quotaIndex)}
+                                    className="mt-2 rounded border border-emerald-200 bg-white px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-50"
+                                  >
+                                    新增工料机行
+                                  </button>
+                                </details>
+                                <details className="mt-2 rounded border border-amber-100 bg-amber-50 px-2 py-1">
+                                  <summary className="cursor-pointer select-none font-semibold text-amber-800">
+                                    工料机变更记录（{changes.length} 条）
+                                  </summary>
+                                  {changes.length === 0 ? (
+                                    <div className="mt-2 text-amber-700">未检测到工料机字段变更。</div>
+                                  ) : (
+                                    <ul className="mt-2 space-y-1">
+                                      {changes.map((change, idx) => (
+                                        <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">
+                                          <span className="font-mono text-amber-800">{change.resource_code || '-'}</span>
+                                          <span className="ml-1">{change.resource_name || '-'}</span>
+                                          <span className="ml-2 text-gray-500">{change.field}: {String(change.old_value ?? '-')} → {String(change.new_value ?? '-')}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </details>
+                              </div>
+                            )
+                          })}
+                          <button
+                            type="button"
+                            onClick={handleConversionConfirm}
+                            disabled={!canConfirmConversion || currentResult.conversionSaving}
+                            className="w-full rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            确认换算并写回
+                          </button>
                         </div>
                       )}
                     </section>

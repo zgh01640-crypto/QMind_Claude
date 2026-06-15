@@ -101,6 +101,11 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS run_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS match_reason TEXT")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS evaluation JSONB")
+        cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_confirmed BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_note TEXT")
+        cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_confirmed_at TIMESTAMP")
+        cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resources JSONB")
+        cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resource_changes JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_project ON pricing_tasks(boq_project_id)")
@@ -137,6 +142,10 @@ class RunRequest(BaseModel):
 
 class ConfirmRunRequest(BaseModel):
     results: Optional[list[dict[str, Any]]] = None
+
+
+class ConversionConfirmRequest(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 _TOOL_SUBMIT_FEATURE_ANALYSIS = {
@@ -982,6 +991,42 @@ def _finish_step_timing(
     return timing
 
 
+def _load_confirmed_results(conn, run_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    if not run_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT run_id, dekid, dezmid, subitem_code, subitem_name, qty_factor, status,
+                   conversion_confirmed, conversion_note, conversion_confirmed_at,
+                   conversion_resources, conversion_resource_changes
+            FROM pricing_task_results
+            WHERE run_id = ANY(%s::int[]) AND status = 'confirmed'
+            ORDER BY id
+            """,
+            (run_ids,),
+        )
+        rows = cur.fetchall()
+    by_run: dict[int, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+    for row in rows:
+        by_run.setdefault(int(row[0]), []).append(
+            {
+                "dekid": int(row[1]),
+                "dezmid": int(row[2]),
+                "subitem_code": row[3] or "",
+                "subitem_name": row[4] or "",
+                "qty_factor": float(row[5]) if row[5] is not None else 1.0,
+                "status": row[6],
+                "conversion_confirmed": bool(row[7]),
+                "conversion_note": row[8] or "",
+                "conversion_confirmed_at": row[9],
+                "conversion_resources": row[10] or [],
+                "conversion_resource_changes": row[11] or [],
+            }
+        )
+    return by_run
+
+
 def _save_pending_results(
     conn,
     task_id: int | None,
@@ -1306,6 +1351,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 (task_id, boq_item_id),
             )
             rows = cur.fetchall()
+        confirmed_results = _load_confirmed_results(conn, [int(r[0]) for r in rows])
         return [
             {
                 "id": r[0],
@@ -1322,6 +1368,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "created_at": r[11],
                 "finished_at": r[12],
                 "reasoning_text": r[13],
+                "confirmed_results": confirmed_results.get(int(r[0]), []),
             }
             for r in rows
         ]
@@ -1353,6 +1400,7 @@ def list_latest_task_runs(task_id: int):
                 (task_id,),
             )
             rows = cur.fetchall()
+        confirmed_results = _load_confirmed_results(conn, [int(r[1]) for r in rows])
         return [
             {
                 "boq_item_id": r[0],
@@ -1371,6 +1419,7 @@ def list_latest_task_runs(task_id: int):
                     "created_at": r[12],
                     "finished_at": r[13],
                     "reasoning_text": r[14],
+                    "confirmed_results": confirmed_results.get(int(r[1]), []),
                 },
             }
             for r in rows
@@ -1588,6 +1637,74 @@ def confirm_pricing_task_run(run_id: int, body: ConfirmRunRequest):
             else:
                 cur.execute("UPDATE pricing_task_results SET status='confirmed', updated_at=NOW() WHERE run_id=%s", (run_id,))
             cur.execute("UPDATE pricing_task_runs SET status='confirmed', finished_at=COALESCE(finished_at, NOW()) WHERE id=%s", (run_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@router.post("/pricing-task-runs/{run_id}/conversion-confirm")
+def confirm_pricing_task_conversion(run_id: int, body: ConversionConfirmRequest):
+    from db.connection import get_connection
+
+    if not body.items:
+        raise HTTPException(status_code=400, detail="conversion items required")
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM pricing_task_runs WHERE id=%s", (run_id,))
+            run_row = cur.fetchone()
+            if not run_row:
+                raise HTTPException(status_code=404, detail="run not found")
+            if run_row[0] != "confirmed":
+                raise HTTPException(status_code=400, detail="run must be confirmed before conversion writeback")
+
+            for item in body.items:
+                try:
+                    dekid = int(item.get("dekid"))
+                    dezmid = int(item.get("dezmid"))
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail="invalid dekid/dezmid") from exc
+                try:
+                    qty_factor = float(item.get("confirmed_qty_factor", item.get("qty_factor", 1)) or 1)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail="invalid confirmed_qty_factor") from exc
+                if qty_factor <= 0:
+                    raise HTTPException(status_code=400, detail="confirmed_qty_factor must be positive")
+
+                resources = item.get("conversion_resources", item.get("resources", []))
+                resource_changes = item.get("conversion_resource_changes", item.get("resource_changes", []))
+                if not isinstance(resources, list):
+                    raise HTTPException(status_code=400, detail="conversion_resources must be array")
+                if not isinstance(resource_changes, list):
+                    raise HTTPException(status_code=400, detail="conversion_resource_changes must be array")
+
+                cur.execute(
+                    """
+                    UPDATE pricing_task_results
+                    SET qty_factor=%s,
+                        conversion_confirmed=TRUE,
+                        conversion_note=%s,
+                        conversion_confirmed_at=NOW(),
+                        conversion_resources=%s,
+                        conversion_resource_changes=%s,
+                        updated_at=NOW()
+                    WHERE run_id=%s AND dekid=%s AND dezmid=%s AND status='confirmed'
+                    """,
+                    (
+                        qty_factor,
+                        item.get("conversion_note", "") or "",
+                        Json(resources, dumps=_json_dumps),
+                        Json(resource_changes, dumps=_json_dumps),
+                        run_id,
+                        dekid,
+                        dezmid,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    raise HTTPException(status_code=400, detail=f"confirmed quota not found: {dekid}/{dezmid}")
         conn.commit()
         return {"ok": True}
     finally:

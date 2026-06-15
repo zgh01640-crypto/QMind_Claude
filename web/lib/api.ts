@@ -1,4 +1,4 @@
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
 export interface Period {
   id: number
@@ -1265,6 +1265,7 @@ export interface PricingTaskRun {
   created_at: string
   finished_at: string | null
   reasoning_text?: string | null
+  confirmed_results?: PricingTaskConfirmedResult[]
 }
 
 export interface PricingTaskLatestRun {
@@ -1298,6 +1299,43 @@ export interface PricingTaskConversionRule {
   group_no: number
 }
 
+export interface PricingTaskConversionResource {
+  code: string
+  name: string
+  unit: string
+  type: number | null
+  original_quantity?: number | null
+  confirmed_quantity?: number | null
+  quantity?: number | null
+  adjustment_note?: string
+}
+
+export interface PricingTaskConversionResourceChange {
+  resource_code: string
+  resource_name: string
+  resource_type: number | null
+  field: string
+  old_value: string | number | null
+  new_value: string | number | null
+  change_type: string
+  basis: string
+  note: string
+}
+
+export interface PricingTaskConfirmedResult {
+  dekid: number
+  dezmid: number
+  subitem_code: string
+  subitem_name: string
+  qty_factor: number
+  status: string
+  conversion_confirmed: boolean
+  conversion_note: string
+  conversion_confirmed_at: string | null
+  conversion_resources: PricingTaskConversionResource[]
+  conversion_resource_changes: PricingTaskConversionResourceChange[]
+}
+
 export interface PricingTaskConversionItem {
   dekid: number
   dezmid: number
@@ -1313,13 +1351,7 @@ export interface PricingTaskConversionItem {
   suggested_action?: string
   requires_manual_review?: boolean
   matched_rules: PricingTaskConversionRule[]
-  resources?: Array<{
-    code: string
-    name: string
-    unit: string
-    quantity: number | null
-    type: number | null
-  }>
+  resources?: PricingTaskConversionResource[]
   conversion_rules?: PricingTaskConversionRule[]
   input_prompts?: string[]
   missing_inputs: string[]
@@ -1409,6 +1441,24 @@ export async function confirmPricingTaskRun(runId: number, results?: QuotaMatch[
 
 export async function rejectPricingTaskRun(runId: number) {
   return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
+}
+
+export async function confirmPricingTaskConversion(
+  runId: number,
+  items: Array<{
+    dekid: number
+    dezmid: number
+    confirmed_qty_factor: number
+    conversion_note: string
+    conversion_resources: PricingTaskConversionResource[]
+    conversion_resource_changes: PricingTaskConversionResourceChange[]
+  }>,
+) {
+  return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/conversion-confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
 }
 
 export async function streamPricingTaskItem(
