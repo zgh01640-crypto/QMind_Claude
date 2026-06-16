@@ -1323,11 +1323,12 @@ def _row_to_task(row) -> dict[str, Any]:
         "project_id": row[2],
         "project_name": row[3],
         "manual_project_id": row[4],
+        "manual_project_name": row[5],
         "quota_library_ids": ids,
-        "quota_library_names": row[6] or [],
-        "legacy_local_id": row[7],
-        "created_at": row[8],
-        "latest_run_count": row[9],
+        "quota_library_names": row[7] or [],
+        "legacy_local_id": row[8],
+        "created_at": row[9],
+        "latest_run_count": row[10],
     }
 
 
@@ -1341,16 +1342,17 @@ def list_pricing_tasks():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id,
+                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id, mp.project_name AS manual_project_name,
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
+                LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
                 LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
                 WHERE t.status <> 'deleted'
-                GROUP BY t.id, p.project_name
+                GROUP BY t.id, p.project_name, mp.project_name
                 ORDER BY t.created_at DESC
                 """
             )
@@ -1432,16 +1434,17 @@ def get_pricing_task(task_id: int):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id,
+                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id, mp.project_name AS manual_project_name,
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
+                LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
                 LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
                 WHERE t.id=%s AND t.status <> 'deleted'
-                GROUP BY t.id, p.project_name
+                GROUP BY t.id, p.project_name, mp.project_name
                 """,
                 (task_id,),
             )

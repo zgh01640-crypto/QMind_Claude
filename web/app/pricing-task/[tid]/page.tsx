@@ -396,6 +396,45 @@ function activeStepNo(result?: ItemResult) {
   return null
 }
 
+function buildQuotaHitStats(results: Map<number, ItemResult>, totalItems: number) {
+  const evaluatedResults = Array.from(results.values()).filter(result => result.evaluation)
+  const totals = evaluatedResults.reduce(
+    (acc, result) => {
+      const evaluation = result.evaluation
+      if (!evaluation) return acc
+      acc.hitCount += evaluation.hit_count
+      acc.missedCount += evaluation.missed_count
+      acc.extraCount += evaluation.extra_count
+      acc.manualCount += evaluation.manual_count
+      acc.aiCount += evaluation.ai_count
+      if (evaluation.manual_count > 0 && evaluation.missed_count === 0 && evaluation.extra_count === 0) {
+        acc.exactItemCount += 1
+      }
+      return acc
+    },
+    {
+      hitCount: 0,
+      missedCount: 0,
+      extraCount: 0,
+      manualCount: 0,
+      aiCount: 0,
+      exactItemCount: 0,
+    },
+  )
+
+  return {
+    ...totals,
+    evaluatedItemCount: evaluatedResults.length,
+    totalItems,
+    hitRate: totals.manualCount > 0 ? totals.hitCount / totals.manualCount : null,
+  }
+}
+
+function formatPercent(value: number | null) {
+  if (value == null) return '-'
+  return `${(value * 100).toFixed(1)}%`
+}
+
 async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[]) {
   const entries: Array<[number, ItemResult]> = []
   const batchSize = 12
@@ -822,17 +861,65 @@ export default function PricingTaskDetailPage() {
       && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))
       && currentConversionDrafts.length > 0,
   )
+  const quotaHitStats = buildQuotaHitStats(itemResults, items.length)
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="max-w-7xl mx-auto text-sm text-gray-700">
-          <span className="font-semibold">任务：</span>{task.name}
-          <span className="ml-4 font-semibold">工程：</span>{task.project_name}
-          <span className="ml-4 font-semibold">定额库：</span>{libraryNames}
-          {task.manual_project_id && (
-            <span className="ml-4 text-gray-500">人工对比工程 #{task.manual_project_id}</span>
-          )}
+      <div className="bg-white border-b border-gray-200 px-6 py-3">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
+              {task.name}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+              <span className="min-w-0 max-w-full truncate" title={task.project_name}>
+                组价工程：{task.project_name}
+              </span>
+              <span className="min-w-0 max-w-full truncate" title={libraryNames}>
+                定额库：{libraryNames}
+              </span>
+              {task.manual_project_id && (
+                <span
+                  className="min-w-0 max-w-full truncate"
+                  title={task.manual_project_name || `#${task.manual_project_id}`}
+                >
+                  对比工程：{(task.manual_project_name || `#${task.manual_project_id}`).replace(/^工程名称[:：]\s*/, '')}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="w-full lg:w-auto lg:flex-none">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-white px-2.5 py-2 shadow-sm shadow-gray-100/70 lg:justify-end">
+              <div className="mr-1 min-w-24 rounded bg-gray-50 px-2.5 py-1.5">
+                <div className="text-[11px] text-gray-500">命中率</div>
+                <div className="mt-0.5 text-xs font-semibold leading-none text-gray-900">{formatPercent(quotaHitStats.hitRate)}</div>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-gray-500">
+                <span>
+                  已评估 <span className="font-medium text-gray-800">{quotaHitStats.evaluatedItemCount}/{quotaHitStats.totalItems}</span>
+                </span>
+                <span>
+                  人工 <span className="font-medium text-gray-800">{quotaHitStats.manualCount}</span>
+                </span>
+                <span>
+                  命中 <span className="font-medium text-gray-800">{quotaHitStats.hitCount}</span>
+                </span>
+                <span>
+                  遗漏 <span className="font-medium text-amber-700">{quotaHitStats.missedCount}</span>
+                </span>
+                <span>
+                  额外 <span className="font-medium text-rose-700">{quotaHitStats.extraCount}</span>
+                </span>
+                <span>
+                  一致 <span className="font-medium text-gray-800">{quotaHitStats.exactItemCount}</span>
+                </span>
+              </div>
+            </div>
+            {quotaHitStats.manualCount === 0 && (
+              <div className="mt-1 text-right text-xs text-gray-400">暂无人工套定额对比数据</div>
+            )}
+          </div>
         </div>
       </div>
 

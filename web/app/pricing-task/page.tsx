@@ -133,7 +133,9 @@ export default function PricingTaskPage() {
                         定额库：
                         {task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'}
                       </p>
-                      {task.manual_project_id && <p>对比工程：#{task.manual_project_id}</p>}
+                      {task.manual_project_id && (
+                        <p>对比工程：{task.manual_project_name || `#${task.manual_project_id}`}</p>
+                      )}
                       <p className="text-xs text-gray-400 mt-2">
                         创建于 {new Date(task.created_at).toLocaleString()} · 运行 {task.latest_run_count} 次
                       </p>

@@ -1268,6 +1268,7 @@ export interface PricingTask {
   project_id: number
   project_name: string
   manual_project_id: number | null
+  manual_project_name?: string | null
   quota_library_ids: number[]
   quota_library_names: string[]
   legacy_local_id: string | null
