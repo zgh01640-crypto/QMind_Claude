@@ -435,6 +435,280 @@ function formatPercent(value: number | null) {
   return `${(value * 100).toFixed(1)}%`
 }
 
+function confidenceLabel(confidence?: string) {
+  if (confidence === 'high') return '高'
+  if (confidence === 'medium') return '中'
+  if (confidence === 'low') return '低'
+  return '-'
+}
+
+function ResultEmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="rounded border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center">
+      <div className="text-sm font-medium text-gray-700">{title}</div>
+      <div className="mt-1 text-xs text-gray-500">{description}</div>
+    </div>
+  )
+}
+
+function ResourceTable({ resources }: { resources: PricingTaskConversionResource[] }) {
+  if (resources.length === 0) {
+    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成换算判断后，这里会展示工料机信息。" />
+  }
+  return (
+    <div className="overflow-x-auto rounded border border-gray-200">
+      <table className="min-w-[760px] w-full text-left text-xs">
+        <thead className="bg-gray-50 text-gray-500">
+          <tr>
+            <th className="px-3 py-2 font-medium">类别</th>
+            <th className="px-3 py-2 font-medium">编码</th>
+            <th className="px-3 py-2 font-medium">名称</th>
+            <th className="px-3 py-2 font-medium">单位</th>
+            <th className="px-3 py-2 text-right font-medium">含量</th>
+            <th className="px-3 py-2 font-medium">说明</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 bg-white">
+          {resources.map((resource, index) => (
+            <tr key={`${resource.code}-${resource.name}-${index}`}>
+              <td className="px-3 py-2 text-gray-500">{resourceTypeLabel(resource.type)}</td>
+              <td className="px-3 py-2 font-mono text-gray-600">{resource.code || '-'}</td>
+              <td className="px-3 py-2 text-gray-900">{resource.name || '-'}</td>
+              <td className="px-3 py-2 text-gray-500">{resource.unit || '-'}</td>
+              <td className="px-3 py-2 text-right text-gray-700">
+                {resource.confirmed_quantity ?? resource.quantity ?? resource.original_quantity ?? '-'}
+              </td>
+              <td className="px-3 py-2 text-gray-500">{resource.adjustment_note || '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+interface ResourceGroup {
+  key: string
+  quotaCode: string
+  quotaName: string
+  qtyFactor?: number
+  resources: PricingTaskConversionResource[]
+}
+
+function ResourceGroups({ groups }: { groups: ResourceGroup[] }) {
+  const resourceCount = groups.reduce((sum, group) => sum + group.resources.length, 0)
+  if (resourceCount === 0) {
+    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成换算判断后，这里会展示工料机信息。" />
+  }
+  return (
+    <div className="space-y-3">
+      {groups.map(group => (
+        <div key={group.key} className="overflow-hidden rounded border border-gray-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 bg-gray-50 px-3 py-2 text-xs">
+            <div className="min-w-0">
+              <span className="font-mono font-semibold text-gray-700">{group.quotaCode || '-'}</span>
+              <span className="ml-2 font-medium text-gray-900">{group.quotaName || '-'}</span>
+            </div>
+            <div className="flex items-center gap-3 text-gray-500">
+              {group.qtyFactor != null && <span>系数 {group.qtyFactor}</span>}
+              <span>{group.resources.length} 条工料机</span>
+            </div>
+          </div>
+          <ResourceTable resources={group.resources} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SelectedItemResultPanel({
+  item,
+  result,
+  drafts,
+}: {
+  item?: BoqItem
+  result?: ItemResult
+  drafts: ConversionConfirmDraft[]
+}) {
+  const confirmedWritebacks = result?.confirmedResults?.filter(row => row.conversion_confirmed) ?? []
+  const conversionItems = result?.conversionCheck?.items ?? []
+  const resourceGroups: ResourceGroup[] = drafts.length > 0
+    ? drafts.map(draft => ({
+        key: `${draft.dekid}-${draft.dezmid}`,
+        quotaCode: draft.quota_code,
+        quotaName: draft.quota_name,
+        qtyFactor: draft.confirmed_qty_factor,
+        resources: draft.resources,
+      }))
+    : conversionItems.map(row => ({
+        key: `${row.dekid}-${row.dezmid}`,
+        quotaCode: row.quota_code,
+        quotaName: row.quota_name,
+        qtyFactor: row.suggested_qty_factor,
+        resources: row.resources ?? [],
+      }))
+  const resourceCount = resourceGroups.reduce((sum, group) => sum + group.resources.length, 0)
+  const resourceChanges = drafts.flatMap(draft => buildResourceChanges(draft))
+
+  return (
+    <section className="rounded-lg border border-gray-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-gray-900">完整组价结果</div>
+          {item ? (
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+              <span className="font-mono">{item.item_code || '-'}</span>
+              <span className="max-w-xl truncate" title={item.item_name}>{item.item_name}</span>
+              <span className="max-w-2xl truncate" title={item.item_description || '未填写'}>
+                项目特征：{item.item_description || '未填写'}
+              </span>
+              <span>单位：{item.unit || '-'}</span>
+              <span>工程量：{item.quantity ?? '-'}</span>
+            </div>
+          ) : (
+            <div className="mt-1 text-xs text-gray-500">点击左侧清单后查看结果。</div>
+          )}
+        </div>
+        {result?.status && (
+          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold ${statusClassName(result.status)}`}>
+            {statusLabel(result.status)}
+          </span>
+        )}
+      </div>
+
+      <div className="max-h-[360px] overflow-y-auto px-4 py-4">
+        {!item ? (
+          <ResultEmptyState title="未选择清单" description="从左侧选择一条清单后，这里会展示定额、换算和工料机结果。" />
+        ) : !result ? (
+          <ResultEmptyState title="尚未运行" description="执行单条组价后，这里会展示该清单的结果摘要。" />
+        ) : result.phase === 'error' ? (
+          <ResultEmptyState title="执行失败" description={result.error || '请重新执行单条组价。'} />
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+            <div className="space-y-4">
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-gray-900">定额结果</h4>
+                  {result.quotaMatch && <span className="text-xs text-gray-500">{result.quotaMatch.matches.length} 条</span>}
+                </div>
+                {!result.quotaMatch ? (
+                  <ResultEmptyState title="暂无定额结果" description="套定额完成后会展示匹配定额。" />
+                ) : result.quotaMatch.matches.length === 0 ? (
+                  <ResultEmptyState title="未匹配到定额" description={result.quotaMatch.issues.join('；') || '候选为空或模型未选择定额。'} />
+                ) : (
+                  <div className="space-y-2">
+                    {result.quotaMatch.matches.map((match, index) => (
+                      <div key={`${match.dekid}-${match.dezmid}-${index}`} className="rounded border border-emerald-100 bg-emerald-50/50 px-3 py-2 text-xs">
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-mono font-semibold text-emerald-800">{match.zmbh || '-'}</div>
+                            <div className="mt-0.5 font-medium text-gray-900">{match.zmmc || '-'}</div>
+                          </div>
+                          <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-[11px] text-gray-600">
+                            置信度 {confidenceLabel(match.confidence)}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+                          <span>单位：{match.dw || '-'}</span>
+                          <span>系数：{match.qty_factor}</span>
+                          {match.library_name && <span>{match.library_name}</span>}
+                        </div>
+                        {match.match_reason && <div className="mt-1 text-gray-600">{match.match_reason}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h4 className="mb-2 text-xs font-semibold text-gray-900">换算判断</h4>
+                {result.conversionChecking ? (
+                  <ResultEmptyState title="换算判断中" description="正在根据已确认定额查询换算说明和工料机信息。" />
+                ) : conversionItems.length === 0 ? (
+                  <ResultEmptyState title="待确认定额" description="确认定额并完成换算判断后，这里会展示换算依据、差异点和建议动作。" />
+                ) : (
+                  <div className="space-y-2">
+                    {conversionItems.map((conversion, index) => (
+                      <div key={`${conversion.dekid}-${conversion.dezmid}-${index}`} className="rounded border border-cyan-100 bg-cyan-50/50 px-3 py-2 text-xs">
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-mono font-semibold text-cyan-800">{conversion.quota_code || '-'}</div>
+                            <div className="font-medium text-gray-900">{conversion.quota_name || '-'}</div>
+                          </div>
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${conversion.needs_conversion ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                            {conversion.needs_conversion ? '建议换算' : '不换算'}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+                          <span>{conversionCategoryLabel(conversion.conversion_category)}</span>
+                          <span>{conversion.conversion_type || '-'}</span>
+                          <span>建议系数：{conversion.suggested_qty_factor}</span>
+                          {conversion.requires_manual_review && <span className="font-medium text-amber-700">需人工复核</span>}
+                        </div>
+                        {conversion.reason && <div className="mt-1 text-gray-600">{conversion.reason}</div>}
+                        {(conversion.difference_points?.length ?? 0) > 0 && (
+                          <div className="mt-1 text-amber-700">差异点：{conversion.difference_points?.join('；')}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-gray-900">工料机明细</h4>
+                  <span className="text-xs text-gray-500">{resourceGroups.length} 个定额 / {resourceCount} 条</span>
+                </div>
+                <ResourceGroups groups={resourceGroups} />
+              </div>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-gray-900">写回记录</h4>
+                  <span className="text-xs text-gray-500">{confirmedWritebacks.length} 条</span>
+                </div>
+                {confirmedWritebacks.length === 0 ? (
+                  <ResultEmptyState title="尚未写回" description="人工确认换算并写回后，这里会展示最终系数和工料机变更记录。" />
+                ) : (
+                  <div className="space-y-2 text-xs">
+                    {confirmedWritebacks.map((row, index) => (
+                      <div key={`${row.dekid}-${row.dezmid}-${index}`} className="rounded border border-emerald-100 bg-emerald-50/50 px-3 py-2">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <span className="font-mono font-semibold text-emerald-800">{row.subitem_code || `${row.dekid}/${row.dezmid}`}</span>
+                          <span className="font-medium text-gray-900">{row.subitem_name || '-'}</span>
+                          <span className="text-gray-500">最终系数：{row.qty_factor}</span>
+                        </div>
+                        {row.conversion_note && <div className="mt-1 text-gray-600">{row.conversion_note}</div>}
+                      </div>
+                    ))}
+                    {resourceChanges.length > 0 && (
+                      <div className="rounded border border-amber-100 bg-amber-50 px-3 py-2">
+                        <div className="mb-1 font-semibold text-amber-800">工料机变更 {resourceChanges.length} 条</div>
+                        <ul className="space-y-1 text-gray-700">
+                          {resourceChanges.slice(0, 8).map((change, index) => (
+                            <li key={index}>
+                              <span className="font-mono text-amber-800">{change.resource_code || '-'}</span>
+                              <span className="ml-1">{change.resource_name || '-'}</span>
+                              <span className="ml-2 text-gray-500">{change.field}: {String(change.old_value ?? '-')} → {String(change.new_value ?? '-')}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[]) {
   const entries: Array<[number, ItemResult]> = []
   const batchSize = 12
@@ -480,6 +754,7 @@ export default function PricingTaskDetailPage() {
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
+  const selectedItem = selectedItemId ? items.find(item => item.id === selectedItemId) : undefined
   const isRunning = currentResult?.phase === 'reasoning'
 
   useEffect(() => {
@@ -923,8 +1198,8 @@ export default function PricingTaskDetailPage() {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-6">
-        <div className="flex gap-6 h-[calc(100vh-200px)]">
+      <div className="max-w-7xl mx-auto space-y-4 px-6 py-6">
+        <div className="flex h-[calc(100vh-430px)] min-h-[420px] gap-6">
           <div className="w-80 bg-white rounded-lg shadow flex flex-col">
             <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
               <div>
@@ -1104,10 +1379,21 @@ export default function PricingTaskDetailPage() {
 
                   {currentResult.featureCheck && (
                     <section className={`px-4 py-4 border-b ${currentResult.featureCheck.is_complete ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
-                      <h4 className={`font-semibold text-sm mb-2 ${currentResult.featureCheck.is_complete ? 'text-green-900' : 'text-orange-900'}`}>
-                        2. {currentResult.featureCheck.is_complete ? '项目特征完整' : '项目特征不完整'}
-                        <StepDuration result={currentResult} stepNo={2} />
-                      </h4>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <h4 className={`font-semibold text-sm ${currentResult.featureCheck.is_complete ? 'text-green-900' : 'text-orange-900'}`}>
+                          2. {currentResult.featureCheck.is_complete ? '项目特征完整' : '项目特征不完整'}
+                          <StepDuration result={currentResult} stepNo={2} />
+                        </h4>
+                        {!currentResult.featureCheck.is_complete && selectedItem && (
+                          <button
+                            type="button"
+                            onClick={() => openFeatureEditor(selectedItem)}
+                            className="shrink-0 rounded border border-orange-200 bg-white px-2 py-1 text-xs font-medium text-orange-700 hover:bg-orange-50"
+                          >
+                            编辑项目特征
+                          </button>
+                        )}
+                      </div>
                       {currentResult.featureCheck.missing_features.length > 0 && (
                         <ul className="text-xs text-orange-800 space-y-1 list-disc list-inside mb-2">
                           {currentResult.featureCheck.missing_features.map((f, i) => <li key={i}>{f}</li>)}
@@ -1661,6 +1947,7 @@ export default function PricingTaskDetailPage() {
             )}
           </div>
         </div>
+        <SelectedItemResultPanel item={selectedItem} result={currentResult} drafts={currentConversionDrafts} />
       </div>
       {editingFeatureItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 px-4" onClick={() => !featureSaving && closeFeatureEditor()}>
