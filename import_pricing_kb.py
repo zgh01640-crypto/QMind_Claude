@@ -147,6 +147,26 @@ def clear_import_issues(pg, source_hash: str) -> None:
         cur.execute("DELETE FROM pricing_kb_import_issues WHERE source_file_sha256=%s", (source_hash,))
 
 
+def remove_combo_quota_candidates(pg) -> int:
+    """Remove candidate relations that point to combo-only quota items."""
+    with pg.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM tqdk_tqdzy cand
+            USING tdek_tdezm q
+            WHERE q.dekid = cand.dekid
+              AND q.id = cand.dezmid
+              AND EXISTS (
+                  SELECT 1
+                  FROM tdek_tzhhs h
+                  WHERE h.dekid = q.dekid
+                    AND h.zmbh = q.zmbh
+              )
+            """
+        )
+        return int(cur.rowcount)
+
+
 def import_source_table(sqlite_cur: sqlite3.Cursor, pg, source_hash: str, source_table: str) -> int:
     pg_table, pg_columns, select_sql = SQLITE_TABLES[source_table]
     all_columns = pg_columns + ["source_file_sha256", "source_rowid"]
@@ -389,6 +409,7 @@ def replace_quota_tables(source: Path, should_link: bool) -> dict[str, Any]:
             )
             inserted_prompts = cur.rowcount
 
+        removed_combo_candidates = remove_combo_quota_candidates(pg)
         link_counts = link_targets(pg, source_hash) if should_link else {
             "matched": 0, "review": 0, "unmatched": 0
         }
@@ -406,6 +427,7 @@ def replace_quota_tables(source: Path, should_link: bool) -> dict[str, Any]:
                 "deleted": deleted_prompts,
                 "inserted": inserted_prompts,
             },
+            "removed_combo_candidates": removed_combo_candidates,
             "target_links": link_counts,
         }
         finalize_run(pg, run_id, "done", stats)
@@ -607,6 +629,7 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
             pg_table = SQLITE_TABLES[source_table][0]
             imported[pg_table] = import_source_table(sqlite_cur, pg, source_hash, source_table)
 
+        removed_combo_candidates = remove_combo_quota_candidates(pg)
         issue_counts = record_import_issues(pg, sqlite_cur, source_hash, run_id)
         link_counts = link_targets(pg, source_hash) if should_link else {"matched": 0, "review": 0, "unmatched": 0}
 
@@ -614,6 +637,7 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
             "source_file_sha256": source_hash,
             **inspection,
             "imported_tables": imported,
+            "removed_combo_candidates": removed_combo_candidates,
             **issue_counts,
             "target_links": link_counts,
         }

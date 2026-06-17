@@ -1160,6 +1160,7 @@ export interface BoqTreeCategory {
   zjsm: string | null
   child_count: number
   item_count: number
+  descendant_item_count?: number
   enabled?: boolean
 }
 
@@ -1181,6 +1182,7 @@ export interface BoqTreeChapterResponse {
     pid: number | null
     zjmc: string
     zjsm: string | null
+    descendant_item_count?: number
   }
   children: BoqTreeCategory[]
   items: BoqTreeItem[]
@@ -1319,12 +1321,6 @@ export interface PricingTaskStepTiming {
   finished_at: string
 }
 
-export interface PricingTaskConversionRule {
-  prompt: string
-  description: string
-  group_no: number
-}
-
 export interface PricingTaskConversionResource {
   code: string
   name: string
@@ -1348,20 +1344,6 @@ export interface PricingTaskConversionResourceChange {
   note: string
 }
 
-export interface PricingTaskResourceAdjustment {
-  action: 'replace' | 'update_quantity' | 'add' | 'remove'
-  source_code: string
-  source_name: string
-  target_code: string
-  target_name: string
-  target_unit: string
-  resource_type: number
-  original_quantity: number
-  suggested_quantity: number
-  reason: string
-  requires_manual_review: boolean
-}
-
 export interface PricingTaskConfirmedResult {
   dekid: number
   dezmid: number
@@ -1382,20 +1364,34 @@ export interface PricingTaskConversionItem {
   quota_code: string
   quota_name: string
   needs_conversion: boolean
-  suggested_qty_factor: number
   reason: string
-  difference_points?: string[]
-  conversion_category?: 'material' | 'process' | 'measurement' | 'none' | 'unknown'
-  conversion_type?: string
-  basis?: string
-  suggested_action?: string
   requires_manual_review?: boolean
-  matched_rules: PricingTaskConversionRule[]
-  resource_adjustments?: PricingTaskResourceAdjustment[]
   resources?: PricingTaskConversionResource[]
-  conversion_rules?: PricingTaskConversionRule[]
-  input_prompts?: string[]
+  adjustment_rules?: PricingTaskComboAdjustmentRule[]
   missing_inputs: string[]
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface PricingTaskComboAdjustmentRule {
+  rule_index: number
+  prompt: string
+  base_value: number
+  increment_unit: number
+  combo_dezmid: number
+  combo_code: string
+  combo_name: string
+  combo_unit: string
+  combo_work_content: string
+  combo_labor_cost?: number
+  combo_material_cost?: number
+  combo_machine_cost?: number
+  combo_resources?: PricingTaskConversionResource[]
+  matched: boolean
+  matched_feature: string
+  feature_value: number | null
+  calculated_times: number | null
+  reason: string
+  requires_manual_review: boolean
   confidence: 'high' | 'medium' | 'low'
 }
 
@@ -1427,6 +1423,7 @@ export type PricingTaskEvent =
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
   | { type: 'conversion_check_start'; run_id: number; total: number }
+  | { type: 'combo_adjustment_rules'; items: PricingTaskConversionItem[] }
   | { type: 'conversion_check'; conversion_check: PricingTaskConversionCheck }
   | { type: 'step_timing'; step_no: number; name: string; duration_ms: number; started_at: string; finished_at: string }
   | { type: 'done'; run_id?: number }
@@ -1482,24 +1479,6 @@ export async function confirmPricingTaskRun(runId: number, results?: QuotaMatch[
 
 export async function rejectPricingTaskRun(runId: number) {
   return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
-}
-
-export async function confirmPricingTaskConversion(
-  runId: number,
-  items: Array<{
-    dekid: number
-    dezmid: number
-    confirmed_qty_factor: number
-    conversion_note: string
-    conversion_resources: PricingTaskConversionResource[]
-    conversion_resource_changes: PricingTaskConversionResourceChange[]
-  }>,
-) {
-  return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/conversion-confirm`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items }),
-  })
 }
 
 export async function streamPricingTaskItem(
@@ -1674,6 +1653,18 @@ export interface QuotaInputPromptItem {
   prompt_rules: QuotaInputPromptRule[]
 }
 
+export interface QuotaConversionRuleListItem {
+  dekid: number
+  library_name: string
+  quota_item_id: number
+  quota_code: string | null
+  quota_name: string
+  unit: string | null
+  chapter_name: string | null
+  rule_count: number
+  conversion_rules: QuotaTreeConversionRule[]
+}
+
 export const fetchPricingKbSummary = () =>
   req<PricingKbSummary>('/api/pricing-kb/summary')
 
@@ -1710,6 +1701,20 @@ export function fetchQuotaInputPrompts(params: {
   if (params.page) query.set('page', String(params.page))
   if (params.page_size) query.set('page_size', String(params.page_size))
   return req<PricingKbList<QuotaInputPromptItem>>(`/api/pricing-kb/quota-input-prompts?${query}`)
+}
+
+export function fetchQuotaConversionRules(params: {
+  library_id?: number | null
+  q?: string
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.q) query.set('q', params.q)
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<PricingKbList<QuotaConversionRuleListItem>>(`/api/pricing-kb/quota-conversion-rules?${query}`)
 }
 
 export function fetchPricingKbBoqItems(params: {

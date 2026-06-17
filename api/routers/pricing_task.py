@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from time import perf_counter
@@ -261,7 +262,7 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
     "type": "function",
     "function": {
         "name": "submit_conversion_check",
-        "description": "提交确认定额的换算判断建议。只给建议，不修改已确认定额和工程量系数。",
+        "description": "提交确认定额的组合定额换算结果。只给组合定额次数建议，不修改已确认定额和工程量系数。",
         "strict": True,
         "parameters": {
             "type": "object",
@@ -276,65 +277,48 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                             "quota_code": {"type": "string"},
                             "quota_name": {"type": "string"},
                             "needs_conversion": {"type": "boolean"},
-                            "suggested_qty_factor": {"type": "number"},
                             "reason": {"type": "string"},
-                            "difference_points": {"type": "array", "items": {"type": "string"}},
-                            "conversion_category": {
-                                "type": "string",
-                                "enum": ["material", "process", "measurement", "none", "unknown"],
-                            },
-                            "conversion_type": {
-                                "type": "string",
-                                "enum": ["强度换算", "厚度换算", "配合比换算", "材料种类换算", "定额子目借用", "部位调整", "系数调整", "单位换算", "none", "unknown"],
-                            },
-                            "basis": {"type": "string"},
-                            "suggested_action": {"type": "string"},
                             "requires_manual_review": {"type": "boolean"},
-                            "matched_rules": {
+                            "adjustment_rules": {
                                 "type": "array",
+                                "description": "按 tdek_tzhhs 查询到的组合定额换算规则及项目特征匹配结果。每条规则单独判断，不合并。",
                                 "items": {
                                     "type": "object",
                                     "properties": {
+                                        "rule_index": {"type": "integer"},
                                         "prompt": {"type": "string"},
-                                        "description": {"type": "string"},
-                                        "group_no": {"type": "integer"},
-                                    },
-                                    "required": ["prompt", "description", "group_no"],
-                                    "additionalProperties": False,
-                                },
-                            },
-                            "resource_adjustments": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "action": {
-                                            "type": "string",
-                                            "enum": ["replace", "update_quantity", "add", "remove"],
-                                        },
-                                        "source_code": {"type": "string"},
-                                        "source_name": {"type": "string"},
-                                        "target_code": {"type": "string"},
-                                        "target_name": {"type": "string"},
-                                        "target_unit": {"type": "string"},
-                                        "resource_type": {"type": "integer"},
-                                        "original_quantity": {"type": "number"},
-                                        "suggested_quantity": {"type": "number"},
+                                        "base_value": {"type": "number"},
+                                        "increment_unit": {"type": "number"},
+                                        "combo_dezmid": {"type": "integer"},
+                                        "combo_code": {"type": "string"},
+                                        "combo_name": {"type": "string"},
+                                        "combo_unit": {"type": "string"},
+                                        "combo_work_content": {"type": "string"},
+                                        "matched": {"type": "boolean"},
+                                        "matched_feature": {"type": "string"},
+                                        "feature_value": {"type": "number"},
+                                        "calculated_times": {"type": "number"},
                                         "reason": {"type": "string"},
                                         "requires_manual_review": {"type": "boolean"},
+                                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                                     },
                                     "required": [
-                                        "action",
-                                        "source_code",
-                                        "source_name",
-                                        "target_code",
-                                        "target_name",
-                                        "target_unit",
-                                        "resource_type",
-                                        "original_quantity",
-                                        "suggested_quantity",
+                                        "rule_index",
+                                        "prompt",
+                                        "base_value",
+                                        "increment_unit",
+                                        "combo_dezmid",
+                                        "combo_code",
+                                        "combo_name",
+                                        "combo_unit",
+                                        "combo_work_content",
+                                        "matched",
+                                        "matched_feature",
+                                        "feature_value",
+                                        "calculated_times",
                                         "reason",
                                         "requires_manual_review",
+                                        "confidence",
                                     ],
                                     "additionalProperties": False,
                                 },
@@ -348,16 +332,9 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
                             "quota_code",
                             "quota_name",
                             "needs_conversion",
-                            "suggested_qty_factor",
                             "reason",
-                            "difference_points",
-                            "conversion_category",
-                            "conversion_type",
-                            "basis",
-                            "suggested_action",
                             "requires_manual_review",
-                            "matched_rules",
-                            "resource_adjustments",
+                            "adjustment_rules",
                             "missing_inputs",
                             "confidence",
                         ],
@@ -498,22 +475,14 @@ def build_system_prompt() -> str:
     )
 
 
-CONVERSION_RULE_GUIDE = """
-第七步定额换算通用规则：
-1. 强度换算（material）：设计强度 vs 定额默认强度，例如 C25 混凝土 → C30 混凝土。
-2. 厚度换算（material）：设计厚度 vs 定额默认厚度，例如 12mm → 15mm。
-3. 配合比换算（material）：设计砂浆/混凝土配合比 vs 定额默认配合比，例如 1:2 → 1:3。
-4. 材料种类换算（material）：设计材料 vs 定额默认材料，例如普通水泥 → 白水泥。
-5. 定额子目借用（process）：无更适用专用子目时，借用相似工艺子目。
-6. 部位调整（process）：设计部位 vs 定额部位不一致，例如外墙不能直接套内墙子目。
-7. 系数调整（process）：按定额说明或规范，对人工/材料/机械乘系数，例如高空、洞内、洞库等。
-8. 单位换算（measurement）：清单单位 vs 定额单位不一致，例如 m3、m2、t、kg、10m 与 m。
-
-判定要求：
-- 逐条对比项目特征、定额工作内容、工料机显示，列出差异点。
-- 定额库换算说明（tdek_tznhs/tdek_tzhhs）优先级最高，命中时必须写入 matched_rules 和 basis。
-- 没有定额库换算说明时，不允许编造依据；如仍认为存在差异，只能给换算建议并标记 requires_manual_review=true。
-- 第七步只输出建议，不修改已确认定额、工程量系数或工料机。
+COMBO_ADJUSTMENT_RULE_GUIDE = """
+第七步组合定额换算规则：
+1. 规则来源只使用 tdek_tzhhs。
+2. 每条已确认定额可能有 0-N 条组合规则；每条组合规则必须单独判断，不允许合并。
+3. 只判断项目特征中的数量特征是否与 tdek_tzhhs.tsxx、组合定额 zmmc 的增减指标匹配。
+4. 匹配时提取项目特征值，由后端按 (特征值 - jcz) / zjdw 计算组合定额次数；小数保留，负数截为 0。
+5. 缺少数量特征、单位明显不一致或 zjdw 无效时，不计算次数，标记人工复核。
+6. 组合定额费用为 0 的说明型规则也要展示和解释，但不得臆造工料机调整。
 """.strip()
 
 
@@ -827,27 +796,57 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
             dezmid = int(row[1])
             cur.execute(
                 """
-                SELECT tsxx, hssm, COALESCE(groupno, 0)
-                FROM tdek_tznhs
-                WHERE dekid=%s AND dezmid=%s
-                ORDER BY groupno NULLS LAST, source_rowid
+                SELECT h.tsxx, h.zmbh, h.jcz, h.zjdw,
+                       combo.id, combo.zmmc, combo.dw, combo.gznr,
+                       combo.rgf, combo.clf, combo.jxf
+                FROM tdek_tzhhs h
+                LEFT JOIN tdek_tdezm combo ON combo.dekid = h.dekid AND combo.zmbh = h.zmbh
+                WHERE h.dekid=%s AND h.dezmid=%s
+                ORDER BY h.source_rowid
                 """,
                 (dekid, dezmid),
             )
-            conversion_rules = [
-                {"prompt": r[0] or "", "description": r[1] or "", "group_no": int(r[2] or 0)}
-                for r in cur.fetchall()
-            ]
-            cur.execute(
-                """
-                SELECT tsxx
-                FROM tdek_tzhhs
-                WHERE dekid=%s AND dezmid=%s
-                ORDER BY source_rowid
-                """,
-                (dekid, dezmid),
-            )
-            input_prompts = [r[0] for r in cur.fetchall() if r[0]]
+            adjustment_rules = []
+            for idx, r in enumerate(cur.fetchall(), start=1):
+                combo_dezmid = int(r[4]) if r[4] is not None else 0
+                combo_resources = []
+                if combo_dezmid:
+                    cur.execute(
+                        """
+                        SELECT zmbh, zmmc, dw, gcl, lx
+                        FROM tdek_tzmgc
+                        WHERE dekid=%s AND dezmid=%s
+                        ORDER BY lx NULLS LAST, source_rowid
+                        """,
+                        (dekid, combo_dezmid),
+                    )
+                    combo_resources = [
+                        {
+                            "code": rr[0] or "",
+                            "name": rr[1] or "",
+                            "unit": rr[2] or "",
+                            "quantity": float(rr[3]) if rr[3] is not None else None,
+                            "type": int(rr[4]) if rr[4] is not None else None,
+                        }
+                        for rr in cur.fetchall()
+                    ]
+                adjustment_rules.append(
+                    {
+                        "rule_index": idx,
+                        "prompt": r[0] or "",
+                        "combo_code": r[1] or "",
+                        "base_value": float(r[2]) if r[2] is not None else 0,
+                        "increment_unit": float(r[3]) if r[3] is not None else 0,
+                        "combo_dezmid": combo_dezmid,
+                        "combo_name": r[5] or "",
+                        "combo_unit": r[6] or "",
+                        "combo_work_content": r[7] or "",
+                        "combo_labor_cost": float(r[8]) if r[8] is not None else 0,
+                        "combo_material_cost": float(r[9]) if r[9] is not None else 0,
+                        "combo_machine_cost": float(r[10]) if r[10] is not None else 0,
+                        "combo_resources": combo_resources,
+                    }
+                )
             cur.execute(
                 """
                 SELECT zmbh, zmmc, dw, gcl, lx
@@ -880,14 +879,237 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                     "work_content": row[8] or "",
                     "library_name": row[9] or "",
                     "resources": resources,
-                    "conversion_rules": conversion_rules,
-                    "input_prompts": input_prompts,
+                    "adjustment_rules": adjustment_rules,
                 }
             )
     return boq_item, items
 
 
-def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = None) -> dict[str, Any]:
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        parsed = float(value)
+        if parsed != parsed:
+            return None
+        return parsed
+    except Exception:
+        return None
+
+
+_FULLWIDTH_TRANS = str.maketrans(
+    "０１２３４５６７８９．，：（）＞＜＋－",
+    "0123456789.,:()><+-",
+)
+
+_UNIT_ALIASES: dict[str, list[str]] = {
+    "km": ["km", "公里", "千米"],
+    "m": ["m", "米"],
+    "mm": ["mm", "毫米"],
+    "cm": ["cm", "厘米"],
+    "t": ["t", "吨"],
+    "kg": ["kg", "千克", "公斤"],
+    "层": ["层"],
+    "芯": ["芯"],
+    "孔": ["孔"],
+    "次": ["次"],
+    "根": ["根"],
+    "组": ["组"],
+    "台": ["台"],
+}
+
+_FEATURE_KEYWORDS = [
+    "运距",
+    "厚度",
+    "高度",
+    "深度",
+    "孔深",
+    "宽度",
+    "长度",
+    "距离",
+    "重量",
+    "功率",
+    "层数",
+    "芯数",
+]
+
+
+def _normalize_feature_text(value: Any) -> str:
+    return str(value or "").translate(_FULLWIDTH_TRANS).replace("ＫＭ", "KM").replace("ｋｍ", "km")
+
+
+def _rule_unit_aliases(rule: dict[str, Any]) -> list[str]:
+    text = _normalize_feature_text(
+        " ".join(
+            [
+                str(rule.get("prompt") or ""),
+                str(rule.get("combo_name") or ""),
+                str(rule.get("combo_unit") or ""),
+            ]
+        )
+    ).lower()
+    aliases: list[str] = []
+    for canonical, values in _UNIT_ALIASES.items():
+        if canonical.lower() in text or any(alias.lower() in text for alias in values):
+            aliases.extend(values)
+    if not aliases and "每增运" in text:
+        aliases.extend(_UNIT_ALIASES["km"])
+    return sorted(set(aliases), key=len, reverse=True)
+
+
+def _rule_keywords(rule: dict[str, Any]) -> list[str]:
+    text = _normalize_feature_text(f"{rule.get('prompt') or ''} {rule.get('combo_name') or ''}")
+    keywords = [keyword for keyword in _FEATURE_KEYWORDS if keyword in text]
+    if not keywords and "每增运" in text:
+        keywords.append("运距")
+    return keywords
+
+
+def _infer_feature_value_from_boq(boq_item: dict[str, Any] | None, rule: dict[str, Any]) -> dict[str, Any] | None:
+    if not boq_item:
+        return None
+    text = _normalize_feature_text(
+        "\n".join(
+            [
+                str(boq_item.get("item_description") or ""),
+                str(boq_item.get("item_name") or ""),
+            ]
+        )
+    )
+    unit_aliases = _rule_unit_aliases(rule)
+    if not text or not unit_aliases:
+        return None
+
+    alias_pattern = "|".join(re.escape(alias) for alias in unit_aliases)
+    pattern = re.compile(rf"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{alias_pattern})", re.IGNORECASE)
+    keywords = _rule_keywords(rule)
+    candidates: list[tuple[int, float, str, str]] = []
+    for match in pattern.finditer(text):
+        value = _float_or_none(match.group("value"))
+        if value is None:
+            continue
+        start = max(0, match.start() - 24)
+        end = min(len(text), match.end() + 24)
+        snippet = text[start:end].strip()
+        score = 10
+        for keyword in keywords:
+            keyword_pos = text.rfind(keyword, max(0, match.start() - 30), match.end())
+            if keyword_pos >= 0:
+                score += 20 - min(19, abs(match.start() - keyword_pos))
+        candidates.append((score, value, match.group("unit"), snippet))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, feature_value, unit, snippet = candidates[0]
+    keyword_text = "、".join(keywords) if keywords else "数量特征"
+    return {
+        "feature_value": feature_value,
+        "matched_feature": snippet,
+        "reason": f"从项目特征识别到{keyword_text}{feature_value:g}{unit}，匹配组合定额增减指标。",
+    }
+
+
+def _normalize_adjustment_rules(
+    raw_item: dict[str, Any] | None,
+    confirmed: dict[str, Any],
+    boq_item: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    raw_rules = raw_item.get("adjustment_rules", []) if isinstance(raw_item, dict) else []
+    raw_by_index: dict[int, dict[str, Any]] = {}
+    raw_by_code: dict[str, dict[str, Any]] = {}
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        try:
+            raw_by_index[int(raw_rule.get("rule_index") or 0)] = raw_rule
+        except Exception:
+            pass
+        combo_code = str(raw_rule.get("combo_code") or "").strip()
+        if combo_code:
+            raw_by_code[combo_code] = raw_rule
+
+    normalized: list[dict[str, Any]] = []
+    for rule in confirmed.get("adjustment_rules", []):
+        rule_index = int(rule.get("rule_index") or 0)
+        combo_code = str(rule.get("combo_code") or "")
+        raw_rule = raw_by_index.get(rule_index) or raw_by_code.get(combo_code) or {}
+        matched = bool(raw_rule.get("matched"))
+        feature_value = _float_or_none(raw_rule.get("feature_value"))
+        base_value = _float_or_none(rule.get("base_value")) or 0.0
+        increment_unit = _float_or_none(rule.get("increment_unit")) or 0.0
+        calculated_times: float | None = None
+        reason = str(raw_rule.get("reason") or "")
+        requires_manual_review = bool(raw_rule.get("requires_manual_review"))
+        matched_feature = str(raw_rule.get("matched_feature") or "")
+        confidence = raw_rule.get("confidence") if raw_rule.get("confidence") in {"high", "medium", "low"} else "low"
+
+        inferred = _infer_feature_value_from_boq(boq_item, rule)
+        if inferred and (feature_value is None or not matched):
+            matched = True
+            feature_value = inferred["feature_value"]
+            matched_feature = matched_feature or str(inferred["matched_feature"])
+            reason = str(inferred["reason"])
+            requires_manual_review = False
+            confidence = "high"
+
+        if matched and feature_value is not None and increment_unit > 0:
+            calculated_times = (feature_value - base_value) / increment_unit
+            if calculated_times < 0:
+                calculated_times = 0.0
+                reason = reason or "特征值低于基础值，未生成追加次数。"
+            else:
+                formula_reason = f"按 ({feature_value:g} - {base_value:g}) / {increment_unit:g} = {calculated_times:g} 计算组合定额次数。"
+                reason = f"{reason} {formula_reason}".strip() if reason else formula_reason
+        elif matched:
+            matched = False
+            requires_manual_review = True
+            reason = reason or "缺少可计算的项目特征值或增减单位无效，需人工复核。"
+        else:
+            reason = reason or "项目特征未匹配该组合定额的数量增减指标。"
+
+        normalized.append(
+            {
+                "rule_index": rule_index,
+                "prompt": str(rule.get("prompt") or raw_rule.get("prompt") or ""),
+                "base_value": base_value,
+                "increment_unit": increment_unit,
+                "combo_dezmid": int(rule.get("combo_dezmid") or raw_rule.get("combo_dezmid") or 0),
+                "combo_code": combo_code or str(raw_rule.get("combo_code") or ""),
+                "combo_name": str(rule.get("combo_name") or raw_rule.get("combo_name") or ""),
+                "combo_unit": str(rule.get("combo_unit") or raw_rule.get("combo_unit") or ""),
+                "combo_work_content": str(rule.get("combo_work_content") or raw_rule.get("combo_work_content") or ""),
+                "combo_labor_cost": _float_or_none(rule.get("combo_labor_cost")) or 0,
+                "combo_material_cost": _float_or_none(rule.get("combo_material_cost")) or 0,
+                "combo_machine_cost": _float_or_none(rule.get("combo_machine_cost")) or 0,
+                "combo_resources": [
+                    {
+                        "code": str(resource.get("code") or ""),
+                        "name": str(resource.get("name") or ""),
+                        "unit": str(resource.get("unit") or ""),
+                        "quantity": resource.get("quantity"),
+                        "type": resource.get("type"),
+                    }
+                    for resource in rule.get("combo_resources", [])
+                    if isinstance(resource, dict)
+                ],
+                "matched": matched,
+                "matched_feature": matched_feature,
+                "feature_value": feature_value,
+                "calculated_times": calculated_times,
+                "reason": reason,
+                "requires_manual_review": requires_manual_review,
+                "confidence": confidence,
+            }
+        )
+    return normalized
+
+
+def _default_conversion_check(
+    items: list[dict[str, Any]],
+    issue: str | None = None,
+    boq_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "items": [
             {
@@ -896,19 +1118,10 @@ def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = N
                 "quota_code": item["quota_code"],
                 "quota_name": item["quota_name"],
                 "needs_conversion": False,
-                "suggested_qty_factor": item.get("current_qty_factor") or 1.0,
-                "reason": "未查询到换算说明，默认不建议换算。",
-                "difference_points": [],
-                "conversion_category": "none",
-                "conversion_type": "none",
-                "basis": "未查询到定额库换算说明。",
-                "suggested_action": "不自动换算，必要时人工复核。",
-                "requires_manual_review": bool(item.get("resources")),
-                "matched_rules": [],
-                "resource_adjustments": [],
+                "reason": "未查询到组合定额规则，默认不建议换算。" if not item.get("adjustment_rules") else "未完成组合定额规则分析。",
+                "requires_manual_review": bool(item.get("adjustment_rules")),
                 "resources": item.get("resources", []),
-                "conversion_rules": item.get("conversion_rules", []),
-                "input_prompts": item.get("input_prompts", []),
+                "adjustment_rules": _normalize_adjustment_rules(None, item, boq_item),
                 "missing_inputs": [],
                 "confidence": "medium",
             }
@@ -918,7 +1131,11 @@ def _default_conversion_check(items: list[dict[str, Any]], issue: str | None = N
     }
 
 
-def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[str, Any]]) -> dict[str, Any]:
+def _normalize_conversion_check(
+    raw: dict[str, Any],
+    confirmed_items: list[dict[str, Any]],
+    boq_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     by_key = {(item["dekid"], item["dezmid"]): item for item in confirmed_items}
     raw_by_key = {}
     for item in raw.get("items", []):
@@ -930,95 +1147,26 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
     for key, confirmed in by_key.items():
         item = raw_by_key.get(key)
         if not item:
-            normalized.extend(_default_conversion_check([confirmed])["items"])
+            normalized.extend(_default_conversion_check([confirmed], boq_item=boq_item)["items"])
             continue
-        matched_rules = [
-            {
-                "prompt": str(rule.get("prompt") or ""),
-                "description": str(rule.get("description") or ""),
-                "group_no": int(rule.get("group_no") or 0),
-            }
-            for rule in item.get("matched_rules", [])
-        ]
         confidence = item.get("confidence") if item.get("confidence") in {"high", "medium", "low"} else "low"
-        try:
-            suggested_qty_factor = float(item.get("suggested_qty_factor", confirmed.get("current_qty_factor") or 1.0) or 1.0)
-        except Exception:
-            suggested_qty_factor = confirmed.get("current_qty_factor") or 1.0
-        category = item.get("conversion_category")
-        if category not in {"material", "process", "measurement", "none", "unknown"}:
-            category = "unknown"
-        conversion_type = str(item.get("conversion_type") or "unknown")
-        allowed_types = {"强度换算", "厚度换算", "配合比换算", "材料种类换算", "定额子目借用", "部位调整", "系数调整", "单位换算", "none", "unknown"}
-        if conversion_type not in allowed_types:
-            conversion_type = "unknown"
-        has_matched_rules = bool(matched_rules)
-        resource_by_code = {
-            str(resource.get("code") or ""): resource
-            for resource in confirmed.get("resources", [])
-            if resource.get("code")
-        }
-        resource_adjustments = []
-        for adjustment in item.get("resource_adjustments", []):
-            if not isinstance(adjustment, dict):
-                continue
-            action = str(adjustment.get("action") or "")
-            if action not in {"replace", "update_quantity", "add", "remove"}:
-                continue
-            source_code = str(adjustment.get("source_code") or "")
-            source = resource_by_code.get(source_code)
-            if action != "add" and not source:
-                continue
-            try:
-                original_quantity = float(
-                    adjustment.get(
-                        "original_quantity",
-                        source.get("quantity") if source else 0,
-                    )
-                    or 0
-                )
-                suggested_quantity = float(adjustment.get("suggested_quantity", original_quantity) or 0)
-                resource_type = int(
-                    adjustment.get(
-                        "resource_type",
-                        source.get("type") if source else 2,
-                    )
-                    or 2
-                )
-            except Exception:
-                continue
-            resource_adjustments.append(
-                {
-                    "action": action,
-                    "source_code": source_code,
-                    "source_name": str(adjustment.get("source_name") or (source.get("name") if source else "")),
-                    "target_code": str(adjustment.get("target_code") or ""),
-                    "target_name": str(adjustment.get("target_name") or ""),
-                    "target_unit": str(adjustment.get("target_unit") or (source.get("unit") if source else "")),
-                    "resource_type": resource_type,
-                    "original_quantity": original_quantity,
-                    "suggested_quantity": suggested_quantity,
-                    "reason": str(adjustment.get("reason") or ""),
-                    "requires_manual_review": bool(adjustment.get("requires_manual_review", True)),
-                }
-            )
+        adjustment_rules = _normalize_adjustment_rules(item, confirmed, boq_item)
+        has_calculated_adjustment = any(
+            bool(rule.get("matched")) and (_float_or_none(rule.get("calculated_times")) or 0) > 0
+            for rule in adjustment_rules
+        )
         normalized.append(
             {
                 "dekid": confirmed["dekid"],
                 "dezmid": confirmed["dezmid"],
                 "quota_code": confirmed["quota_code"],
                 "quota_name": confirmed["quota_name"],
-                "needs_conversion": bool(item.get("needs_conversion")),
-                "suggested_qty_factor": suggested_qty_factor,
+                "needs_conversion": bool(item.get("needs_conversion")) or has_calculated_adjustment,
                 "reason": str(item.get("reason") or ""),
-                "difference_points": [str(v) for v in item.get("difference_points", []) if v],
-                "conversion_category": category,
-                "conversion_type": conversion_type,
-                "basis": str(item.get("basis") or ("命中定额库换算说明。" if has_matched_rules else "未查询到定额库换算说明。")),
-                "suggested_action": str(item.get("suggested_action") or ""),
-                "requires_manual_review": bool(item.get("requires_manual_review") or (item.get("needs_conversion") and not has_matched_rules)),
-                "matched_rules": matched_rules,
-                "resource_adjustments": resource_adjustments,
+                "requires_manual_review": bool(
+                    item.get("requires_manual_review")
+                    or any(rule.get("requires_manual_review") for rule in adjustment_rules)
+                ),
                 "resources": [
                     {
                         "code": str(resource.get("code") or ""),
@@ -1029,20 +1177,78 @@ def _normalize_conversion_check(raw: dict[str, Any], confirmed_items: list[dict[
                     }
                     for resource in confirmed.get("resources", [])
                 ],
-                "conversion_rules": [
-                    {
-                        "prompt": str(rule.get("prompt") or ""),
-                        "description": str(rule.get("description") or ""),
-                        "group_no": int(rule.get("group_no") or 0),
-                    }
-                    for rule in confirmed.get("conversion_rules", [])
-                ],
-                "input_prompts": [str(v) for v in confirmed.get("input_prompts", []) if v],
+                "adjustment_rules": adjustment_rules,
                 "missing_inputs": [str(v) for v in item.get("missing_inputs", []) if v],
                 "confidence": confidence,
             }
         )
     return {"items": normalized, "issues": [str(v) for v in raw.get("issues", []) if v]}
+
+
+def _load_combo_resources(conn, dekid: int, combo_dezmid: int | None, combo_code: str | None) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        dezmid = combo_dezmid or 0
+        if not dezmid and combo_code:
+            cur.execute(
+                """
+                SELECT id
+                FROM tdek_tdezm
+                WHERE dekid=%s AND zmbh=%s
+                LIMIT 1
+                """,
+                (dekid, combo_code),
+            )
+            row = cur.fetchone()
+            dezmid = int(row[0]) if row else 0
+        if not dezmid:
+            return []
+        cur.execute(
+            """
+            SELECT zmbh, zmmc, dw, gcl, lx
+            FROM tdek_tzmgc
+            WHERE dekid=%s AND dezmid=%s
+            ORDER BY lx NULLS LAST, source_rowid
+            """,
+            (dekid, dezmid),
+        )
+        return [
+            {
+                "code": r[0] or "",
+                "name": r[1] or "",
+                "unit": r[2] or "",
+                "quantity": float(r[3]) if r[3] is not None else None,
+                "type": int(r[4]) if r[4] is not None else None,
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def _hydrate_conversion_combo_resources(conn, conversion_check: Any) -> Any:
+    if not isinstance(conversion_check, dict):
+        return conversion_check
+    for item in conversion_check.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            dekid = int(item.get("dekid") or 0)
+        except Exception:
+            dekid = 0
+        if not dekid:
+            continue
+        for rule in item.get("adjustment_rules", []) or []:
+            if not isinstance(rule, dict) or rule.get("combo_resources"):
+                continue
+            try:
+                combo_dezmid = int(rule.get("combo_dezmid") or 0)
+            except Exception:
+                combo_dezmid = 0
+            rule["combo_resources"] = _load_combo_resources(
+                conn,
+                dekid,
+                combo_dezmid,
+                str(rule.get("combo_code") or ""),
+            )
+    return conversion_check
 
 
 def _create_run(conn, task_id: int | None, boq_item: dict[str, Any]) -> int:
@@ -1486,7 +1692,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "quota_candidates": r[5],
                 "quota_match": r[6],
                 "evaluation": r[7],
-                "conversion_check": r[8],
+                "conversion_check": _hydrate_conversion_combo_resources(conn, r[8]),
                 "step_timings": r[9],
                 "error_message": r[10],
                 "created_at": r[11],
@@ -1537,7 +1743,7 @@ def list_latest_task_runs(task_id: int):
                     "quota_candidates": r[6],
                     "quota_match": r[7],
                     "evaluation": r[8],
-                    "conversion_check": r[9],
+                    "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
                     "step_timings": r[10],
                     "error_message": r[11],
                     "created_at": r[12],
@@ -1635,26 +1841,40 @@ def pricing_task_conversion_check_stream(run_id: int):
             yield _sse({"type": "conversion_check_start", "run_id": run_id, "total": len(confirmed_items)})
 
             if not confirmed_items:
-                result = {"items": [], "issues": ["未找到已确认定额，无法进行换算判断。"]}
+                result = {"items": [], "issues": ["未找到已确认定额，无法进行组合换算。"]}
+                yield _sse({"type": "combo_adjustment_rules", "items": []})
                 _update_run(conn, run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
             input_payload = {
                 "boq_item": boq_item,
                 "confirmed_quotas": confirmed_items,
-                "conversion_rule_guide": CONVERSION_RULE_GUIDE,
+                "combo_adjustment_rule_guide": COMBO_ADJUSTMENT_RULE_GUIDE,
             }
             context_text = _json_dumps(input_payload)
             system_prompt = build_system_prompt()
+            combo_preview = _default_conversion_check(confirmed_items)
+            yield _sse({"type": "combo_adjustment_rules", "items": combo_preview["items"]})
+            if not any(item.get("adjustment_rules") for item in confirmed_items):
+                result = _default_conversion_check(
+                    confirmed_items,
+                    "已确认定额均未查询到 tdek_tzhhs 组合定额规则。",
+                    boq_item=boq_item,
+                )
+                _update_run(conn, run_id, conversion_check=result)
+                yield _sse({"type": "conversion_check", "conversion_check": result})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": run_id})
+                return
             analysis_prompt = (
-                "请对已人工确认的定额进行第七轮换算判断。先进行分析，不要调用工具，不要输出 JSON。\n"
-                "只允许根据项目特征、已确认定额、定额工作内容、工料机显示、定额库换算说明、实际值提示和通用换算规则判断是否建议换算。\n"
-                "请逐条识别差异点，并按强度换算、厚度换算、配合比换算、材料种类换算、定额子目借用、部位调整、系数调整、单位换算进行分类。\n"
-                "第七轮结果只作为换算建议，不允许修改已确认定额，也不要改写工程量系数。\n"
-                "定额库换算说明优先级最高；未查询到定额库换算说明时，不允许编造依据，如仍建议换算必须明确需要人工复核。\n\n"
+                "请对已人工确认的定额进行第七轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
+                "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
+                "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
+                "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n"
+                "第七轮结果只作为组合定额次数建议，不允许修改已确认定额，也不要改写工程量系数。\n\n"
                 f"【输入数据】\n{context_text}"
             )
             conversion_analysis = ""
@@ -1673,19 +1893,12 @@ def pricing_task_conversion_check_stream(run_id: int):
             submit_prompt = (
                 "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
                 "必须覆盖每一条已确认定额。\n"
-                "difference_points 填写项目特征与定额工作内容/工料机显示的差异点；无差异填空数组。\n"
-                "conversion_category 只能是 material、process、measurement、none、unknown。\n"
-                "conversion_type 只能是强度换算、厚度换算、配合比换算、材料种类换算、定额子目借用、部位调整、系数调整、单位换算、none、unknown。\n"
-                "resource_adjustments 用于提交具体工料机调整建议。发现材料名称、牌号、强度、规格、直径、厚度或配合比与项目特征不一致时，不能只写人工复核，必须填写对应调整项。\n"
-                "replace 表示替换现有工料机；source_code/source_name 必须来自输入的 resources；target_name 必须按项目特征写出目标材料完整名称。库中无法确定目标编码时 target_code 填空字符串。\n"
-                "目标材料名称必须忠实保留项目特征中的牌号、规格和直径原文，不得自行把 HRB300 改成 HRB400E、HPB300 或其他牌号。若项目特征疑似矛盾，应在 reason/issues 中提示，但 resource_adjustments.target_name 仍按项目特征原文生成。\n"
-                "update_quantity 表示仅调整含量；add/remove 表示新增或删除工料机。未涉及工料机调整时 resource_adjustments 填空数组。\n"
-                "original_quantity 使用原工料机含量；没有明确依据改变含量时 suggested_quantity 保持原值，并标记 requires_manual_review=true。\n"
-                "basis 必须写明依据。命中定额库换算说明时引用说明；没有定额库依据时写明“未查询到定额库换算说明”。\n"
-                "suggested_action 写清建议处理动作。requires_manual_review 表示是否需要人工复核。\n"
-                "matched_rules 只能填写命中的换算说明；没有命中时填写空数组。\n"
-                "没有定额库换算说明时，不允许伪造依据；如 needs_conversion=true，则 requires_manual_review 必须为 true。\n"
-                "suggested_qty_factor 只是建议值，不代表写回，也不要修改已确认结果。\n"
+                "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
+                "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
+                "calculated_times 可按 (feature_value - base_value) / increment_unit 先填写，但后端会重新计算；小数保留，负数按 0 理解。\n"
+                "不匹配时 matched=false，feature_value 和 calculated_times 填 0，并说明原因。\n"
+                "不要输出工料机调整、材料替换、工程量系数调整或其他非组合定额规则。\n"
+                "reason 写整体判断说明，missing_inputs 写缺失的数量特征或单位信息。\n"
                 "confidence 只能是 high、medium、low。\n\n"
                 f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
                 f"【输入数据】\n{context_text}"
@@ -1696,10 +1909,10 @@ def pricing_task_conversion_check_stream(run_id: int):
                     {"role": "user", "content": submit_prompt},
                 ]
             )
-            result = _normalize_conversion_check(raw_result, confirmed_items)
+            result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
             _update_run(conn, run_id, conversion_check=result)
             yield _sse({"type": "conversion_check", "conversion_check": result})
-            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "换算判断", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})

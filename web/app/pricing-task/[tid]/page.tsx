@@ -7,14 +7,12 @@ import {
   PricingTask,
   PricingTaskConversionCheck,
   PricingTaskConversionResource,
-  PricingTaskConversionResourceChange,
   PricingTaskEvaluation,
   PricingTaskEvent,
   PricingTaskRun,
   PricingTaskStepTiming,
   QuotaCandidate,
   QuotaMatch,
-  confirmPricingTaskConversion,
   confirmPricingTaskRun,
   fetchAllBoqItems,
   fetchPricingTaskLatestRuns,
@@ -48,12 +46,11 @@ interface ItemResult {
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
+  comboAdjustmentPreview?: PricingTaskConversionCheck['items']
   conversionCheck?: PricingTaskConversionCheck
   conversionChecking?: boolean
   conversionError?: string
   confirmedResults?: PricingTaskRun['confirmed_results']
-  conversionSaving?: boolean
-  conversionSaveError?: string
   stepTimings?: Record<string, PricingTaskStepTiming>
   error?: string
 }
@@ -139,185 +136,11 @@ function StepDuration({ result, stepNo }: { result: ItemResult; stepNo: number }
   )
 }
 
-function conversionCategoryLabel(category?: string) {
-  if (category === 'material') return '材料类'
-  if (category === 'process') return '工艺类'
-  if (category === 'measurement') return '计量类'
-  if (category === 'none') return '无换算'
-  return '待判断'
-}
-
 function resourceTypeLabel(type?: number | null) {
   if (type === 1) return '人工'
   if (type === 2) return '材料'
   if (type === 3) return '机械'
   return '其他'
-}
-
-interface ConversionResourceDraft extends PricingTaskConversionResource {
-  original_code: string
-  original_name: string
-  original_unit: string
-  original_type: number | null
-  original_quantity: number | null
-  confirmed_quantity: number | null
-  adjustment_note: string
-}
-
-interface ConversionConfirmDraft {
-  dekid: number
-  dezmid: number
-  quota_code: string
-  quota_name: string
-  confirmed_qty_factor: number
-  conversion_note: string
-  resources: ConversionResourceDraft[]
-}
-
-function toNullableNumber(value: unknown): number | null {
-  if (value === '' || value == null) return null
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function sameValue(left: unknown, right: unknown) {
-  return String(left ?? '') === String(right ?? '')
-}
-
-function draftResource(resource?: PricingTaskConversionResource): ConversionResourceDraft {
-  const quantity = toNullableNumber(resource?.confirmed_quantity ?? resource?.quantity ?? resource?.original_quantity)
-  const originalQuantity = toNullableNumber(resource?.original_quantity ?? resource?.quantity ?? quantity)
-  return {
-    code: resource?.code ?? '',
-    name: resource?.name ?? '',
-    unit: resource?.unit ?? '',
-    type: resource?.type ?? null,
-    original_code: resource?.code ?? '',
-    original_name: resource?.name ?? '',
-    original_unit: resource?.unit ?? '',
-    original_type: resource?.type ?? null,
-    original_quantity: originalQuantity,
-    confirmed_quantity: quantity,
-    adjustment_note: resource?.adjustment_note ?? '',
-  }
-}
-
-function applyResourceAdjustments(
-  resources: ConversionResourceDraft[],
-  adjustments: NonNullable<PricingTaskConversionCheck['items'][number]['resource_adjustments']>,
-) {
-  const next = resources.map(resource => ({ ...resource }))
-  for (const adjustment of adjustments) {
-    if (adjustment.action === 'add') {
-      next.push({
-        ...draftResource({
-          code: adjustment.target_code,
-          name: adjustment.target_name,
-          unit: adjustment.target_unit,
-          type: adjustment.resource_type,
-          quantity: adjustment.suggested_quantity,
-        }),
-        original_code: '',
-        original_name: '',
-        original_unit: '',
-        original_type: null,
-        original_quantity: null,
-        adjustment_note: adjustment.reason,
-      })
-      continue
-    }
-    const index = next.findIndex(resource =>
-      adjustment.source_code
-        ? resource.original_code === adjustment.source_code
-        : resource.original_name === adjustment.source_name,
-    )
-    if (index < 0) continue
-    const resource = next[index]
-    if (adjustment.action === 'replace') {
-      next[index] = {
-        ...resource,
-        code: adjustment.target_code,
-        name: adjustment.target_name || resource.name,
-        unit: adjustment.target_unit || resource.unit,
-        type: adjustment.resource_type ?? resource.type,
-        confirmed_quantity: adjustment.suggested_quantity,
-        adjustment_note: adjustment.reason,
-      }
-    } else if (adjustment.action === 'update_quantity') {
-      next[index] = {
-        ...resource,
-        confirmed_quantity: adjustment.suggested_quantity,
-        adjustment_note: adjustment.reason,
-      }
-    } else if (adjustment.action === 'remove') {
-      next[index] = {
-        ...resource,
-        confirmed_quantity: 0,
-        adjustment_note: adjustment.reason,
-      }
-    }
-  }
-  return next
-}
-
-function buildConversionDrafts(result: ItemResult): ConversionConfirmDraft[] {
-  const confirmed = result.confirmedResults?.filter(item => item.conversion_confirmed) ?? []
-  if (confirmed.length > 0) {
-    return confirmed.map(item => ({
-      dekid: item.dekid,
-      dezmid: item.dezmid,
-      quota_code: item.subitem_code,
-      quota_name: item.subitem_name,
-      confirmed_qty_factor: item.qty_factor,
-      conversion_note: item.conversion_note || '',
-      resources: (item.conversion_resources ?? []).map(resource => draftResource(resource)),
-    }))
-  }
-  return (result.conversionCheck?.items ?? []).map(item => {
-    const resources = (item.resources ?? []).map(resource => draftResource(resource))
-    return {
-      dekid: item.dekid,
-      dezmid: item.dezmid,
-      quota_code: item.quota_code,
-      quota_name: item.quota_name,
-      confirmed_qty_factor: item.suggested_qty_factor || 1,
-      conversion_note: item.reason || item.suggested_action || '',
-      resources: applyResourceAdjustments(resources, item.resource_adjustments ?? []),
-    }
-  })
-}
-
-function buildResourceChanges(draft: ConversionConfirmDraft): PricingTaskConversionResourceChange[] {
-  const changes: PricingTaskConversionResourceChange[] = []
-  for (const resource of draft.resources) {
-    const base = {
-      resource_code: resource.code || resource.original_code,
-      resource_name: resource.name || resource.original_name,
-      resource_type: resource.type ?? resource.original_type,
-      change_type: '人工确认换算',
-      basis: draft.conversion_note || '人工确认换算写回',
-      note: resource.adjustment_note || draft.conversion_note || '',
-    }
-    if (!resource.original_code && resource.code) {
-      changes.push({ ...base, field: 'resource', old_value: null, new_value: resource.name || resource.code })
-    }
-    if (!sameValue(resource.original_code, resource.code)) {
-      changes.push({ ...base, field: 'code', old_value: resource.original_code || null, new_value: resource.code || null })
-    }
-    if (!sameValue(resource.original_name, resource.name)) {
-      changes.push({ ...base, field: 'name', old_value: resource.original_name || null, new_value: resource.name || null })
-    }
-    if (!sameValue(resource.original_unit, resource.unit)) {
-      changes.push({ ...base, field: 'unit', old_value: resource.original_unit || null, new_value: resource.unit || null })
-    }
-    if (!sameValue(resource.original_type, resource.type)) {
-      changes.push({ ...base, field: 'type', old_value: resource.original_type, new_value: resource.type })
-    }
-    if (!sameValue(resource.original_quantity, resource.confirmed_quantity)) {
-      changes.push({ ...base, field: 'quantity', old_value: resource.original_quantity, new_value: resource.confirmed_quantity })
-    }
-  }
-  return changes
 }
 
 function stepBadges(result?: ItemResult) {
@@ -360,7 +183,7 @@ function stepBadges(result?: ItemResult) {
     },
     {
       no: 7,
-      title: '换算判断',
+      title: '组合换算',
       tone: result?.conversionChecking
         ? 'pending'
         : !result?.conversionCheck
@@ -369,22 +192,10 @@ function stepBadges(result?: ItemResult) {
             ? 'warning'
             : 'success',
     },
-    {
-      no: 8,
-      title: '换算写回',
-      tone: result?.conversionSaving
-        ? 'pending'
-        : result?.confirmedResults?.some(item => item.conversion_confirmed)
-          ? 'success'
-          : result?.status === 'confirmed' && result?.conversionCheck
-            ? 'warning'
-            : 'pending',
-    },
   ] as const
 }
 
 function activeStepNo(result?: ItemResult) {
-  if (result?.conversionSaving) return 8
   if (result?.conversionChecking) return 7
   if (!result || result.phase !== 'reasoning') return null
   if (!result.codeCheck) return 1
@@ -442,6 +253,163 @@ function confidenceLabel(confidence?: string) {
   return '-'
 }
 
+function formatNullableNumber(value?: number | null) {
+  if (value == null) return '-'
+  return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+function ComboAdjustmentRules({
+  rules,
+  compact = false,
+  preview = false,
+}: {
+  rules?: NonNullable<PricingTaskConversionCheck['items'][number]['adjustment_rules']>
+  compact?: boolean
+  preview?: boolean
+}) {
+  if (!rules || rules.length === 0) {
+    return (
+      <div className="rounded border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+        该定额无组合换算规则。
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-2">
+      {rules.map(rule => (
+        <div key={`${rule.rule_index}-${rule.combo_code}`} className="rounded border border-cyan-100 bg-white px-3 py-2 text-xs">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono font-semibold text-cyan-800">{rule.combo_code || '-'}</span>
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">规则 {rule.rule_index}</span>
+              </div>
+              <div className="mt-0.5 font-medium text-gray-900">{rule.combo_name || '-'}</div>
+            </div>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${preview ? 'bg-cyan-100 text-cyan-700' : rule.matched && (rule.calculated_times ?? 0) > 0 ? 'bg-amber-100 text-amber-700' : rule.matched ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'}`}>
+              {preview ? '待识别' : rule.matched ? `次数 ${formatNullableNumber(rule.calculated_times)}` : '未匹配'}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+            <span>单位：{rule.combo_unit || '-'}</span>
+            <span>基础值：{formatNullableNumber(rule.base_value)}</span>
+            <span>增减单位：{formatNullableNumber(rule.increment_unit)}</span>
+            {!preview && <span>特征值：{formatNullableNumber(rule.feature_value)}</span>}
+            {rule.requires_manual_review && <span className="font-semibold text-amber-700">需人工复核</span>}
+          </div>
+          {rule.prompt && <div className="mt-1 text-gray-600">提示：{rule.prompt}</div>}
+          {!preview && rule.matched_feature && <div className="mt-1 text-cyan-800">命中特征：{rule.matched_feature}</div>}
+          {!preview && rule.reason && <div className="mt-1 text-gray-600">{rule.reason}</div>}
+          {!compact && rule.combo_work_content && (
+            <div className="mt-1 text-gray-500">工作内容：{rule.combo_work_content}</div>
+          )}
+          {!compact && (
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-400">
+              <span>人工费：{formatNullableNumber(rule.combo_labor_cost)}</span>
+              <span>材料费：{formatNullableNumber(rule.combo_material_cost)}</span>
+              <span>机械费：{formatNullableNumber(rule.combo_machine_cost)}</span>
+              <span>置信度：{confidenceLabel(rule.confidence)}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ComboConversionList({
+  items,
+  compact = false,
+  preview = false,
+}: {
+  items: PricingTaskConversionCheck['items']
+  compact?: boolean
+  preview?: boolean
+}) {
+  if (items.length === 0) {
+    return <ResultEmptyState title="暂无组合换算结果" description="确认定额后会展示组合定额、特征值和计算次数。" />
+  }
+  return (
+    <div className="space-y-2">
+      {items.map((conversion, index) => (
+        <div key={`${conversion.dekid}-${conversion.dezmid}-${index}`} className="rounded border border-cyan-100 bg-cyan-50/50 px-3 py-2 text-xs">
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="font-mono font-semibold text-cyan-800">{conversion.quota_code || '-'}</div>
+              <div className="font-medium text-gray-900">{conversion.quota_name || '-'}</div>
+            </div>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${preview ? 'bg-cyan-100 text-cyan-700' : conversion.needs_conversion ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+              {preview ? '组合定额已列出' : conversion.needs_conversion ? '有组合次数' : '无组合次数'}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+            <span>组合规则：{conversion.adjustment_rules?.length ?? 0} 条</span>
+            <span>命中：{(conversion.adjustment_rules ?? []).filter(rule => rule.matched).length} 条</span>
+            {!preview && conversion.requires_manual_review && <span className="font-medium text-amber-700">需人工复核</span>}
+            {!preview && <span>置信度：{confidenceLabel(conversion.confidence)}</span>}
+          </div>
+          {!preview && conversion.reason && <div className="mt-1 text-gray-600">{conversion.reason}</div>}
+          {!preview && conversion.missing_inputs.length > 0 && (
+            <div className="mt-1 text-amber-700">缺失信息：{conversion.missing_inputs.join('、')}</div>
+          )}
+          <div className="mt-2">
+            <ComboAdjustmentRules rules={conversion.adjustment_rules} compact={compact} preview={preview} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ComboQuotaOnlyList({
+  items,
+  preview = false,
+}: {
+  items: PricingTaskConversionCheck['items']
+  preview?: boolean
+}) {
+  const rules = items.flatMap(item =>
+    (item.adjustment_rules ?? []).map(rule => ({
+      ...rule,
+      base_quota_code: item.quota_code,
+      base_quota_name: item.quota_name,
+    })),
+  )
+  if (rules.length === 0) {
+    return <ResultEmptyState title="暂无组合定额" description="该清单确认定额后未查询到组合定额规则。" />
+  }
+  return (
+    <div className="space-y-2">
+      {rules.map(rule => (
+        <div key={`${rule.base_quota_code}-${rule.rule_index}-${rule.combo_code}`} className="rounded border border-cyan-100 bg-cyan-50/50 px-3 py-2 text-xs">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono font-semibold text-cyan-800">{rule.combo_code || '-'}</span>
+                <span className="rounded bg-white px-1.5 py-0.5 text-[10px] text-gray-500">来源 {rule.base_quota_code || '-'}</span>
+              </div>
+              <div className="mt-0.5 font-medium text-gray-900">{rule.combo_name || '-'}</div>
+            </div>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${preview ? 'bg-cyan-100 text-cyan-700' : rule.matched && (rule.calculated_times ?? 0) > 0 ? 'bg-amber-100 text-amber-700' : rule.matched ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'}`}>
+              {preview ? '待识别' : rule.matched ? `次数 ${formatNullableNumber(rule.calculated_times)}` : '未匹配'}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
+            <span>单位：{rule.combo_unit || '-'}</span>
+            <span>基础值：{formatNullableNumber(rule.base_value)}</span>
+            <span>增减单位：{formatNullableNumber(rule.increment_unit)}</span>
+            {!preview && <span>特征值：{formatNullableNumber(rule.feature_value)}</span>}
+            {rule.requires_manual_review && <span className="font-semibold text-amber-700">需人工复核</span>}
+          </div>
+          {rule.prompt && <div className="mt-1 text-gray-600">提示：{rule.prompt}</div>}
+          {!preview && rule.matched_feature && <div className="mt-1 text-cyan-800">命中特征：{rule.matched_feature}</div>}
+          {!preview && rule.reason && <div className="mt-1 text-gray-600">{rule.reason}</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ResultEmptyState({ title, description }: { title: string; description: string }) {
   return (
     <div className="rounded border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center">
@@ -453,7 +421,7 @@ function ResultEmptyState({ title, description }: { title: string; description: 
 
 function ResourceTable({ resources }: { resources: PricingTaskConversionResource[] }) {
   if (resources.length === 0) {
-    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成换算判断后，这里会展示工料机信息。" />
+    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成组合换算后，这里会展示工料机信息。" />
   }
   return (
     <div className="overflow-x-auto rounded border border-gray-200">
@@ -492,13 +460,15 @@ interface ResourceGroup {
   quotaCode: string
   quotaName: string
   qtyFactor?: number
+  sourceLabel?: string
+  timesLabel?: string
   resources: PricingTaskConversionResource[]
 }
 
 function ResourceGroups({ groups }: { groups: ResourceGroup[] }) {
   const resourceCount = groups.reduce((sum, group) => sum + group.resources.length, 0)
   if (resourceCount === 0) {
-    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成换算判断后，这里会展示工料机信息。" />
+    return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成组合换算后，这里会展示工料机信息。" />
   }
   return (
     <div className="space-y-3">
@@ -524,31 +494,28 @@ function ResourceGroups({ groups }: { groups: ResourceGroup[] }) {
 function SelectedItemResultPanel({
   item,
   result,
-  drafts,
 }: {
   item?: BoqItem
   result?: ItemResult
-  drafts: ConversionConfirmDraft[]
 }) {
-  const confirmedWritebacks = result?.confirmedResults?.filter(row => row.conversion_confirmed) ?? []
-  const conversionItems = result?.conversionCheck?.items ?? []
-  const resourceGroups: ResourceGroup[] = drafts.length > 0
-    ? drafts.map(draft => ({
-        key: `${draft.dekid}-${draft.dezmid}`,
-        quotaCode: draft.quota_code,
-        quotaName: draft.quota_name,
-        qtyFactor: draft.confirmed_qty_factor,
-        resources: draft.resources,
-      }))
-    : conversionItems.map(row => ({
-        key: `${row.dekid}-${row.dezmid}`,
-        quotaCode: row.quota_code,
-        quotaName: row.quota_name,
-        qtyFactor: row.suggested_qty_factor,
-        resources: row.resources ?? [],
-      }))
+  const conversionItems = result?.conversionCheck?.items ?? result?.comboAdjustmentPreview ?? []
+  const hasFinalConversion = Boolean(result?.conversionCheck)
+  const resourceGroups: ResourceGroup[] = conversionItems.flatMap(row => {
+    const baseGroup: ResourceGroup = {
+      key: `${row.dekid}-${row.dezmid}`,
+      quotaCode: row.quota_code,
+      quotaName: row.quota_name,
+      resources: row.resources ?? [],
+    }
+    const comboGroups: ResourceGroup[] = (row.adjustment_rules ?? []).map(rule => ({
+      key: `${row.dekid}-${row.dezmid}-${rule.rule_index}-${rule.combo_code}`,
+      quotaCode: rule.combo_code,
+      quotaName: `${rule.combo_name || '-'}（来源 ${row.quota_code || '-'}；次数 ${formatNullableNumber(rule.calculated_times)}）`,
+      resources: rule.combo_resources ?? [],
+    }))
+    return [baseGroup, ...comboGroups]
+  })
   const resourceCount = resourceGroups.reduce((sum, group) => sum + group.resources.length, 0)
-  const resourceChanges = drafts.flatMap(draft => buildResourceChanges(draft))
 
   return (
     <section className="rounded-lg border border-gray-200 bg-white shadow-sm">
@@ -621,36 +588,19 @@ function SelectedItemResultPanel({
               </div>
 
               <div>
-                <h4 className="mb-2 text-xs font-semibold text-gray-900">换算判断</h4>
-                {result.conversionChecking ? (
-                  <ResultEmptyState title="换算判断中" description="正在根据已确认定额查询换算说明和工料机信息。" />
+                <h4 className="mb-2 text-xs font-semibold text-gray-900">组合换算</h4>
+                {result.conversionChecking && conversionItems.length === 0 ? (
+                  <ResultEmptyState title="组合换算中" description="正在根据已确认定额查询组合定额规则并识别数量特征。" />
                 ) : conversionItems.length === 0 ? (
-                  <ResultEmptyState title="待确认定额" description="确认定额并完成换算判断后，这里会展示换算依据、差异点和建议动作。" />
+                  <ResultEmptyState title="待组合换算" description="确认定额后会展示组合定额、特征值和计算次数。" />
                 ) : (
                   <div className="space-y-2">
-                    {conversionItems.map((conversion, index) => (
-                      <div key={`${conversion.dekid}-${conversion.dezmid}-${index}`} className="rounded border border-cyan-100 bg-cyan-50/50 px-3 py-2 text-xs">
-                        <div className="flex items-start gap-2">
-                          <div className="min-w-0 flex-1">
-                            <div className="font-mono font-semibold text-cyan-800">{conversion.quota_code || '-'}</div>
-                            <div className="font-medium text-gray-900">{conversion.quota_name || '-'}</div>
-                          </div>
-                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${conversion.needs_conversion ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                            {conversion.needs_conversion ? '建议换算' : '不换算'}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
-                          <span>{conversionCategoryLabel(conversion.conversion_category)}</span>
-                          <span>{conversion.conversion_type || '-'}</span>
-                          <span>建议系数：{conversion.suggested_qty_factor}</span>
-                          {conversion.requires_manual_review && <span className="font-medium text-amber-700">需人工复核</span>}
-                        </div>
-                        {conversion.reason && <div className="mt-1 text-gray-600">{conversion.reason}</div>}
-                        {(conversion.difference_points?.length ?? 0) > 0 && (
-                          <div className="mt-1 text-amber-700">差异点：{conversion.difference_points?.join('；')}</div>
-                        )}
+                    {result.conversionChecking && !hasFinalConversion && (
+                      <div className="rounded border border-cyan-100 bg-cyan-50 px-3 py-2 text-xs text-cyan-800">
+                        已查询组合定额，正在识别项目特征数量。
                       </div>
-                    ))}
+                    )}
+                    <ComboQuotaOnlyList items={conversionItems} preview={!hasFinalConversion} />
                   </div>
                 )}
               </div>
@@ -663,43 +613,6 @@ function SelectedItemResultPanel({
                   <span className="text-xs text-gray-500">{resourceGroups.length} 个定额 / {resourceCount} 条</span>
                 </div>
                 <ResourceGroups groups={resourceGroups} />
-              </div>
-
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <h4 className="text-xs font-semibold text-gray-900">写回记录</h4>
-                  <span className="text-xs text-gray-500">{confirmedWritebacks.length} 条</span>
-                </div>
-                {confirmedWritebacks.length === 0 ? (
-                  <ResultEmptyState title="尚未写回" description="人工确认换算并写回后，这里会展示最终系数和工料机变更记录。" />
-                ) : (
-                  <div className="space-y-2 text-xs">
-                    {confirmedWritebacks.map((row, index) => (
-                      <div key={`${row.dekid}-${row.dezmid}-${index}`} className="rounded border border-emerald-100 bg-emerald-50/50 px-3 py-2">
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <span className="font-mono font-semibold text-emerald-800">{row.subitem_code || `${row.dekid}/${row.dezmid}`}</span>
-                          <span className="font-medium text-gray-900">{row.subitem_name || '-'}</span>
-                          <span className="text-gray-500">最终系数：{row.qty_factor}</span>
-                        </div>
-                        {row.conversion_note && <div className="mt-1 text-gray-600">{row.conversion_note}</div>}
-                      </div>
-                    ))}
-                    {resourceChanges.length > 0 && (
-                      <div className="rounded border border-amber-100 bg-amber-50 px-3 py-2">
-                        <div className="mb-1 font-semibold text-amber-800">工料机变更 {resourceChanges.length} 条</div>
-                        <ul className="space-y-1 text-gray-700">
-                          {resourceChanges.slice(0, 8).map((change, index) => (
-                            <li key={index}>
-                              <span className="font-mono text-amber-800">{change.resource_code || '-'}</span>
-                              <span className="ml-1">{change.resource_name || '-'}</span>
-                              <span className="ml-2 text-gray-500">{change.field}: {String(change.old_value ?? '-')} → {String(change.new_value ?? '-')}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             </div>
           </div>
@@ -750,7 +663,6 @@ export default function PricingTaskDetailPage() {
   const [featureSaving, setFeatureSaving] = useState(false)
   const [featureEditError, setFeatureEditError] = useState('')
   const [featureImages, setFeatureImages] = useState<Array<{ url: string; name: string; size: number }>>([])
-  const [conversionDrafts, setConversionDrafts] = useState<Map<number, ConversionConfirmDraft[]>>(new Map())
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
@@ -771,17 +683,6 @@ export default function PricingTaskDetailPage() {
   useEffect(() => {
     setQuotaCandidatesExpanded(false)
   }, [selectedItemId])
-
-  useEffect(() => {
-    if (!selectedItemId || !currentResult) return
-    if (!currentResult.conversionCheck && !(currentResult.confirmedResults?.length)) return
-    setConversionDrafts(prev => {
-      if (prev.has(selectedItemId)) return prev
-      const drafts = buildConversionDrafts(currentResult)
-      if (drafts.length === 0) return prev
-      return new Map(prev).set(selectedItemId, drafts)
-    })
-  }, [selectedItemId, currentResult?.conversionCheck, currentResult?.confirmedResults])
 
   useEffect(() => {
     return () => {
@@ -970,17 +871,19 @@ export default function PricingTaskDetailPage() {
             ...s,
             conversionChecking: true,
             conversionError: undefined,
-            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 换算判断】\n`,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 组合换算】\n`,
+          }))
+        } else if (evt.type === 'combo_adjustment_rules') {
+          updateResult(itemId, s => ({
+            ...s,
+            comboAdjustmentPreview: evt.items,
+            conversionChecking: true,
+            reasoning: `${s.reasoning}${s.reasoning.endsWith('\n') || !s.reasoning ? '' : '\n'}已查询组合定额，正在识别项目特征数量。\n`,
           }))
         } else if (evt.type === 'reasoning_token') {
           updateResult(itemId, s => ({ ...s, reasoning: s.reasoning + evt.token }))
         } else if (evt.type === 'conversion_check') {
-          setConversionDrafts(prev => {
-            const next = new Map(prev)
-            next.delete(itemId)
-            return next
-          })
-          updateResult(itemId, s => ({ ...s, conversionCheck: evt.conversion_check, conversionChecking: false }))
+          updateResult(itemId, s => ({ ...s, conversionCheck: evt.conversion_check, comboAdjustmentPreview: evt.conversion_check.items, conversionChecking: false }))
         } else if (evt.type === 'step_timing') {
           updateResult(itemId, s => ({
             ...s,
@@ -1000,87 +903,7 @@ export default function PricingTaskDetailPage() {
       updateResult(itemId, s => ({
         ...s,
         conversionChecking: false,
-        conversionError: err instanceof Error ? err.message : '换算判断失败',
-      }))
-    }
-  }
-
-  function updateConversionDraft(itemId: number, quotaIndex: number, updater: (draft: ConversionConfirmDraft) => ConversionConfirmDraft) {
-    setConversionDrafts(prev => {
-      const drafts = prev.get(itemId) ?? []
-      return new Map(prev).set(itemId, drafts.map((draft, index) => index === quotaIndex ? updater(draft) : draft))
-    })
-  }
-
-  function updateConversionResource(
-    itemId: number,
-    quotaIndex: number,
-    resourceIndex: number,
-    updater: (resource: ConversionResourceDraft) => ConversionResourceDraft,
-  ) {
-    updateConversionDraft(itemId, quotaIndex, draft => ({
-      ...draft,
-      resources: draft.resources.map((resource, index) => index === resourceIndex ? updater(resource) : resource),
-    }))
-  }
-
-  function addConversionResource(itemId: number, quotaIndex: number) {
-    updateConversionDraft(itemId, quotaIndex, draft => ({
-      ...draft,
-      resources: [...draft.resources, draftResource()],
-    }))
-  }
-
-  async function handleConversionConfirm() {
-    if (!selectedItemId || !currentResult?.runId) return
-    const drafts = conversionDrafts.get(selectedItemId) ?? buildConversionDrafts(currentResult)
-    if (drafts.length === 0) return
-    const itemId = selectedItemId
-    const runId = currentResult.runId
-    updateResult(itemId, s => ({ ...s, conversionSaving: true, conversionSaveError: undefined }))
-    try {
-      const payload = drafts.map(draft => {
-        const resources = draft.resources.map(resource => ({
-          code: resource.code,
-          name: resource.name,
-          unit: resource.unit,
-          type: resource.type,
-          original_quantity: resource.original_quantity,
-          confirmed_quantity: resource.confirmed_quantity,
-          adjustment_note: resource.adjustment_note,
-        }))
-        return {
-          dekid: draft.dekid,
-          dezmid: draft.dezmid,
-          confirmed_qty_factor: draft.confirmed_qty_factor || 1,
-          conversion_note: draft.conversion_note,
-          conversion_resources: resources,
-          conversion_resource_changes: buildResourceChanges(draft),
-        }
-      })
-      await confirmPricingTaskConversion(runId, payload)
-      updateResult(itemId, s => ({
-        ...s,
-        conversionSaving: false,
-        confirmedResults: payload.map(item => ({
-          dekid: item.dekid,
-          dezmid: item.dezmid,
-          subitem_code: drafts.find(draft => draft.dekid === item.dekid && draft.dezmid === item.dezmid)?.quota_code ?? '',
-          subitem_name: drafts.find(draft => draft.dekid === item.dekid && draft.dezmid === item.dezmid)?.quota_name ?? '',
-          qty_factor: item.confirmed_qty_factor,
-          status: 'confirmed',
-          conversion_confirmed: true,
-          conversion_note: item.conversion_note,
-          conversion_confirmed_at: new Date().toISOString(),
-          conversion_resources: item.conversion_resources,
-          conversion_resource_changes: item.conversion_resource_changes,
-        })),
-      }))
-    } catch (err) {
-      updateResult(itemId, s => ({
-        ...s,
-        conversionSaving: false,
-        conversionSaveError: err instanceof Error ? err.message : '换算写回失败',
+        conversionError: err instanceof Error ? err.message : '组合换算失败',
       }))
     }
   }
@@ -1121,20 +944,13 @@ export default function PricingTaskDetailPage() {
   const libraryNames = task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'
   const canConfirm = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'confirmed'
   const canReject = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'rejected'
-  const currentConversionDrafts = selectedItemId ? (conversionDrafts.get(selectedItemId) ?? (currentResult ? buildConversionDrafts(currentResult) : [])) : []
   const currentActiveStepNo = activeStepNo(currentResult)
   const currentActiveStep = currentActiveStepNo == null
     ? undefined
     : stepBadges(currentResult).find(step => step.no === currentActiveStepNo)
   const isCurrentStepRunning = Boolean(
     currentResult?.phase === 'reasoning'
-      || currentResult?.conversionChecking
-      || currentResult?.conversionSaving,
-  )
-  const canConfirmConversion = Boolean(
-    currentResult?.status === 'confirmed'
-      && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))
-      && currentConversionDrafts.length > 0,
+      || currentResult?.conversionChecking,
   )
   const quotaHitStats = buildQuotaHitStats(itemResults, items.length)
 
@@ -1211,8 +1027,7 @@ export default function PricingTaskDetailPage() {
                   <span>4候选</span>
                   <span>5结果</span>
                   <span>6对比</span>
-                  <span>7换算</span>
-                  <span>8写回</span>
+                  <span>7组合</span>
                 </div>
               </div>
               <span className="text-xs text-gray-500">{items.length} 条</span>
@@ -1549,29 +1364,39 @@ export default function PricingTaskDetailPage() {
                   {(currentResult.conversionChecking || currentResult.conversionCheck || currentResult.conversionError) && (
                     <section className="px-4 py-4 border-b bg-cyan-50 border-cyan-200">
                       <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-cyan-900">7. 换算判断<StepDuration result={currentResult} stepNo={7} /></h4>
+                        <h4 className="font-semibold text-sm text-cyan-900">7. 组合换算<StepDuration result={currentResult} stepNo={7} /></h4>
                         {currentResult.conversionChecking && (
-                          <span className="inline-block h-4 w-4 rounded-full border-2 border-cyan-200 border-t-cyan-700 animate-spin" title="换算判断运行中" />
+                          <span className="inline-block h-4 w-4 rounded-full border-2 border-cyan-200 border-t-cyan-700 animate-spin" title="组合换算运行中" />
                         )}
                       </div>
                       {currentResult.conversionError && (
                         <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                          换算判断失败：{currentResult.conversionError}
+                          组合换算失败：{currentResult.conversionError}
                         </div>
                       )}
                       {currentResult.conversionChecking && !currentResult.conversionCheck && (
-                        <p className="text-xs text-cyan-700">正在根据已确认定额查询换算说明并判断...</p>
+                        <p className="text-xs text-cyan-700">
+                          {currentResult.comboAdjustmentPreview ? '已查询组合定额，正在识别项目特征数量。' : '正在根据已确认定额查询组合定额规则...'}
+                        </p>
                       )}
-                      {currentResult.conversionCheck && (
+                      {(currentResult.conversionCheck || currentResult.comboAdjustmentPreview) && (
                         <div className="space-y-3 text-xs">
+                          {currentResult.comboAdjustmentPreview && !currentResult.conversionCheck && (
+                            <div>
+                              <div className="mb-2 font-semibold text-cyan-900">组合定额列表</div>
+                              <ComboConversionList items={currentResult.comboAdjustmentPreview} preview />
+                            </div>
+                          )}
+                          {currentResult.conversionCheck && (
+                            <>
                           <div className="grid grid-cols-2 gap-2">
                             <div className="rounded bg-white p-2 text-center">
                               <div className="font-semibold text-amber-700">{currentResult.conversionCheck.items.filter(item => item.needs_conversion).length}</div>
-                              <div className="text-gray-500">建议换算</div>
+                              <div className="text-gray-500">有组合次数</div>
                             </div>
                             <div className="rounded bg-white p-2 text-center">
                               <div className="font-semibold text-emerald-700">{currentResult.conversionCheck.items.filter(item => !item.needs_conversion).length}</div>
-                              <div className="text-gray-500">不建议换算</div>
+                              <div className="text-gray-500">无组合次数</div>
                             </div>
                           </div>
 
@@ -1581,343 +1406,9 @@ export default function PricingTaskDetailPage() {
                             </ul>
                           )}
 
-                          <div className="space-y-2">
-                            {currentResult.conversionCheck.items.map((item, i) => (
-                              <div key={`${item.dekid}-${item.dezmid}-${i}`} className="rounded border border-cyan-100 bg-white px-3 py-2">
-                                <div className="mb-1 flex items-start gap-2">
-                                  <div className="min-w-0 flex-1">
-                                    <div className="font-mono font-semibold text-cyan-800">{item.quota_code || '-'}</div>
-                                    <div className="font-medium text-gray-900 break-words">{item.quota_name || '-'}</div>
-                                  </div>
-                                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${item.needs_conversion ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                                    {item.needs_conversion ? '建议换算' : '不换算'}
-                                  </span>
-                                </div>
-                                <div className="mb-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-500">
-                                  <span>分类：{conversionCategoryLabel(item.conversion_category)}</span>
-                                  <span>类型：{item.conversion_type || '-'}</span>
-                                  <span>建议系数：{item.suggested_qty_factor}</span>
-                                  <span>置信度：{item.confidence}</span>
-                                  {item.requires_manual_review && <span className="font-semibold text-amber-700">需人工复核</span>}
-                                </div>
-                                <p className="text-gray-600">{item.reason || '未给出判断理由'}</p>
-                                {(item.difference_points?.length ?? 0) > 0 && (
-                                  <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-800">
-                                    <div className="mb-1 font-semibold">差异点</div>
-                                    <ul className="space-y-0.5 list-disc list-inside">
-                                      {(item.difference_points ?? []).map((point, idx) => <li key={idx}>{point}</li>)}
-                                    </ul>
-                                  </div>
-                                )}
-                                {(item.basis || item.suggested_action) && (
-                                  <div className="mt-2 rounded bg-white px-2 py-1 text-gray-700">
-                                    {item.basis && <div><span className="font-semibold text-gray-800">依据：</span>{item.basis}</div>}
-                                    {item.suggested_action && <div className="mt-1"><span className="font-semibold text-gray-800">建议动作：</span>{item.suggested_action}</div>}
-                                  </div>
-                                )}
-                                {(item.resource_adjustments?.length ?? 0) > 0 && (
-                                  <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1">
-                                    <div className="mb-1 font-semibold text-amber-900">工料机调整建议</div>
-                                    <ul className="space-y-1">
-                                      {(item.resource_adjustments ?? []).map((adjustment, idx) => (
-                                        <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">
-                                          <div>
-                                            <span className="font-mono text-amber-800">{adjustment.source_code || '-'}</span>
-                                            <span className="ml-1">{adjustment.source_name || '-'}</span>
-                                            <span className="mx-2 text-amber-700">→</span>
-                                            <span className="font-semibold text-emerald-800">{adjustment.target_name || '删除'}</span>
-                                          </div>
-                                          <div className="mt-0.5 text-gray-500">
-                                            含量：{adjustment.original_quantity} → {adjustment.suggested_quantity}
-                                            {adjustment.reason && <span className="ml-2">依据：{adjustment.reason}</span>}
-                                          </div>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-                                {item.matched_rules.length > 0 && (
-                                  <div className="mt-2 rounded bg-cyan-50 px-2 py-1">
-                                    <div className="mb-1 font-semibold text-cyan-900">命中的换算说明</div>
-                                    <ul className="space-y-1">
-                                      {item.matched_rules.map((rule, idx) => (
-                                        <li key={idx}>
-                                          <span className="text-cyan-800">{rule.prompt || '-'}</span>
-                                          {rule.description && <span className="text-gray-500">：{rule.description}</span>}
-                                          {rule.group_no ? <span className="ml-1 text-gray-400">#{rule.group_no}</span> : null}
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-                                <details className="mt-2 rounded border border-cyan-100 bg-cyan-50/60 px-2 py-1">
-                                  <summary className="cursor-pointer select-none text-xs font-semibold text-cyan-900">
-                                    换算说明信息
-                                    <span className="ml-1 font-normal text-cyan-700">
-                                      （说明 {item.conversion_rules?.length ?? 0} 条，实际值提示 {item.input_prompts?.length ?? 0} 条）
-                                    </span>
-                                  </summary>
-                                  {(item.conversion_rules?.length ?? 0) === 0 && (item.input_prompts?.length ?? 0) === 0 ? (
-                                    <div className="mt-2 text-gray-500">未查询到换算说明，默认不建议换算。</div>
-                                  ) : (
-                                    <div className="mt-2 space-y-2">
-                                      {(item.conversion_rules ?? []).length > 0 && (
-                                        <div>
-                                          <div className="mb-1 font-semibold text-cyan-900">换算说明</div>
-                                          <ul className="space-y-1">
-                                            {(item.conversion_rules ?? []).map((rule, idx) => (
-                                              <li key={idx} className="rounded bg-white px-2 py-1">
-                                                <span className="text-cyan-800">{rule.prompt || '-'}</span>
-                                                {rule.description && <span className="text-gray-500">：{rule.description}</span>}
-                                                {rule.group_no ? <span className="ml-1 text-gray-400">#{rule.group_no}</span> : null}
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                      )}
-                                      {(item.input_prompts ?? []).length > 0 && (
-                                        <div>
-                                          <div className="mb-1 font-semibold text-cyan-900">实际值/输入提示</div>
-                                          <ul className="space-y-1">
-                                            {(item.input_prompts ?? []).map((prompt, idx) => (
-                                              <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">{prompt}</li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
-                                </details>
-                                <details className="mt-2 rounded border border-slate-100 bg-slate-50 px-2 py-1">
-                                  <summary className="cursor-pointer select-none text-xs font-semibold text-slate-800">
-                                    工料机显示
-                                    <span className="ml-1 font-normal text-slate-500">（{item.resources?.length ?? 0} 条）</span>
-                                  </summary>
-                                  {(item.resources?.length ?? 0) === 0 ? (
-                                    <div className="mt-2 text-gray-500">未查询到工料机明细。</div>
-                                  ) : (
-                                    <div className="mt-2 overflow-x-auto">
-                                      <table className="min-w-full text-left text-[11px]">
-                                        <thead className="text-slate-500">
-                                          <tr>
-                                            <th className="px-2 py-1">类别</th>
-                                            <th className="px-2 py-1">编码</th>
-                                            <th className="px-2 py-1">名称</th>
-                                            <th className="px-2 py-1">单位</th>
-                                            <th className="px-2 py-1 text-right">含量</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100">
-                                          {(item.resources ?? []).map((resource, idx) => (
-                                            <tr key={`${resource.code}-${idx}`} className="bg-white">
-                                              <td className="px-2 py-1 text-slate-500">{resourceTypeLabel(resource.type)}</td>
-                                              <td className="px-2 py-1 font-mono text-slate-600">{resource.code || '-'}</td>
-                                              <td className="px-2 py-1 text-slate-800">{resource.name || '-'}</td>
-                                              <td className="px-2 py-1 text-slate-500">{resource.unit || '-'}</td>
-                                              <td className="px-2 py-1 text-right text-slate-700">{resource.quantity ?? '-'}</td>
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  )}
-                                </details>
-                                {item.missing_inputs.length > 0 && (
-                                  <div className="mt-2 text-amber-700">
-                                    缺失实际值信息：{item.missing_inputs.join('、')}
-                                  </div>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </section>
-                  )}
-
-                  {(currentResult.status === 'confirmed' && (currentResult.conversionCheck || currentResult.confirmedResults?.some(item => item.conversion_confirmed))) && (
-                    <section className="px-4 py-4 border-b bg-emerald-50 border-emerald-200">
-                      <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-emerald-900">8. 人工确认换算并写回</h4>
-                        {currentResult.conversionSaving && (
-                          <span className="inline-block h-4 w-4 rounded-full border-2 border-emerald-200 border-t-emerald-700 animate-spin" title="换算写回中" />
-                        )}
-                      </div>
-                      {currentResult.conversionSaveError && (
-                        <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                          换算写回失败：{currentResult.conversionSaveError}
-                        </div>
-                      )}
-                      {currentResult.confirmedResults?.some(item => item.conversion_confirmed) && (
-                        <div className="mb-3 rounded border border-emerald-200 bg-white px-3 py-2 text-xs text-emerald-800">
-                          已确认换算写回：
-                          {currentResult.confirmedResults.filter(item => item.conversion_confirmed).map(item => (
-                            <span key={`${item.dekid}-${item.dezmid}`} className="ml-2 font-mono">
-                              {item.subitem_code || `${item.dekid}/${item.dezmid}`} 系数 {item.qty_factor}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {currentConversionDrafts.length === 0 ? (
-                        <p className="text-xs text-emerald-700">暂无可写回的换算判定。</p>
-                      ) : (
-                        <div className="space-y-3 text-xs">
-                          {currentConversionDrafts.map((draft, quotaIndex) => {
-                            const changes = buildResourceChanges(draft)
-                            return (
-                              <div key={`${draft.dekid}-${draft.dezmid}`} className="rounded border border-emerald-100 bg-white px-3 py-2">
-                                <div className="mb-2">
-                                  <div className="font-mono font-semibold text-emerald-800">{draft.quota_code || '-'}</div>
-                                  <div className="font-medium text-gray-900 break-words">{draft.quota_name || '-'}</div>
-                                </div>
-                                <div className="grid gap-2 md:grid-cols-[120px_minmax(0,1fr)]">
-                                  <label className="text-gray-600">
-                                    <span className="mb-1 block font-semibold">最终系数</span>
-                                    <input
-                                      type="number"
-                                      step="0.000001"
-                                      min="0"
-                                      value={draft.confirmed_qty_factor}
-                                      onChange={event => selectedItemId && updateConversionDraft(selectedItemId, quotaIndex, current => ({
-                                        ...current,
-                                        confirmed_qty_factor: Number(event.target.value) || 1,
-                                      }))}
-                                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs"
-                                    />
-                                  </label>
-                                  <label className="text-gray-600">
-                                    <span className="mb-1 block font-semibold">换算说明</span>
-                                    <textarea
-                                      rows={2}
-                                      value={draft.conversion_note}
-                                      onChange={event => selectedItemId && updateConversionDraft(selectedItemId, quotaIndex, current => ({
-                                        ...current,
-                                        conversion_note: event.target.value,
-                                      }))}
-                                      className="w-full resize-y rounded border border-gray-300 px-2 py-1 text-xs"
-                                    />
-                                  </label>
-                                </div>
-                                <details className="mt-3 rounded border border-slate-100 bg-slate-50 px-2 py-1">
-                                  <summary className="cursor-pointer select-none font-semibold text-slate-800">
-                                    工料机换算明细
-                                    <span className="ml-1 font-normal text-slate-500">（{draft.resources.length} 条，变更 {changes.length} 条）</span>
-                                  </summary>
-                                  <div className="mt-2 overflow-x-auto">
-                                    <table className="min-w-[860px] text-left text-[11px]">
-                                      <thead className="text-slate-500">
-                                        <tr>
-                                          <th className="px-2 py-1">类别</th>
-                                          <th className="px-2 py-1">编码</th>
-                                          <th className="px-2 py-1">名称/参数</th>
-                                          <th className="px-2 py-1">单位</th>
-                                          <th className="px-2 py-1 text-right">原含量</th>
-                                          <th className="px-2 py-1 text-right">确认含量</th>
-                                          <th className="px-2 py-1">变更说明</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody className="divide-y divide-slate-100">
-                                        {draft.resources.map((resource, resourceIndex) => (
-                                          <tr key={`${resource.original_code}-${resourceIndex}`} className="bg-white align-top">
-                                            <td className="px-2 py-1">
-                                              <select
-                                                value={resource.type ?? ''}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({
-                                                  ...current,
-                                                  type: event.target.value === '' ? null : Number(event.target.value),
-                                                }))}
-                                                className="w-16 rounded border border-gray-300 px-1 py-0.5"
-                                              >
-                                                <option value="">其他</option>
-                                                <option value="1">人工</option>
-                                                <option value="2">材料</option>
-                                                <option value="3">机械</option>
-                                              </select>
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              <input
-                                                value={resource.code}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, code: event.target.value }))}
-                                                className="w-24 rounded border border-gray-300 px-1 py-0.5 font-mono"
-                                              />
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              <input
-                                                value={resource.name}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, name: event.target.value }))}
-                                                className="w-48 rounded border border-gray-300 px-1 py-0.5"
-                                              />
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              <input
-                                                value={resource.unit}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, unit: event.target.value }))}
-                                                className="w-16 rounded border border-gray-300 px-1 py-0.5"
-                                              />
-                                            </td>
-                                            <td className="px-2 py-1 text-right text-slate-500">{resource.original_quantity ?? '-'}</td>
-                                            <td className="px-2 py-1">
-                                              <input
-                                                type="number"
-                                                step="0.000001"
-                                                value={resource.confirmed_quantity ?? ''}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({
-                                                  ...current,
-                                                  confirmed_quantity: toNullableNumber(event.target.value),
-                                                }))}
-                                                className="w-24 rounded border border-gray-300 px-1 py-0.5 text-right"
-                                              />
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              <input
-                                                value={resource.adjustment_note}
-                                                onChange={event => selectedItemId && updateConversionResource(selectedItemId, quotaIndex, resourceIndex, current => ({ ...current, adjustment_note: event.target.value }))}
-                                                className="w-44 rounded border border-gray-300 px-1 py-0.5"
-                                                placeholder="如：强度/厚度/材料替换"
-                                              />
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => selectedItemId && addConversionResource(selectedItemId, quotaIndex)}
-                                    className="mt-2 rounded border border-emerald-200 bg-white px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-50"
-                                  >
-                                    新增工料机行
-                                  </button>
-                                </details>
-                                <details className="mt-2 rounded border border-amber-100 bg-amber-50 px-2 py-1">
-                                  <summary className="cursor-pointer select-none font-semibold text-amber-800">
-                                    工料机变更记录（{changes.length} 条）
-                                  </summary>
-                                  {changes.length === 0 ? (
-                                    <div className="mt-2 text-amber-700">未检测到工料机字段变更。</div>
-                                  ) : (
-                                    <ul className="mt-2 space-y-1">
-                                      {changes.map((change, idx) => (
-                                        <li key={idx} className="rounded bg-white px-2 py-1 text-gray-700">
-                                          <span className="font-mono text-amber-800">{change.resource_code || '-'}</span>
-                                          <span className="ml-1">{change.resource_name || '-'}</span>
-                                          <span className="ml-2 text-gray-500">{change.field}: {String(change.old_value ?? '-')} → {String(change.new_value ?? '-')}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </details>
-                              </div>
-                            )
-                          })}
-                          <button
-                            type="button"
-                            onClick={handleConversionConfirm}
-                            disabled={!canConfirmConversion || currentResult.conversionSaving}
-                            className="w-full rounded bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-700 disabled:opacity-50"
-                          >
-                            确认换算并写回
-                          </button>
+                          <ComboConversionList items={currentResult.conversionCheck.items} />
+                            </>
+                          )}
                         </div>
                       )}
                     </section>
@@ -1931,7 +1422,7 @@ export default function PricingTaskDetailPage() {
                         disabled={!canConfirm || actionBusy}
                         className="flex-1 px-3 py-2 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
                       >
-                        确认定额并换算判定
+                        确认定额并组合换算
                       </button>
                       <button
                         onClick={handleReject}
@@ -1947,7 +1438,7 @@ export default function PricingTaskDetailPage() {
             )}
           </div>
         </div>
-        <SelectedItemResultPanel item={selectedItem} result={currentResult} drafts={currentConversionDrafts} />
+        <SelectedItemResultPanel item={selectedItem} result={currentResult} />
       </div>
       {editingFeatureItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 px-4" onClick={() => !featureSaving && closeFeatureEditor()}>
