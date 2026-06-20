@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   BoqProject,
@@ -106,7 +105,7 @@ export default function PricingTaskPage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">单条组价</h1>
-            <p className="mt-2 text-sm text-gray-500">任务和组价结果已迁移到后端，可刷新恢复历史。</p>
+            <p className="mt-2 text-sm text-gray-500">用于单条验证、Prompt/步骤调试和人工确认。</p>
           </div>
           <button
             onClick={handleOpenModal}

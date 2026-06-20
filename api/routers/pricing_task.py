@@ -32,7 +32,18 @@ def _parse_json_content(content: str | None) -> dict[str, Any]:
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
         text = text.rsplit("```", 1)[0].strip()
-    parsed = json.loads(text)
+    parsed = _parse_json_object(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON result must be an object")
+    return parsed
+
+
+def _parse_json_object(text: str | None) -> dict[str, Any]:
+    value = (text or "").strip()
+    if not value:
+        raise ValueError("empty JSON content")
+    decoder = json.JSONDecoder()
+    parsed, _ = decoder.raw_decode(value)
     if not isinstance(parsed, dict):
         raise ValueError("JSON result must be an object")
     return parsed
@@ -81,6 +92,7 @@ def _ensure_schema(conn):
                 quota_match         JSONB,
                 evaluation          JSONB,
                 conversion_check    JSONB,
+                coefficient_check   JSONB,
                 step_timings        JSONB,
                 error_message       TEXT,
                 created_at          TIMESTAMP DEFAULT NOW(),
@@ -109,6 +121,52 @@ def _ensure_schema(conn):
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pricing_task_batches (
+                id                  SERIAL PRIMARY KEY,
+                name                TEXT NOT NULL,
+                boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
+                manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
+                status              VARCHAR(16) NOT NULL DEFAULT 'active',
+                selected_count      INTEGER NOT NULL DEFAULT 0,
+                completed_count     INTEGER NOT NULL DEFAULT 0,
+                failed_count        INTEGER NOT NULL DEFAULT 0,
+                started_at          TIMESTAMP,
+                finished_at         TIMESTAMP,
+                created_at          TIMESTAMP DEFAULT NOW(),
+                updated_at          TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pricing_task_batch_item_runs (
+                id                  SERIAL PRIMARY KEY,
+                batch_id            INTEGER NOT NULL REFERENCES pricing_task_batches(id) ON DELETE CASCADE,
+                boq_item_id         INTEGER NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
+                boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                status              VARCHAR(16) NOT NULL DEFAULT 'idle',
+                reasoning_text      TEXT,
+                code_check          JSONB,
+                feature_check       JSONB,
+                work_procedures     JSONB,
+                quota_candidates    JSONB,
+                quota_match         JSONB,
+                evaluation          JSONB,
+                confirmed_results   JSONB,
+                conversion_check    JSONB,
+                coefficient_check   JSONB,
+                step_timings        JSONB,
+                error_message       TEXT,
+                created_at          TIMESTAMP DEFAULT NOW(),
+                started_at          TIMESTAMP,
+                finished_at         TIMESTAMP,
+                UNIQUE(batch_id, boq_item_id)
+            )
+            """
+        )
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS task_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS run_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS match_reason TEXT")
@@ -119,12 +177,24 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resources JSONB")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resource_changes JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS selected_count INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS completed_count INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS failed_count INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS started_at TIMESTAMP")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS confirmed_results JSONB")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_project ON pricing_tasks(boq_project_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_boq_item ON pricing_task_results(boq_item_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_run ON pricing_task_results(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_task ON pricing_task_results(task_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_task_item ON pricing_task_runs(task_id, boq_item_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_project ON pricing_task_batches(boq_project_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch ON pricing_task_batch_item_runs(batch_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch_item ON pricing_task_batch_item_runs(batch_id, boq_item_id)")
     conn.commit()
 
 
@@ -146,6 +216,13 @@ class PricingTaskImportItem(BaseModel):
 
 class PricingTaskImportRequest(BaseModel):
     tasks: list[PricingTaskImportItem]
+
+
+class PricingTaskBatchCreate(BaseModel):
+    name: str
+    boq_project_id: int
+    quota_library_ids: list[int] = Field(default_factory=list)
+    manual_project_id: Optional[int] = None
 
 
 class RunRequest(BaseModel):
@@ -175,8 +252,29 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
                     "description": "缺少的必要特征信息列表，若完整则为空数组",
                 },
                 "analysis": {"type": "string", "description": "简短分析说明"},
+                "normalized_description": {
+                    "type": "string",
+                    "description": "补全综合考虑后的完整项目特征文本；没有补全时返回原项目特征或空字符串",
+                },
+                "default_fills": {
+                    "type": "array",
+                    "description": "按 tqdk_tzhkl 默认值完成的综合考虑项目特征补全明细",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "feature_name": {"type": "string"},
+                            "original_value": {"type": "string"},
+                            "default_value": {"type": "string"},
+                            "source_code": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["feature_name", "original_value", "default_value", "source_code", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+                "description_updated": {"type": "boolean", "description": "后端是否已将补全后的项目特征回写到清单"},
             },
-            "required": ["is_complete", "missing_features", "analysis"],
+            "required": ["is_complete", "missing_features", "analysis", "normalized_description", "default_fills", "description_updated"],
             "additionalProperties": False,
         },
     },
@@ -350,6 +448,90 @@ _TOOL_SUBMIT_CONVERSION_CHECK = {
 }
 
 
+_TOOL_SUBMIT_COEFFICIENT_CHECK = {
+    "type": "function",
+    "function": {
+        "name": "submit_coefficient_check",
+        "description": "提交第八步系数换算判断结果。只保存和展示系数，不改写工料机含量。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "quota_key": {"type": "string"},
+                            "source_type": {"type": "string", "enum": ["base", "combo"]},
+                            "dekid": {"type": "integer"},
+                            "dezmid": {"type": "integer"},
+                            "quota_code": {"type": "string"},
+                            "quota_name": {"type": "string"},
+                            "coefficient_rules": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "rule_index": {"type": "integer"},
+                                        "tsxx": {"type": "string"},
+                                        "hssm": {"type": "string"},
+                                        "group_no": {"type": "integer"},
+                                        "matched": {"type": "boolean"},
+                                        "matched_feature": {"type": "string"},
+                                        "feature_value": {"type": "string"},
+                                        "factor": {"type": "number"},
+                                        "target_resource_types": {
+                                            "type": "array",
+                                            "items": {"type": "string", "enum": ["1", "2", "3", "all"]},
+                                        },
+                                        "reason": {"type": "string"},
+                                        "requires_manual_review": {"type": "boolean"},
+                                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                                    },
+                                    "required": [
+                                        "rule_index",
+                                        "tsxx",
+                                        "hssm",
+                                        "group_no",
+                                        "matched",
+                                        "matched_feature",
+                                        "feature_value",
+                                        "factor",
+                                        "target_resource_types",
+                                        "reason",
+                                        "requires_manual_review",
+                                        "confidence",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "missing_inputs": {"type": "array", "items": {"type": "string"}},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        },
+                        "required": [
+                            "quota_key",
+                            "source_type",
+                            "dekid",
+                            "dezmid",
+                            "quota_code",
+                            "quota_name",
+                            "coefficient_rules",
+                            "missing_inputs",
+                            "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "issues": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["items", "issues"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def _client(thinking: bool = True) -> OpenAI:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -415,6 +597,96 @@ def exec_fetch_standard_work_procedure(conn, item_code: str) -> dict[str, Any]:
         "procedure_text": row[4] or "",
         "procedures": [row[4]] if row[4] else [],
         "source_rowid": row[5],
+    }
+
+
+def _load_feature_default_candidates(conn, base_code: str) -> list[dict[str, Any]]:
+    if not base_code:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.zmbh, f.feature_name, f.feature_value, f.default_value, f.source_rowid
+            FROM tqdk_tzhkl f
+            WHERE f.zmbh = %s
+              AND trim(COALESCE(f.feature_value, '')) = '综合考虑'
+              AND trim(COALESCE(f.default_value, '')) <> ''
+            ORDER BY f.source_rowid, f.feature_name
+            """,
+            (base_code,),
+        )
+        rows = cur.fetchall()
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        feature_name = str(row[1] or "").strip()
+        default_value = str(row[3] or "").strip()
+        key = (feature_name, default_value)
+        if not feature_name or not default_value or key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "source_code": row[0] or base_code,
+                "feature_name": feature_name,
+                "feature_value": row[2] or "",
+                "default_value": default_value,
+                "source_rowid": row[4],
+            }
+        )
+    return candidates
+
+
+def _normalize_feature_analysis_result(
+    raw: dict[str, Any],
+    original_description: str | None,
+    base_code: str,
+    default_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    original_text = (original_description or "").strip()
+    candidate_by_key = {
+        (str(item.get("feature_name") or "").strip(), str(item.get("default_value") or "").strip())
+        for item in default_candidates
+    }
+    fills = []
+    raw_fills = raw.get("default_fills", []) if isinstance(raw, dict) and "综合考虑" in original_text else []
+    for fill in raw_fills:
+        if not isinstance(fill, dict):
+            continue
+        feature_name = str(fill.get("feature_name") or "").strip()
+        default_value = str(fill.get("default_value") or "").strip()
+        if not feature_name or not default_value:
+            continue
+        if candidate_by_key and (feature_name, default_value) not in candidate_by_key:
+            continue
+        fills.append(
+            {
+                "feature_name": feature_name,
+                "original_value": str(fill.get("original_value") or "综合考虑").strip() or "综合考虑",
+                "default_value": default_value,
+                "source_code": str(fill.get("source_code") or base_code).strip() or base_code,
+                "reason": str(fill.get("reason") or "").strip(),
+            }
+        )
+    normalized_description = str(raw.get("normalized_description") or "").strip() if isinstance(raw, dict) else ""
+    if fills and (not normalized_description or "综合考虑" in normalized_description):
+        normalized_description = original_text
+        for fill in fills:
+            default_value = fill["default_value"]
+            feature_name = fill["feature_name"]
+            pattern = re.compile(rf"({re.escape(feature_name)}\s*[:：]\s*)综合考虑")
+            if pattern.search(normalized_description):
+                normalized_description = pattern.sub(lambda match: f"{match.group(1)}{default_value}", normalized_description)
+    if not fills:
+        normalized_description = original_text
+    return {
+        "is_complete": bool(raw.get("is_complete")) if isinstance(raw, dict) else False,
+        "missing_features": [str(v) for v in raw.get("missing_features", []) if str(v).strip()] if isinstance(raw, dict) else [],
+        "analysis": str(raw.get("analysis") or "").strip() if isinstance(raw, dict) else "",
+        "normalized_description": normalized_description,
+        "default_fills": fills,
+        "description_updated": False,
+        "default_candidates": default_candidates,
     }
 
 
@@ -613,7 +885,7 @@ def _run_submit_match(messages: list[dict[str, Any]]) -> dict[str, Any]:
             call = msg.tool_calls[0]
             if call.function.name != "submit_quota_match":
                 raise ValueError(f"unexpected tool call {call.function.name!r}")
-            return json.loads(call.function.arguments)
+            return _parse_json_object(call.function.arguments)
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] submit match error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
@@ -665,6 +937,54 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
         return _parse_json_content(resp.choices[0].message.content)
     except Exception as exc:
         print(f"[pricing-task] conversion JSON fallback error: {exc}", file=sys.stderr, flush=True)
+        raise exc from last_error
+
+
+def _run_submit_coefficient_check(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = _client(thinking=False).chat.completions.create(
+                model=_model(),
+                messages=messages,
+                tools=[_TOOL_SUBMIT_COEFFICIENT_CHECK],
+                tool_choice={"type": "function", "function": {"name": "submit_coefficient_check"}},
+                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=8000,
+                stream=False,
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                raise ValueError(f"AI did not call submit_coefficient_check: {msg.content!r}")
+            call = msg.tool_calls[0]
+            if call.function.name != "submit_coefficient_check":
+                raise ValueError(f"unexpected tool call {call.function.name!r}")
+            return _parse_json_object(call.function.arguments)
+        except Exception as exc:
+            last_error = exc
+            print(f"[pricing-task] submit coefficient check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+    try:
+        json_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    "工具参数生成失败。请改用 JSON Output，仅输出一个合法 JSON 对象，不要使用 Markdown。"
+                    "JSON 顶层必须包含 items 和 issues，字段结构与 submit_coefficient_check 完全一致。"
+                ),
+            },
+        ]
+        resp = _client(thinking=False).chat.completions.create(
+            model=_model(),
+            messages=json_messages,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+            max_tokens=8000,
+            stream=False,
+        )
+        return _parse_json_content(resp.choices[0].message.content)
+    except Exception as exc:
+        print(f"[pricing-task] coefficient JSON fallback error: {exc}", file=sys.stderr, flush=True)
         raise exc from last_error
 
 
@@ -883,6 +1203,119 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 }
             )
     return boq_item, items
+
+
+def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    with conn.cursor() as cur:
+        for match in matches:
+            try:
+                dekid = int(match.get("dekid") or 0)
+                dezmid = int(match.get("dezmid") or 0)
+            except Exception:
+                continue
+            if not dekid or not dezmid:
+                continue
+            cur.execute(
+                """
+                SELECT q.zmbh, q.zmmc, q.dw, q.gznr, l.mc
+                FROM tdek_tdezm q
+                LEFT JOIN tlibs l ON l.id = q.dekid
+                WHERE q.dekid=%s AND q.id=%s
+                """,
+                (dekid, dezmid),
+            )
+            qrow = cur.fetchone()
+            if not qrow:
+                continue
+            cur.execute(
+                """
+                SELECT h.tsxx, h.zmbh, h.jcz, h.zjdw,
+                       combo.id, combo.zmmc, combo.dw, combo.gznr,
+                       combo.rgf, combo.clf, combo.jxf
+                FROM tdek_tzhhs h
+                LEFT JOIN tdek_tdezm combo ON combo.dekid = h.dekid AND combo.zmbh = h.zmbh
+                WHERE h.dekid=%s AND h.dezmid=%s
+                ORDER BY h.source_rowid
+                """,
+                (dekid, dezmid),
+            )
+            adjustment_rules = []
+            for idx, rule_row in enumerate(cur.fetchall(), start=1):
+                combo_dezmid = int(rule_row[4]) if rule_row[4] is not None else 0
+                combo_resources = _load_combo_resources(conn, dekid, combo_dezmid, rule_row[1] or "") if combo_dezmid or rule_row[1] else []
+                adjustment_rules.append(
+                    {
+                        "rule_index": idx,
+                        "prompt": rule_row[0] or "",
+                        "combo_code": rule_row[1] or "",
+                        "base_value": float(rule_row[2]) if rule_row[2] is not None else 0,
+                        "increment_unit": float(rule_row[3]) if rule_row[3] is not None else 0,
+                        "combo_dezmid": combo_dezmid,
+                        "combo_name": rule_row[5] or "",
+                        "combo_unit": rule_row[6] or "",
+                        "combo_work_content": rule_row[7] or "",
+                        "combo_labor_cost": float(rule_row[8]) if rule_row[8] is not None else 0,
+                        "combo_material_cost": float(rule_row[9]) if rule_row[9] is not None else 0,
+                        "combo_machine_cost": float(rule_row[10]) if rule_row[10] is not None else 0,
+                        "combo_resources": combo_resources,
+                    }
+                )
+            cur.execute(
+                """
+                SELECT zmbh, zmmc, dw, gcl, lx
+                FROM tdek_tzmgc
+                WHERE dekid=%s AND dezmid=%s
+                ORDER BY lx NULLS LAST, source_rowid
+                """,
+                (dekid, dezmid),
+            )
+            resources = [
+                {
+                    "code": r[0] or "",
+                    "name": r[1] or "",
+                    "unit": r[2] or "",
+                    "quantity": float(r[3]) if r[3] is not None else None,
+                    "type": int(r[4]) if r[4] is not None else None,
+                }
+                for r in cur.fetchall()
+            ]
+            items.append(
+                {
+                    "dekid": dekid,
+                    "dezmid": dezmid,
+                    "quota_code": qrow[0] or match.get("zmbh") or "",
+                    "quota_name": qrow[1] or match.get("zmmc") or "",
+                    "current_qty_factor": float(match.get("qty_factor") or 1),
+                    "confidence": match.get("confidence") or "",
+                    "match_reason": match.get("match_reason") or "",
+                    "unit": qrow[2] or "",
+                    "work_content": qrow[3] or "",
+                    "library_name": qrow[4] or match.get("library_name") or "",
+                    "resources": resources,
+                    "adjustment_rules": adjustment_rules,
+                }
+            )
+    return items
+
+
+def _confirmed_results_from_matches(conn, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "dekid": item["dekid"],
+            "dezmid": item["dezmid"],
+            "subitem_code": item["quota_code"],
+            "subitem_name": item["quota_name"],
+            "qty_factor": item.get("current_qty_factor", 1),
+            "status": "confirmed",
+            "conversion_confirmed": False,
+            "conversion_note": "",
+            "conversion_confirmed_at": None,
+            "conversion_resources": item.get("resources", []),
+            "conversion_resource_changes": [],
+        }
+        for item in _confirmed_items_from_matches(conn, matches)
+    ]
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -1251,6 +1684,197 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any) -> Any:
     return conversion_check
 
 
+def _load_coefficient_rules(conn, dekid: int, dezmid: int) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tsxx, hssm, COALESCE(groupno, 0)
+            FROM tdek_tznhs
+            WHERE dekid=%s AND dezmid=%s
+            ORDER BY groupno NULLS LAST, source_rowid
+            """,
+            (dekid, dezmid),
+        )
+        return [
+            {
+                "rule_index": idx,
+                "tsxx": r[0] or "",
+                "hssm": r[1] or "",
+                "group_no": int(r[2] or 0),
+            }
+            for idx, r in enumerate(cur.fetchall(), start=1)
+        ]
+
+
+def _parse_factor_from_text(text: str) -> float:
+    match = re.search(r"系数\s*([0-9]+(?:\.[0-9]+)?)", text or "")
+    return float(match.group(1)) if match else 1.0
+
+
+def _target_types_from_text(text: str) -> list[str]:
+    value = text or ""
+    if "子目乘以系数" in value or "相应子目乘以系数" in value:
+        return ["all"]
+    targets: list[str] = []
+    if "人工" in value:
+        targets.append("1")
+    if "材料" in value:
+        targets.append("2")
+    if "机械" in value:
+        targets.append("3")
+    return targets or ["all"]
+
+
+def _coefficient_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    boq_item, confirmed_items = _confirmed_conversion_context(conn, run_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT conversion_check FROM pricing_task_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    conversion_check = _hydrate_conversion_combo_resources(conn, row[0] if row else None) or {}
+    return boq_item, _coefficient_items_from_context(conn, confirmed_items, conversion_check)
+
+
+def _coefficient_items_from_context(
+    conn,
+    confirmed_items: list[dict[str, Any]],
+    conversion_check: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in confirmed_items:
+        coefficient_rules = _load_coefficient_rules(conn, int(item["dekid"]), int(item["dezmid"]))
+        items.append(
+            {
+                "quota_key": f"base:{item['dekid']}:{item['dezmid']}",
+                "source_type": "base",
+                "dekid": item["dekid"],
+                "dezmid": item["dezmid"],
+                "quota_code": item["quota_code"],
+                "quota_name": item["quota_name"],
+                "resources": item.get("resources", []),
+                "coefficient_rules": coefficient_rules,
+            }
+        )
+
+    conversion_data = _hydrate_conversion_combo_resources(conn, conversion_check or {}) or {}
+    for base_item in conversion_data.get("items", []) if isinstance(conversion_data, dict) else []:
+        if not isinstance(base_item, dict):
+            continue
+        dekid = int(base_item.get("dekid") or 0)
+        for rule in base_item.get("adjustment_rules", []) or []:
+            if not isinstance(rule, dict):
+                continue
+            combo_dezmid = int(rule.get("combo_dezmid") or 0)
+            if not dekid or not combo_dezmid:
+                continue
+            coefficient_rules = _load_coefficient_rules(conn, dekid, combo_dezmid)
+            items.append(
+                {
+                    "quota_key": f"combo:{dekid}:{combo_dezmid}:{rule.get('combo_code') or ''}",
+                    "source_type": "combo",
+                    "dekid": dekid,
+                    "dezmid": combo_dezmid,
+                    "quota_code": str(rule.get("combo_code") or ""),
+                    "quota_name": str(rule.get("combo_name") or ""),
+                    "resources": rule.get("combo_resources") or [],
+                    "combo_times": rule.get("calculated_times"),
+                    "base_quota_code": base_item.get("quota_code") or "",
+                    "coefficient_rules": coefficient_rules,
+                }
+            )
+    return items
+
+
+def _default_coefficient_check(items: list[dict[str, Any]], issue: str | None = None) -> dict[str, Any]:
+    return {
+        "items": [
+            {
+                "quota_key": item["quota_key"],
+                "source_type": item["source_type"],
+                "dekid": item["dekid"],
+                "dezmid": item["dezmid"],
+                "quota_code": item["quota_code"],
+                "quota_name": item["quota_name"],
+                "resources": item.get("resources", []),
+                "coefficient_rules": [
+                    {
+                        **rule,
+                        "matched": False,
+                        "matched_feature": "",
+                        "feature_value": "",
+                        "factor": _parse_factor_from_text(rule.get("hssm", "")),
+                        "target_resource_types": _target_types_from_text(rule.get("hssm", "")),
+                        "reason": "待识别项目特征是否触发该系数换算说明。",
+                        "requires_manual_review": False,
+                        "confidence": "medium",
+                    }
+                    for rule in item.get("coefficient_rules", [])
+                ],
+                "missing_inputs": [],
+                "confidence": "medium",
+            }
+            for item in items
+        ],
+        "issues": [issue] if issue else [],
+    }
+
+
+def _normalize_coefficient_check(raw: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_by_key = {str(item.get("quota_key") or ""): item for item in raw.get("items", []) if isinstance(item, dict)}
+    normalized_items = []
+    for item in items:
+        raw_item = raw_by_key.get(item["quota_key"]) or {}
+        raw_rules = raw_item.get("coefficient_rules", []) if isinstance(raw_item, dict) else []
+        raw_by_index: dict[int, dict[str, Any]] = {}
+        for raw_rule in raw_rules:
+            if not isinstance(raw_rule, dict):
+                continue
+            try:
+                raw_by_index[int(raw_rule.get("rule_index") or 0)] = raw_rule
+            except Exception:
+                pass
+        rules = []
+        for rule in item.get("coefficient_rules", []):
+            raw_rule = raw_by_index.get(int(rule.get("rule_index") or 0), {})
+            hssm = str(rule.get("hssm") or raw_rule.get("hssm") or "")
+            matched = bool(raw_rule.get("matched"))
+            factor = _float_or_none(raw_rule.get("factor")) or _parse_factor_from_text(hssm)
+            target_types = raw_rule.get("target_resource_types")
+            if not isinstance(target_types, list) or not target_types:
+                target_types = _target_types_from_text(hssm)
+            target_types = [str(v) for v in target_types if str(v) in {"1", "2", "3", "all"}] or _target_types_from_text(hssm)
+            rules.append(
+                {
+                    "rule_index": int(rule.get("rule_index") or 0),
+                    "tsxx": str(rule.get("tsxx") or raw_rule.get("tsxx") or ""),
+                    "hssm": hssm,
+                    "group_no": int(rule.get("group_no") or raw_rule.get("group_no") or 0),
+                    "matched": matched,
+                    "matched_feature": str(raw_rule.get("matched_feature") or ""),
+                    "feature_value": str(raw_rule.get("feature_value") or ""),
+                    "factor": factor,
+                    "target_resource_types": target_types,
+                    "reason": str(raw_rule.get("reason") or ("项目特征未触发该系数换算说明。" if not matched else "")),
+                    "requires_manual_review": bool(raw_rule.get("requires_manual_review")),
+                    "confidence": raw_rule.get("confidence") if raw_rule.get("confidence") in {"high", "medium", "low"} else "low",
+                }
+            )
+        normalized_items.append(
+            {
+                "quota_key": item["quota_key"],
+                "source_type": item["source_type"],
+                "dekid": item["dekid"],
+                "dezmid": item["dezmid"],
+                "quota_code": item["quota_code"],
+                "quota_name": item["quota_name"],
+                "resources": item.get("resources", []),
+                "coefficient_rules": rules,
+                "missing_inputs": [str(v) for v in raw_item.get("missing_inputs", []) if v] if isinstance(raw_item, dict) else [],
+                "confidence": raw_item.get("confidence") if isinstance(raw_item, dict) and raw_item.get("confidence") in {"high", "medium", "low"} else "medium",
+            }
+        )
+    return {"items": normalized_items, "issues": [str(v) for v in raw.get("issues", []) if v]}
+
+
 def _create_run(conn, task_id: int | None, boq_item: dict[str, Any]) -> int:
     with conn.cursor() as cur:
         cur.execute(
@@ -1281,12 +1905,64 @@ def _update_run(conn, run_id: int, **fields: Any) -> None:
             "quota_match",
             "evaluation",
             "conversion_check",
+            "coefficient_check",
             "step_timings",
         } else value)
     values.append(run_id)
     with conn.cursor() as cur:
         cur.execute(f"UPDATE pricing_task_runs SET {', '.join(assignments)} WHERE id = %s", values)
     conn.commit()
+
+
+def _json_value(value: Any) -> Any:
+    return Json(value, dumps=_json_dumps)
+
+
+def _update_batch_item_run(conn, item_run_id: int, **fields: Any) -> None:
+    if not fields:
+        return
+    json_fields = {
+        "code_check",
+        "feature_check",
+        "work_procedures",
+        "quota_candidates",
+        "quota_match",
+        "evaluation",
+        "confirmed_results",
+        "conversion_check",
+        "coefficient_check",
+        "step_timings",
+    }
+    assignments = []
+    values = []
+    for key, value in fields.items():
+        assignments.append(f"{key} = %s")
+        values.append(_json_value(value) if key in json_fields else value)
+    values.append(item_run_id)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE pricing_task_batch_item_runs SET {', '.join(assignments)} WHERE id = %s", values)
+    conn.commit()
+
+
+def _load_batch_step_timings(conn, item_run_id: int) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT step_timings FROM pricing_task_batch_item_runs WHERE id=%s", (item_run_id,))
+        row = cur.fetchone()
+    return dict(row[0] or {}) if row else {}
+
+
+def _finish_batch_step_timing(
+    conn,
+    item_run_id: int,
+    timings: dict[str, Any],
+    step_no: int,
+    name: str,
+    started_at: datetime,
+    started_perf: float,
+) -> dict[str, Any]:
+    timing = _finish_step_timing(conn, None, timings, step_no, name, started_at, started_perf)
+    _update_batch_item_run(conn, item_run_id, step_timings=timings)
+    return timing
 
 
 def _load_step_timings(conn, run_id: int) -> dict[str, Any]:
@@ -1298,7 +1974,7 @@ def _load_step_timings(conn, run_id: int) -> dict[str, Any]:
 
 def _finish_step_timing(
     conn,
-    run_id: int,
+    run_id: int | None,
     timings: dict[str, Any],
     step_no: int,
     name: str,
@@ -1314,7 +1990,8 @@ def _finish_step_timing(
         "finished_at": finished_at.isoformat(timespec="milliseconds"),
     }
     timings[str(step_no)] = timing
-    _update_run(conn, run_id, step_timings=timings)
+    if run_id is not None:
+        _update_run(conn, run_id, step_timings=timings)
     return timing
 
 
@@ -1399,7 +2076,10 @@ def _stream_pricing_item(
     quota_library_ids: list[int],
     manual_project_id: int | None,
     task_id: int | None,
-    run_id: int,
+    run_id: int | None,
+    *,
+    persist_run: bool = True,
+    update_item_description: bool = True,
 ) -> Iterable[tuple[str, Any]]:
     system_prompt = build_system_prompt()
     step_timings: dict[str, Any] = {}
@@ -1409,11 +2089,14 @@ def _stream_pricing_item(
     code_check = exec_check_item_code(conn, boq_item["item_code"], boq_item["item_name"])
     yield ("code_check", code_check)
     yield ("judgment", {"is_consistent": code_check["is_consistent"], "reasoning": f"标准清单名称：{code_check['standard_name'] or '未找到'}"})
-    _update_run(conn, run_id, code_check=code_check)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, code_check=code_check)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 1, "编码核查", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
+    feature_default_candidates = _load_feature_default_candidates(conn, code_check.get("base_code") or _base_code(boq_item["item_code"]))
+    feature_default_text = _json_dumps(feature_default_candidates) if feature_default_candidates else "[]"
     messages_r2 = [
         {"role": "system", "content": system_prompt},
         {
@@ -1422,6 +2105,10 @@ def _stream_pricing_item(
                 f"请分析以下工程量清单项的项目特征描述是否完整充分，能否满足套定额要求：\n\n"
                 f"清单编码：{boq_item['item_code']}\n清单名称：{boq_item['item_name']}\n"
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n计量单位：{boq_item.get('unit') or '无'}\n\n"
+                f"【综合考虑默认值候选，来源 tqdk_tzhkl】\n{feature_default_text}\n\n"
+                f"如果项目特征中存在“综合考虑”，请只从上述候选中选择明确匹配的 feature_name/default_value，"
+                f"把对应“特征名: 综合考虑”替换为“特征名: 默认值”，生成 normalized_description。"
+                f"不要覆盖已有明确特征值；无法明确匹配时不要补全。\n"
                 f"请调用工具提交你的分析结果。"
             ),
         },
@@ -1432,22 +2119,39 @@ def _stream_pricing_item(
             yield ("reasoning_token", data)
         else:
             feature_result = data
+    feature_result = _normalize_feature_analysis_result(
+        feature_result,
+        boq_item.get("item_description"),
+        code_check.get("base_code") or _base_code(boq_item["item_code"]),
+        feature_default_candidates,
+    )
+    normalized_description = str(feature_result.get("normalized_description") or "").strip()
+    if feature_result.get("default_fills") and normalized_description and normalized_description != (boq_item.get("item_description") or "").strip():
+        with conn.cursor() as cur:
+            if update_item_description:
+                cur.execute("UPDATE boq_items SET item_description = %s WHERE id = %s", (normalized_description, boq_item["id"]))
+                conn.commit()
+        boq_item["item_description"] = normalized_description
+        feature_result["description_updated"] = bool(update_item_description)
     yield ("feature_check", feature_result)
-    _update_run(conn, run_id, feature_check=feature_result)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, feature_check=feature_result)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 2, "项目特征", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
     procedures_result = exec_fetch_standard_work_procedure(conn, boq_item["item_code"])
     yield ("work_procedures", procedures_result)
-    _update_run(conn, run_id, work_procedures=procedures_result)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, work_procedures=procedures_result)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "标准工序", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
     candidates_data = exec_fetch_quota_candidates(conn, boq_item["item_code"], quota_library_ids)
     yield ("quota_candidates", candidates_data)
-    _update_run(conn, run_id, quota_candidates=candidates_data)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, quota_candidates=candidates_data)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "定额候选", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
@@ -1506,7 +2210,8 @@ def _stream_pricing_item(
     ]
     raw_match = _run_submit_match(messages_r5_submit) if candidates else {"matches": [], "issues": ["未找到候选定额子目"]}
     match_result = _normalize_matches(raw_match, candidates)
-    _update_run(conn, run_id, quota_match=match_result)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, quota_match=match_result)
     yield ("quota_match", match_result)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "套定额结果", step_started_at, step_started_perf))
 
@@ -1514,8 +2219,9 @@ def _stream_pricing_item(
     step_started_perf = perf_counter()
     manual = _manual_quotas(conn, manual_project_id, boq_item.get("item_code"))
     evaluation = _evaluate(match_result["matches"], manual)
-    _update_run(conn, run_id, evaluation=evaluation)
-    _save_pending_results(conn, task_id, run_id, boq_item, match_result, evaluation)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, evaluation=evaluation)
+        _save_pending_results(conn, task_id, run_id, boq_item, match_result, evaluation)
     yield ("evaluation", evaluation)
     yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 6, "人工对比", step_started_at, step_started_perf))
 
@@ -1535,6 +2241,27 @@ def _row_to_task(row) -> dict[str, Any]:
         "legacy_local_id": row[8],
         "created_at": row[9],
         "latest_run_count": row[10],
+    }
+
+
+def _row_to_batch(row) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "name": row[1],
+        "boq_project_id": row[2],
+        "project_id": row[2],
+        "project_name": row[3],
+        "manual_project_id": row[4],
+        "manual_project_name": row[5],
+        "quota_library_ids": row[6] or [],
+        "quota_library_names": row[7] or [],
+        "status": row[8],
+        "selected_count": row[9] or 0,
+        "completed_count": row[10] or 0,
+        "failed_count": row[11] or 0,
+        "created_at": row[12],
+        "started_at": row[13],
+        "finished_at": row[14],
     }
 
 
@@ -1662,6 +2389,437 @@ def get_pricing_task(task_id: int):
         conn.close()
 
 
+def _batch_select_sql() -> str:
+    return """
+        SELECT b.id, b.name, b.boq_project_id, p.project_name,
+               b.manual_project_id, mp.project_name AS manual_project_name,
+               b.quota_library_ids,
+               COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
+               b.status, b.selected_count, b.completed_count, b.failed_count,
+               b.created_at, b.started_at, b.finished_at
+        FROM pricing_task_batches b
+        JOIN boq_projects p ON p.id = b.boq_project_id
+        LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
+        LEFT JOIN LATERAL jsonb_array_elements_text(b.quota_library_ids) lib_id(value) ON TRUE
+        LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
+    """
+
+
+@router.get("/pricing-task-batches")
+def list_pricing_task_batches():
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                _batch_select_sql()
+                + """
+                WHERE b.status <> 'deleted'
+                GROUP BY b.id, p.project_name, mp.project_name
+                ORDER BY b.created_at DESC
+                """
+            )
+            return [_row_to_batch(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+@router.post("/pricing-task-batches")
+def create_pricing_task_batch(body: PricingTaskBatchCreate):
+    from db.connection import get_connection
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="batch name required")
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM boq_projects WHERE id=%s", (body.boq_project_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="BOQ project not found")
+            if body.manual_project_id:
+                cur.execute("SELECT id FROM manual_boq_projects WHERE id=%s", (body.manual_project_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="manual project not found")
+            cur.execute(
+                """
+                INSERT INTO pricing_task_batches(name, boq_project_id, quota_library_ids, manual_project_id)
+                VALUES (%s, %s, %s::jsonb, %s)
+                RETURNING id
+                """,
+                (name, body.boq_project_id, json.dumps(body.quota_library_ids or []), body.manual_project_id),
+            )
+            batch_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": batch_id}
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-task-batches/{batch_id}")
+def get_pricing_task_batch(batch_id: int):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                _batch_select_sql()
+                + """
+                WHERE b.id=%s AND b.status <> 'deleted'
+                GROUP BY b.id, p.project_name, mp.project_name
+                """,
+                (batch_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="batch not found")
+            return _row_to_batch(row)
+    finally:
+        conn.close()
+
+
+@router.delete("/pricing-task-batches/{batch_id}", status_code=204)
+def delete_pricing_task_batch(batch_id: int):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE pricing_task_batches SET status='deleted', updated_at=NOW() WHERE id=%s", (batch_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-task-batches/{batch_id}/items")
+def get_pricing_task_batch_items(batch_id: int):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        batch = get_pricing_task_batch(batch_id)
+        project_id = int(batch["boq_project_id"])
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, item_code, item_name, item_description, unit, quantity, item_seq
+                FROM boq_items
+                WHERE project_id=%s
+                ORDER BY item_seq NULLS LAST, id
+                """,
+                (project_id,),
+            )
+            items = [
+                {
+                    "id": r[0],
+                    "item_code": r[1],
+                    "item_name": r[2],
+                    "item_description": r[3],
+                    "unit": r[4],
+                    "quantity": float(r[5]) if r[5] is not None else None,
+                    "item_seq": r[6],
+                    "project_id": project_id,
+                }
+                for r in cur.fetchall()
+            ]
+            cur.execute(
+                """
+                SELECT boq_item_id, id, status, code_check, feature_check, work_procedures,
+                       quota_candidates, quota_match, evaluation, conversion_check,
+                       coefficient_check, step_timings, error_message, created_at, finished_at,
+                       reasoning_text, confirmed_results
+                FROM pricing_task_batch_item_runs
+                WHERE batch_id=%s
+                ORDER BY created_at DESC, id DESC
+                """,
+                (batch_id,),
+            )
+            seen: set[int] = set()
+            runs = []
+            for r in cur.fetchall():
+                item_id = int(r[0])
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                runs.append(
+                    {
+                        "boq_item_id": item_id,
+                        "run": {
+                            "id": r[1],
+                            "status": r[2],
+                            "code_check": r[3],
+                            "feature_check": r[4],
+                            "work_procedures": r[5],
+                            "quota_candidates": r[6],
+                            "quota_match": r[7],
+                            "evaluation": r[8],
+                            "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
+                            "coefficient_check": r[10],
+                            "step_timings": r[11],
+                            "error_message": r[12],
+                            "created_at": r[13],
+                            "finished_at": r[14],
+                            "reasoning_text": r[15],
+                            "confirmed_results": r[16] or [],
+                        },
+                    }
+                )
+        return {"batch": batch, "items": items, "runs": runs}
+    finally:
+        conn.close()
+
+
+def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, status
+            FROM pricing_task_batches
+            WHERE id=%s AND status <> 'deleted'
+            """,
+            (batch_id,),
+        )
+        batch_row = cur.fetchone()
+        if not batch_row:
+            raise HTTPException(status_code=404, detail="batch not found")
+        cur.execute(
+            """
+            SELECT id, item_code, item_name, item_description, unit, quantity, project_id
+            FROM boq_items
+            WHERE id=%s AND project_id=%s
+            """,
+            (boq_item_id, batch_row[2]),
+        )
+        item_row = cur.fetchone()
+        if not item_row:
+            raise HTTPException(status_code=404, detail="item not found in batch project")
+    return (
+        {
+            "id": batch_row[0],
+            "name": batch_row[1],
+            "boq_project_id": batch_row[2],
+            "quota_library_ids": batch_row[3] or [],
+            "manual_project_id": batch_row[4],
+            "status": batch_row[5],
+        },
+        {
+            "id": item_row[0],
+            "item_code": item_row[1],
+            "item_name": item_row[2],
+            "item_description": item_row[3],
+            "unit": item_row[4],
+            "quantity": float(item_row[5]) if item_row[5] is not None else None,
+            "project_id": item_row[6],
+        },
+    )
+
+
+def _create_or_reset_batch_item_run(conn, batch_id: int, boq_item: dict[str, Any]) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pricing_task_batch_item_runs(
+                batch_id, boq_item_id, boq_project_id, status, started_at,
+                reasoning_text, code_check, feature_check, work_procedures,
+                quota_candidates, quota_match, evaluation, confirmed_results,
+                conversion_check, coefficient_check, step_timings, error_message, finished_at
+            )
+            VALUES (%s, %s, %s, 'running', NOW(), '', NULL, NULL, NULL, NULL, NULL, NULL, '[]'::jsonb, NULL, NULL, '{}'::jsonb, NULL, NULL)
+            ON CONFLICT (batch_id, boq_item_id) DO UPDATE SET
+                status='running',
+                started_at=NOW(),
+                finished_at=NULL,
+                reasoning_text='',
+                code_check=NULL,
+                feature_check=NULL,
+                work_procedures=NULL,
+                quota_candidates=NULL,
+                quota_match=NULL,
+                evaluation=NULL,
+                confirmed_results='[]'::jsonb,
+                conversion_check=NULL,
+                coefficient_check=NULL,
+                step_timings='{}'::jsonb,
+                error_message=NULL
+            RETURNING id
+            """,
+            (batch_id, boq_item["id"], boq_item["project_id"]),
+        )
+        item_run_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            UPDATE pricing_task_batches
+            SET status='running',
+                started_at=COALESCE(started_at, NOW()),
+                selected_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s),
+                updated_at=NOW()
+            WHERE id=%s
+            """,
+            (batch_id, batch_id),
+        )
+    conn.commit()
+    return int(item_run_id)
+
+
+def _refresh_batch_counts(conn, batch_id: int, finish_if_idle: bool = False) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE pricing_task_batches b
+            SET selected_count = stats.total_count,
+                completed_count = stats.completed_count,
+                failed_count = stats.failed_count,
+                status = CASE
+                    WHEN %s AND stats.running_count = 0 THEN 'completed'
+                    ELSE b.status
+                END,
+                finished_at = CASE
+                    WHEN %s AND stats.running_count = 0 THEN COALESCE(b.finished_at, NOW())
+                    ELSE b.finished_at
+                END,
+                updated_at = NOW()
+            FROM (
+                SELECT COUNT(*) AS total_count,
+                       COUNT(*) FILTER (WHERE status IN ('confirmed', 'no_match', 'completed')) AS completed_count,
+                       COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
+                       COUNT(*) FILTER (WHERE status = 'running') AS running_count
+                FROM pricing_task_batch_item_runs
+                WHERE batch_id=%s
+            ) stats
+            WHERE b.id=%s
+            """,
+            (finish_if_idle, finish_if_idle, batch_id, batch_id),
+        )
+    conn.commit()
+
+
+def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id, r.batch_id, r.status, r.quota_match, r.confirmed_results,
+                   r.conversion_check, i.id, i.item_code, i.item_name, i.item_description,
+                   i.unit, i.quantity, i.project_id
+            FROM pricing_task_batch_item_runs r
+            JOIN boq_items i ON i.id = r.boq_item_id
+            WHERE r.id=%s
+            """,
+            (item_run_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="batch item run not found")
+    batch_id = int(row[1])
+    batch_run = {
+        "id": row[0],
+        "batch_id": batch_id,
+        "status": row[2],
+        "quota_match": row[3] or {},
+        "confirmed_results": row[4] or [],
+        "conversion_check": row[5],
+    }
+    boq_item = {
+        "run_id": row[0],
+        "status": row[2],
+        "id": row[6],
+        "item_code": row[7],
+        "item_name": row[8],
+        "item_description": row[9] or "",
+        "unit": row[10] or "",
+        "quantity": float(row[11]) if row[11] is not None else None,
+        "project_id": row[12],
+    }
+    matches = batch_run["quota_match"].get("matches", []) if isinstance(batch_run["quota_match"], dict) else []
+    confirmed_items = _confirmed_items_from_matches(conn, matches)
+    return batch_id, batch_run, boq_item, {"items": confirmed_items}
+
+
+@router.post("/pricing-task-batches/{batch_id}/items/{boq_item_id}/run-stream")
+def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
+    from db.connection import get_connection
+
+    def generate():
+        conn = get_connection()
+        item_run_id = None
+        try:
+            _ensure_schema(conn)
+            batch, boq_item = _load_batch_and_item(conn, batch_id, boq_item_id)
+            item_run_id = _create_or_reset_batch_item_run(conn, batch_id, boq_item)
+            yield _sse({"type": "run_started", "run_id": item_run_id})
+            yield _sse({"type": "item_info", "item": boq_item})
+            fields: dict[str, Any] = {}
+            reasoning_text_parts: list[str] = []
+            had_error = False
+            for event_type, data in _stream_pricing_item(
+                conn,
+                boq_item,
+                batch["quota_library_ids"],
+                batch["manual_project_id"],
+                None,
+                None,
+                persist_run=False,
+                update_item_description=False,
+            ):
+                if event_type == "reasoning_token":
+                    reasoning_text_parts.append(data)
+                    yield _sse({"type": "reasoning_token", "token": data})
+                elif event_type == "error":
+                    had_error = True
+                    yield _sse({"type": "error", "error": data})
+                else:
+                    if event_type == "code_check":
+                        fields["code_check"] = data
+                    elif event_type == "feature_check":
+                        fields["feature_check"] = data
+                    elif event_type == "work_procedures":
+                        fields["work_procedures"] = data
+                    elif event_type == "quota_candidates":
+                        fields["quota_candidates"] = data
+                    elif event_type == "quota_match":
+                        fields["quota_match"] = data
+                    elif event_type == "evaluation":
+                        fields["evaluation"] = data
+                    elif event_type == "step_timing":
+                        timings = dict(fields.get("step_timings") or {})
+                        timings[str(data["step_no"])] = data
+                        fields["step_timings"] = timings
+                    yield _sse({"type": event_type, **data} if event_type != "evaluation" else {"type": "evaluation", "evaluation": data})
+            quota_match = fields.get("quota_match") or {}
+            matches = quota_match.get("matches", []) if isinstance(quota_match, dict) else []
+            confirmed_results = _confirmed_results_from_matches(conn, matches)
+            final_status = "no_match" if not matches else "completed"
+            if had_error:
+                final_status = "failed"
+            _update_batch_item_run(
+                conn,
+                item_run_id,
+                **fields,
+                confirmed_results=confirmed_results,
+                reasoning_text="".join(reasoning_text_parts),
+                status=final_status,
+                finished_at=datetime.now(),
+            )
+            _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
+            yield _sse({"type": "done", "run_id": item_run_id})
+        except Exception as exc:
+            if item_run_id:
+                _update_batch_item_run(conn, item_run_id, status="failed", error_message=str(exc), finished_at=datetime.now())
+                _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
+            print(f"[pricing-task] batch SSE error: {exc}", file=sys.stderr, flush=True)
+            yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @router.get("/pricing-tasks/{task_id}/items/{boq_item_id}/runs")
 def list_item_runs(task_id: int, boq_item_id: int):
     from db.connection import get_connection
@@ -1673,7 +2831,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
             cur.execute(
                 """
                 SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
-                       quota_match, evaluation, conversion_check, step_timings, error_message, created_at, finished_at, reasoning_text
+                       quota_match, evaluation, conversion_check, coefficient_check, step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s AND boq_item_id=%s
                 ORDER BY created_at DESC
@@ -1693,11 +2851,12 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "quota_match": r[6],
                 "evaluation": r[7],
                 "conversion_check": _hydrate_conversion_combo_resources(conn, r[8]),
-                "step_timings": r[9],
-                "error_message": r[10],
-                "created_at": r[11],
-                "finished_at": r[12],
-                "reasoning_text": r[13],
+                "coefficient_check": r[9],
+                "step_timings": r[10],
+                "error_message": r[11],
+                "created_at": r[12],
+                "finished_at": r[13],
+                "reasoning_text": r[14],
                 "confirmed_results": confirmed_results.get(int(r[0]), []),
             }
             for r in rows
@@ -1721,7 +2880,7 @@ def list_latest_task_runs(task_id: int):
                 """
                 SELECT DISTINCT ON (boq_item_id)
                        boq_item_id, id, status, code_check, feature_check, work_procedures,
-                       quota_candidates, quota_match, evaluation, conversion_check, step_timings, error_message, created_at, finished_at,
+                       quota_candidates, quota_match, evaluation, conversion_check, coefficient_check, step_timings, error_message, created_at, finished_at,
                        reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s
@@ -1744,11 +2903,12 @@ def list_latest_task_runs(task_id: int):
                     "quota_match": r[7],
                     "evaluation": r[8],
                     "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
-                    "step_timings": r[10],
-                    "error_message": r[11],
-                    "created_at": r[12],
-                    "finished_at": r[13],
-                    "reasoning_text": r[14],
+                    "coefficient_check": r[10],
+                    "step_timings": r[11],
+                    "error_message": r[12],
+                    "created_at": r[13],
+                    "finished_at": r[14],
+                    "reasoning_text": r[15],
                     "confirmed_results": confirmed_results.get(int(r[1]), []),
                 },
             }
@@ -1918,6 +3078,315 @@ def pricing_task_conversion_check_stream(run_id: int):
             yield _sse({"type": "error", "error": str(exc.detail)})
         except Exception as exc:
             print(f"[pricing-task] conversion check SSE error: {exc}", file=sys.stderr, flush=True)
+            yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/pricing-task-runs/{run_id}/coefficient-check-stream")
+def pricing_task_coefficient_check_stream(run_id: int):
+    from db.connection import get_connection
+
+    def generate():
+        conn = get_connection()
+        try:
+            _ensure_schema(conn)
+            step_timings = _load_step_timings(conn, run_id)
+            step_started_at = datetime.now()
+            step_started_perf = perf_counter()
+            boq_item, items = _coefficient_context(conn, run_id)
+            yield _sse({"type": "coefficient_check_start", "run_id": run_id, "total": len(items)})
+            preview = _default_coefficient_check(items)
+            yield _sse({"type": "coefficient_rules", "items": preview["items"]})
+
+            if not items:
+                result = {"items": [], "issues": ["未找到已确认定额，无法进行系数换算。"]}
+                _update_run(conn, run_id, coefficient_check=result)
+                yield _sse({"type": "coefficient_check", "coefficient_check": result})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": run_id})
+                return
+
+            if not any(item.get("coefficient_rules") for item in items):
+                result = _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")
+                _update_run(conn, run_id, coefficient_check=result)
+                yield _sse({"type": "coefficient_check", "coefficient_check": result})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": run_id})
+                return
+
+            input_payload = {
+                "boq_item": boq_item,
+                "quotas": items,
+                "rule_source": "tdek_tznhs.hssm",
+                "target_resource_type_guide": {
+                    "1": "人工费/人工消耗量",
+                    "2": "材料费/材料消耗量",
+                    "3": "机械费/机械消耗量",
+                    "all": "子目或相应子目整体乘以系数",
+                },
+                "output_note": "本轮只保存系数和作用对象，不计算调整后含量。",
+            }
+            context_text = _json_dumps(input_payload)
+            system_prompt = build_system_prompt()
+            analysis_prompt = (
+                "请进行第八轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
+                "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
+                "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
+                "作用对象按说明判断：人工费=1，材料费=2，机械消耗量/机械费=3，子目乘以系数/相应子目乘以系数=all。\n"
+                "本轮不计算调整后含量，只说明哪些工料机行应显示乘以的系数。\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            try:
+                analysis = ""
+                for event_type, data in _stream_text_completion(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": analysis_prompt},
+                    ],
+                    6000,
+                ):
+                    if event_type == "reasoning_token":
+                        yield _sse({"type": "reasoning_token", "token": data})
+                    elif event_type == "text_result":
+                        analysis = data
+
+                submit_prompt = (
+                    "请严格调用 submit_coefficient_check 提交第八轮结构化系数换算判断。\n"
+                    "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
+                    "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
+                    "factor 从 hssm 中的“系数X”提取；如果未命中，matched=false，factor 仍填写 hssm 中可识别的系数或 1。\n"
+                    "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
+                    f"【第八轮分析】\n{analysis or '（无分析文本）'}\n\n"
+                    f"【输入数据】\n{context_text}"
+                )
+                raw_result = _run_submit_coefficient_check(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": submit_prompt},
+                    ]
+                )
+                result = _normalize_coefficient_check(raw_result, items)
+            except Exception as exc:
+                print(f"[pricing-task] coefficient model result fallback: {exc}", file=sys.stderr, flush=True)
+                result = _default_coefficient_check(
+                    items,
+                    f"模型结构化输出解析失败，已保留系数换算说明待人工复核：{exc}",
+                )
+            _update_run(conn, run_id, coefficient_check=result)
+            yield _sse({"type": "coefficient_check", "coefficient_check": result})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "done", "run_id": run_id})
+        except HTTPException as exc:
+            yield _sse({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            print(f"[pricing-task] coefficient check SSE error: {exc}", file=sys.stderr, flush=True)
+            yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/pricing-task-batch-item-runs/{item_run_id}/conversion-check-stream")
+def pricing_task_batch_conversion_check_stream(item_run_id: int):
+    from db.connection import get_connection
+
+    def generate():
+        conn = get_connection()
+        try:
+            _ensure_schema(conn)
+            batch_id, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+            confirmed_items = context["items"]
+            step_timings = _load_batch_step_timings(conn, item_run_id)
+            step_started_at = datetime.now()
+            step_started_perf = perf_counter()
+            yield _sse({"type": "conversion_check_start", "run_id": item_run_id, "total": len(confirmed_items)})
+
+            if not confirmed_items:
+                result = {"items": [], "issues": ["未找到批量确认定额，无法进行组合换算。"]}
+                yield _sse({"type": "combo_adjustment_rules", "items": []})
+                _update_batch_item_run(conn, item_run_id, conversion_check=result)
+                yield _sse({"type": "conversion_check", "conversion_check": result})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": item_run_id})
+                return
+
+            input_payload = {
+                "boq_item": boq_item,
+                "confirmed_quotas": confirmed_items,
+                "combo_adjustment_rule_guide": COMBO_ADJUSTMENT_RULE_GUIDE,
+            }
+            context_text = _json_dumps(input_payload)
+            system_prompt = build_system_prompt()
+            combo_preview = _default_conversion_check(confirmed_items)
+            yield _sse({"type": "combo_adjustment_rules", "items": combo_preview["items"]})
+            if not any(item.get("adjustment_rules") for item in confirmed_items):
+                result = _default_conversion_check(
+                    confirmed_items,
+                    "已确认定额均未查询到 tdek_tzhhs 组合定额规则。",
+                    boq_item=boq_item,
+                )
+                _update_batch_item_run(conn, item_run_id, conversion_check=result)
+                yield _sse({"type": "conversion_check", "conversion_check": result})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": item_run_id})
+                return
+
+            analysis_prompt = (
+                "请对已确认的批量定额进行第七轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
+                "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
+                "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
+                "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            conversion_analysis = ""
+            for event_type, data in _stream_text_completion(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": analysis_prompt},
+                ],
+                6000,
+            ):
+                if event_type == "reasoning_token":
+                    yield _sse({"type": "reasoning_token", "token": data})
+                elif event_type == "text_result":
+                    conversion_analysis = data
+
+            submit_prompt = (
+                "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
+                "必须覆盖每一条已确认定额。\n"
+                "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
+                "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
+                "不匹配时 matched=false，feature_value 和 calculated_times 填 0，并说明原因。\n\n"
+                f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            raw_result = _run_submit_conversion_check(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": submit_prompt},
+                ]
+            )
+            result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
+            _update_batch_item_run(conn, item_run_id, conversion_check=result)
+            yield _sse({"type": "conversion_check", "conversion_check": result})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "done", "run_id": item_run_id})
+        except HTTPException as exc:
+            yield _sse({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            print(f"[pricing-task] batch conversion check SSE error: {exc}", file=sys.stderr, flush=True)
+            yield _sse({"type": "error", "error": str(exc)})
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/pricing-task-batch-item-runs/{item_run_id}/coefficient-check-stream")
+def pricing_task_batch_coefficient_check_stream(item_run_id: int):
+    from db.connection import get_connection
+
+    def generate():
+        conn = get_connection()
+        try:
+            _ensure_schema(conn)
+            batch_id, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+            conversion_check = _hydrate_conversion_combo_resources(conn, batch_run.get("conversion_check") or {}) or {}
+            items = _coefficient_items_from_context(conn, context["items"], conversion_check)
+            step_timings = _load_batch_step_timings(conn, item_run_id)
+            step_started_at = datetime.now()
+            step_started_perf = perf_counter()
+            yield _sse({"type": "coefficient_check_start", "run_id": item_run_id, "total": len(items)})
+            preview = _default_coefficient_check(items)
+            yield _sse({"type": "coefficient_rules", "items": preview["items"]})
+
+            if not items:
+                result = {"items": [], "issues": ["未找到批量确认定额，无法进行系数换算。"]}
+                _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
+                _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
+                yield _sse({"type": "coefficient_check", "coefficient_check": result})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": item_run_id})
+                return
+
+            if not any(item.get("coefficient_rules") for item in items):
+                result = _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")
+                _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
+                _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
+                yield _sse({"type": "coefficient_check", "coefficient_check": result})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "done", "run_id": item_run_id})
+                return
+
+            input_payload = {
+                "boq_item": boq_item,
+                "quotas": items,
+                "rule_source": "tdek_tznhs.hssm",
+                "target_resource_type_guide": {
+                    "1": "人工费/人工消耗量",
+                    "2": "材料费/材料消耗量",
+                    "3": "机械费/机械消耗量",
+                    "all": "子目或相应子目整体乘以系数",
+                },
+                "output_note": "本轮只保存系数和作用对象，不计算调整后含量。",
+            }
+            context_text = _json_dumps(input_payload)
+            system_prompt = build_system_prompt()
+            analysis_prompt = (
+                "请进行第八轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
+                "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
+                "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
+                "本轮不计算调整后含量，只说明哪些工料机行应显示乘以的系数。\n\n"
+                f"【输入数据】\n{context_text}"
+            )
+            try:
+                analysis = ""
+                for event_type, data in _stream_text_completion(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": analysis_prompt},
+                    ],
+                    6000,
+                ):
+                    if event_type == "reasoning_token":
+                        yield _sse({"type": "reasoning_token", "token": data})
+                    elif event_type == "text_result":
+                        analysis = data
+
+                submit_prompt = (
+                    "请严格调用 submit_coefficient_check 提交第八轮结构化系数换算判断。\n"
+                    "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
+                    "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
+                    "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
+                    f"【第八轮分析】\n{analysis or '（无分析文本）'}\n\n"
+                    f"【输入数据】\n{context_text}"
+                )
+                raw_result = _run_submit_coefficient_check(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": submit_prompt},
+                    ]
+                )
+                result = _normalize_coefficient_check(raw_result, items)
+            except Exception as exc:
+                print(f"[pricing-task] batch coefficient model result fallback: {exc}", file=sys.stderr, flush=True)
+                result = _default_coefficient_check(
+                    items,
+                    f"模型结构化输出解析失败，已保留系数换算说明待人工复核：{exc}",
+                )
+            _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
+            _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
+            yield _sse({"type": "coefficient_check", "coefficient_check": result})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "done", "run_id": item_run_id})
+        except HTTPException as exc:
+            yield _sse({"type": "error", "error": str(exc.detail)})
+        except Exception as exc:
+            print(f"[pricing-task] batch coefficient check SSE error: {exc}", file=sys.stderr, flush=True)
             yield _sse({"type": "error", "error": str(exc)})
         finally:
             conn.close()

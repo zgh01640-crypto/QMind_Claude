@@ -1,10 +1,12 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import {
   BoqItem,
   PricingTask,
+  PricingTaskCoefficientCheck,
   PricingTaskConversionCheck,
   PricingTaskConversionResource,
   PricingTaskEvaluation,
@@ -19,6 +21,7 @@ import {
   fetchPricingTask,
   fetchPricingTaskItemRuns,
   rejectPricingTaskRun,
+  streamPricingTaskCoefficientCheck,
   streamPricingTaskConversionCheck,
   streamPricingTaskRunItem,
   updateBoqItemDescription,
@@ -33,6 +36,30 @@ interface CodeCheck {
   is_consistent: boolean
 }
 
+interface FeatureDefaultFill {
+  feature_name: string
+  original_value: string
+  default_value: string
+  source_code: string
+  reason: string
+}
+
+interface FeatureCheck {
+  is_complete: boolean
+  missing_features: string[]
+  analysis: string
+  normalized_description?: string
+  default_fills?: FeatureDefaultFill[]
+  description_updated?: boolean
+  default_candidates?: Array<{
+    source_code: string
+    feature_name: string
+    feature_value: string
+    default_value: string
+    source_rowid?: number
+  }>
+}
+
 interface ItemResult {
   phase: 'reasoning' | 'done' | 'error'
   reasoning: string
@@ -40,7 +67,7 @@ interface ItemResult {
   status?: string
   codeCheck?: CodeCheck
   judgment?: { is_consistent: boolean; reasoning: string }
-  featureCheck?: { is_complete: boolean; missing_features: string[]; analysis: string }
+  featureCheck?: FeatureCheck
   workProcedures?: string[]
   workProcedureText?: string
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
@@ -50,6 +77,10 @@ interface ItemResult {
   conversionCheck?: PricingTaskConversionCheck
   conversionChecking?: boolean
   conversionError?: string
+  coefficientPreview?: PricingTaskCoefficientCheck['items']
+  coefficientCheck?: PricingTaskCoefficientCheck
+  coefficientChecking?: boolean
+  coefficientError?: string
   confirmedResults?: PricingTaskRun['confirmed_results']
   stepTimings?: Record<string, PricingTaskStepTiming>
   error?: string
@@ -76,6 +107,7 @@ function runToResult(run: PricingTaskRun): ItemResult {
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
     conversionCheck: run.conversion_check ?? undefined,
+    coefficientCheck: run.coefficient_check ?? undefined,
     confirmedResults: run.confirmed_results ?? undefined,
     stepTimings: run.step_timings ?? undefined,
     error: run.error_message || undefined,
@@ -192,10 +224,22 @@ function stepBadges(result?: ItemResult) {
             ? 'warning'
             : 'success',
     },
+    {
+      no: 8,
+      title: '系数换算',
+      tone: result?.coefficientChecking
+        ? 'pending'
+        : !result?.coefficientCheck
+          ? 'pending'
+          : result.coefficientCheck.items.some(item => item.coefficient_rules.some(rule => rule.matched))
+            ? 'warning'
+            : 'success',
+    },
   ] as const
 }
 
 function activeStepNo(result?: ItemResult) {
+  if (result?.coefficientChecking) return 8
   if (result?.conversionChecking) return 7
   if (!result || result.phase !== 'reasoning') return null
   if (!result.codeCheck) return 1
@@ -410,6 +454,68 @@ function ComboQuotaOnlyList({
   )
 }
 
+function CoefficientCheckList({
+  items,
+  preview = false,
+}: {
+  items: PricingTaskCoefficientCheck['items']
+  preview?: boolean
+}) {
+  if (items.length === 0) {
+    return <ResultEmptyState title="暂无系数换算说明" description="该清单定额未查询到 tdek_tznhs 换算说明。" />
+  }
+  return (
+    <div className="space-y-2">
+      {items.map(item => {
+        const matchedCount = preview ? 0 : item.coefficient_rules.filter(rule => rule.matched).length
+        return (
+        <details key={item.quota_key} className="group rounded border border-violet-100 bg-white px-3 py-2 text-xs">
+          <summary className="flex cursor-pointer list-none items-start justify-between gap-2 [&::-webkit-details-marker]:hidden">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono font-semibold text-violet-800">{item.quota_code || '-'}</span>
+                <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-700">
+                  {item.source_type === 'combo' ? '组合定额' : '基础定额'}
+                </span>
+                <span className="text-[11px] text-gray-500">
+                  {item.coefficient_rules.length} 条说明，{preview ? '待识别' : `命中 ${matchedCount} 条`}
+                </span>
+              </div>
+              <div className="mt-0.5 truncate font-medium text-gray-900">{item.quota_name || '-'}</div>
+            </div>
+            <span className="shrink-0 text-[11px] text-violet-700 group-open:hidden">展开</span>
+            <span className="hidden shrink-0 text-[11px] text-violet-700 group-open:inline">收起</span>
+          </summary>
+          {item.coefficient_rules.length === 0 ? (
+            <div className="mt-2 rounded border border-dashed border-gray-200 bg-gray-50 px-2 py-2 text-gray-500">该定额无系数换算说明。</div>
+          ) : (
+            <div className="mt-2 space-y-1.5">
+              {item.coefficient_rules.map(rule => (
+                <div key={rule.rule_index} className="rounded border border-violet-100 bg-violet-50/60 px-2 py-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded bg-white px-1.5 py-0.5 text-[10px] text-gray-500">规则 {rule.rule_index}</span>
+                    <span className={`font-medium ${!preview && rule.matched ? 'text-amber-700' : 'text-gray-600'}`}>
+                      {preview ? '待识别' : rule.matched ? `系数 ×${formatNullableNumber(rule.factor)}` : '未命中'}
+                    </span>
+                    {!preview && rule.target_resource_types.length > 0 && (
+                      <span className="text-gray-500">对象：{rule.target_resource_types.join('/')}</span>
+                    )}
+                  </div>
+                  {rule.tsxx && <div className="mt-1 text-gray-500">提示：{rule.tsxx}</div>}
+                  <div className="mt-1 text-gray-700">{rule.hssm}</div>
+                  {!preview && rule.matched_feature && <div className="mt-1 text-violet-800">命中特征：{rule.matched_feature}</div>}
+                  {!preview && rule.reason && <div className="mt-1 text-gray-500">{rule.reason}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </details>
+        )
+      })}
+    </div>
+  )
+}
+
 function ResultEmptyState({ title, description }: { title: string; description: string }) {
   return (
     <div className="rounded border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center">
@@ -419,7 +525,32 @@ function ResultEmptyState({ title, description }: { title: string; description: 
   )
 }
 
-function ResourceTable({ resources }: { resources: PricingTaskConversionResource[] }) {
+function coefficientRulesForResource(resource: PricingTaskConversionResource, rules?: PricingTaskCoefficientCheck['items'][number]['coefficient_rules']) {
+  return (rules ?? []).filter(rule => {
+    if (!rule.matched) return false
+    if (rule.target_resource_types.includes('all')) return true
+    return resource.type != null && rule.target_resource_types.includes(String(resource.type) as '1' | '2' | '3')
+  })
+}
+
+function coefficientNoteForResource(resource: PricingTaskConversionResource, rules?: PricingTaskCoefficientCheck['items'][number]['coefficient_rules']) {
+  const matched = coefficientRulesForResource(resource, rules)
+  if (matched.length === 0) return ''
+  return matched
+    .map(rule => {
+      const basis = [rule.matched_feature, rule.hssm].filter(Boolean).join('；')
+      return `系数 ×${formatNullableNumber(rule.factor)}${basis ? `（${basis}）` : ''}`
+    })
+    .join('；')
+}
+
+function ResourceTable({
+  resources,
+  coefficientRules,
+}: {
+  resources: PricingTaskConversionResource[]
+  coefficientRules?: PricingTaskCoefficientCheck['items'][number]['coefficient_rules']
+}) {
   if (resources.length === 0) {
     return <ResultEmptyState title="暂无工料机明细" description="确认定额并完成组合换算后，这里会展示工料机信息。" />
   }
@@ -437,18 +568,36 @@ function ResourceTable({ resources }: { resources: PricingTaskConversionResource
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 bg-white">
-          {resources.map((resource, index) => (
-            <tr key={`${resource.code}-${resource.name}-${index}`}>
-              <td className="px-3 py-2 text-gray-500">{resourceTypeLabel(resource.type)}</td>
-              <td className="px-3 py-2 font-mono text-gray-600">{resource.code || '-'}</td>
-              <td className="px-3 py-2 text-gray-900">{resource.name || '-'}</td>
-              <td className="px-3 py-2 text-gray-500">{resource.unit || '-'}</td>
-              <td className="px-3 py-2 text-right text-gray-700">
-                {resource.confirmed_quantity ?? resource.quantity ?? resource.original_quantity ?? '-'}
-              </td>
-              <td className="px-3 py-2 text-gray-500">{resource.adjustment_note || '-'}</td>
-            </tr>
-          ))}
+          {resources.map((resource, index) => {
+            const matchedRules = coefficientRulesForResource(resource, coefficientRules)
+            const hasCoefficient = matchedRules.length > 0
+            return (
+              <tr key={`${resource.code}-${resource.name}-${index}`} className={hasCoefficient ? 'bg-amber-50/70' : undefined}>
+                <td className="px-3 py-2 text-gray-500">{resourceTypeLabel(resource.type)}</td>
+                <td className="px-3 py-2 font-mono text-gray-600">{resource.code || '-'}</td>
+                <td className="px-3 py-2 text-gray-900">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span>{resource.name || '-'}</span>
+                    {hasCoefficient && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">系数换算</span>}
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-gray-500">{resource.unit || '-'}</td>
+                <td className="px-3 py-2 text-right text-gray-700">
+                  <div className="flex flex-col items-end gap-1">
+                    <span>{resource.confirmed_quantity ?? resource.quantity ?? resource.original_quantity ?? '-'}</span>
+                    {matchedRules.map(rule => (
+                      <span key={rule.rule_index} className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        x{formatNullableNumber(rule.factor)}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+                <td className={`px-3 py-2 ${hasCoefficient ? 'text-amber-700' : 'text-gray-500'}`}>
+                  {coefficientNoteForResource(resource, coefficientRules) || resource.adjustment_note || '-'}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -463,6 +612,7 @@ interface ResourceGroup {
   sourceLabel?: string
   timesLabel?: string
   resources: PricingTaskConversionResource[]
+  coefficientRules?: PricingTaskCoefficientCheck['items'][number]['coefficient_rules']
 }
 
 function ResourceGroups({ groups }: { groups: ResourceGroup[] }) {
@@ -484,7 +634,7 @@ function ResourceGroups({ groups }: { groups: ResourceGroup[] }) {
               <span>{group.resources.length} 条工料机</span>
             </div>
           </div>
-          <ResourceTable resources={group.resources} />
+          <ResourceTable resources={group.resources} coefficientRules={group.coefficientRules} />
         </div>
       ))}
     </div>
@@ -500,18 +650,22 @@ function SelectedItemResultPanel({
 }) {
   const conversionItems = result?.conversionCheck?.items ?? result?.comboAdjustmentPreview ?? []
   const hasFinalConversion = Boolean(result?.conversionCheck)
+  const coefficientByKey = new Map((result?.coefficientCheck?.items ?? []).map(item => [item.quota_key, item.coefficient_rules]))
+  const coefficientByCode = new Map((result?.coefficientCheck?.items ?? []).map(item => [item.quota_code, item.coefficient_rules]))
   const resourceGroups: ResourceGroup[] = conversionItems.flatMap(row => {
     const baseGroup: ResourceGroup = {
       key: `${row.dekid}-${row.dezmid}`,
       quotaCode: row.quota_code,
       quotaName: row.quota_name,
       resources: row.resources ?? [],
+      coefficientRules: coefficientByKey.get(`base:${row.dekid}:${row.dezmid}`) ?? coefficientByCode.get(row.quota_code),
     }
     const comboGroups: ResourceGroup[] = (row.adjustment_rules ?? []).map(rule => ({
       key: `${row.dekid}-${row.dezmid}-${rule.rule_index}-${rule.combo_code}`,
       quotaCode: rule.combo_code,
       quotaName: `${rule.combo_name || '-'}（来源 ${row.quota_code || '-'}；次数 ${formatNullableNumber(rule.calculated_times)}）`,
       resources: rule.combo_resources ?? [],
+      coefficientRules: coefficientByKey.get(`combo:${row.dekid}:${rule.combo_dezmid}:${rule.combo_code}`) ?? coefficientByCode.get(rule.combo_code),
     }))
     return [baseGroup, ...comboGroups]
   })
@@ -825,8 +979,19 @@ export default function PricingTaskDetailPage() {
         } else if (evt.type === 'feature_check') {
           updateResult(itemId, s => ({
             ...s,
-            featureCheck: { is_complete: evt.is_complete, missing_features: evt.missing_features, analysis: evt.analysis },
+            featureCheck: {
+              is_complete: evt.is_complete,
+              missing_features: evt.missing_features,
+              analysis: evt.analysis,
+              normalized_description: evt.normalized_description,
+              default_fills: evt.default_fills ?? [],
+              description_updated: evt.description_updated,
+              default_candidates: evt.default_candidates ?? [],
+            },
           }))
+          if (evt.description_updated && evt.normalized_description) {
+            setItems(prev => prev.map(item => item.id === itemId ? { ...item, item_description: evt.normalized_description || item.item_description } : item))
+          }
         } else if (evt.type === 'work_procedures') {
           updateResult(itemId, s => ({ ...s, workProcedures: evt.procedures, workProcedureText: evt.procedure_text }))
         } else if (evt.type === 'quota_candidates') {
@@ -908,6 +1073,51 @@ export default function PricingTaskDetailPage() {
     }
   }
 
+  async function runCoefficientCheck(runId: number, itemId: number) {
+    updateResult(itemId, s => ({ ...s, coefficientChecking: true, coefficientError: undefined }))
+    try {
+      await streamPricingTaskCoefficientCheck(runId, (evt: PricingTaskEvent) => {
+        if (evt.type === 'coefficient_check_start') {
+          updateResult(itemId, s => ({
+            ...s,
+            coefficientChecking: true,
+            coefficientError: undefined,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第八轮 系数换算】\n`,
+          }))
+        } else if (evt.type === 'coefficient_rules') {
+          updateResult(itemId, s => ({
+            ...s,
+            coefficientPreview: evt.items,
+            coefficientChecking: true,
+          }))
+        } else if (evt.type === 'reasoning_token') {
+          updateResult(itemId, s => ({ ...s, reasoning: s.reasoning + evt.token }))
+        } else if (evt.type === 'coefficient_check') {
+          updateResult(itemId, s => ({ ...s, coefficientCheck: evt.coefficient_check, coefficientPreview: evt.coefficient_check.items, coefficientChecking: false }))
+        } else if (evt.type === 'step_timing') {
+          updateResult(itemId, s => ({
+            ...s,
+            stepTimings: { ...(s.stepTimings ?? {}), [String(evt.step_no)]: evt },
+          }))
+        } else if (evt.type === 'done') {
+          updateResult(itemId, s => ({ ...s, coefficientChecking: false }))
+        } else if (evt.type === 'error') {
+          updateResult(itemId, s => ({
+            ...s,
+            coefficientChecking: false,
+            coefficientError: evt.error,
+          }))
+        }
+      })
+    } catch (err) {
+      updateResult(itemId, s => ({
+        ...s,
+        coefficientChecking: false,
+        coefficientError: err instanceof Error ? err.message : '系数换算失败',
+      }))
+    }
+  }
+
   async function handleConfirm() {
     if (!selectedItemId || !currentResult?.runId) return
     const itemId = selectedItemId
@@ -919,7 +1129,10 @@ export default function PricingTaskDetailPage() {
     } finally {
       setActionBusy(false)
     }
-    void runConversionCheck(runId, itemId)
+    void (async () => {
+      await runConversionCheck(runId, itemId)
+      await runCoefficientCheck(runId, itemId)
+    })()
   }
 
   async function handleReject() {
@@ -950,7 +1163,8 @@ export default function PricingTaskDetailPage() {
     : stepBadges(currentResult).find(step => step.no === currentActiveStepNo)
   const isCurrentStepRunning = Boolean(
     currentResult?.phase === 'reasoning'
-      || currentResult?.conversionChecking,
+      || currentResult?.conversionChecking
+      || currentResult?.coefficientChecking,
   )
   const quotaHitStats = buildQuotaHitStats(itemResults, items.length)
 
@@ -959,8 +1173,13 @@ export default function PricingTaskDetailPage() {
       <div className="bg-white border-b border-gray-200 px-6 py-3">
         <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
-              {task.name}
+            <div className="flex min-w-0 items-center gap-3">
+              <Link href="/pricing-task" className="shrink-0 rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50">
+                返回单条列表
+              </Link>
+              <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
+                {task.name}
+              </div>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
               <span className="min-w-0 max-w-full truncate" title={task.project_name}>
@@ -1169,12 +1388,40 @@ export default function PricingTaskDetailPage() {
 
                 <div className="w-96 flex-shrink-0 overflow-y-auto">
                   {currentResult.codeCheck && (
-                    <section className={`px-4 py-4 border-b ${currentResult.codeCheck.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
-                      <h4 className={`font-semibold text-sm mb-3 ${currentResult.codeCheck.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
+                    <section className={`px-4 py-3 border-b ${currentResult.codeCheck.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
+                      <h4 className={`font-semibold text-sm mb-2 ${currentResult.codeCheck.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
                         1. 编码核查：{currentResult.codeCheck.is_consistent ? '名称一致' : '名称不一致'}
                         <StepDuration result={currentResult} stepNo={1} />
                       </h4>
-                      <div className="space-y-2 text-xs">
+                      <div className="space-y-1.5 text-xs">
+                        <div className="grid grid-cols-[3rem_minmax(0,1fr)] items-start gap-2">
+                          <span className="text-right text-gray-500">清单</span>
+                          <div className="min-w-0">
+                            <span className="font-medium text-gray-900">{currentResult.codeCheck.item_name || '-'}</span>
+                            <span className="ml-2 font-mono font-semibold text-gray-700">{currentResult.codeCheck.item_code}</span>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-[3rem_minmax(0,1fr)] items-start gap-2">
+                          <span className="text-right text-gray-500">标准</span>
+                          <div className="min-w-0">
+                            {currentResult.codeCheck.found ? (
+                              <span className="font-medium text-gray-900">{currentResult.codeCheck.standard_name || '-'}</span>
+                            ) : (
+                              <span className="text-orange-600">未找到</span>
+                            )}
+                            <span className="ml-2 font-mono text-gray-700">{currentResult.codeCheck.base_code}</span>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-[3rem_minmax(0,1fr)] items-start gap-2">
+                          <span className="text-right text-gray-500">结论</span>
+                          <div className="leading-5">
+                            <span className={`text-xs font-normal ${currentResult.codeCheck.is_consistent ? 'text-green-700' : 'text-orange-700'}`}>
+                              {currentResult.codeCheck.is_consistent ? '编码与名称一致' : '编码与名称不一致或标准库未找到'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="hidden">
                         <div><span className="text-gray-600">原始编码：</span><span className="font-mono font-semibold">{currentResult.codeCheck.item_code}</span></div>
                         <div><span className="text-gray-600">基准编码：</span><span className="font-mono">{currentResult.codeCheck.base_code}</span></div>
                         <div><span className="text-gray-600">清单名称：</span>{currentResult.codeCheck.item_name}</div>
@@ -1213,6 +1460,47 @@ export default function PricingTaskDetailPage() {
                         <ul className="text-xs text-orange-800 space-y-1 list-disc list-inside mb-2">
                           {currentResult.featureCheck.missing_features.map((f, i) => <li key={i}>{f}</li>)}
                         </ul>
+                      )}
+                      {(currentResult.featureCheck.default_candidates?.length ?? 0) > 0 && (
+                        <details className="group mb-2 rounded border border-gray-200 bg-white px-3 py-2 text-xs">
+                          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-gray-700 [&::-webkit-details-marker]:hidden">
+                            <span className="font-medium">
+                              综合考虑默认值候选（{currentResult.featureCheck.default_candidates?.length ?? 0}）
+                            </span>
+                            <span className="text-gray-500 group-open:hidden">展开</span>
+                            <span className="hidden text-gray-500 group-open:inline">收起</span>
+                          </summary>
+                          <div className="mt-2 space-y-1.5">
+                            {currentResult.featureCheck.default_candidates?.map((candidate, i) => (
+                              <div key={`${candidate.feature_name}-${candidate.default_value}-${i}`} className="flex flex-wrap gap-x-2 gap-y-1 rounded bg-gray-50 px-2 py-1 text-gray-600">
+                                <span className="font-medium text-gray-800">{candidate.feature_name}</span>
+                                <span>{candidate.feature_value || '综合考虑'} → {candidate.default_value}</span>
+                                <span className="text-gray-400">来源：{candidate.source_code}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                      {(currentResult.featureCheck.default_fills?.length ?? 0) > 0 && (
+                        <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                          <div className="mb-1 font-semibold">
+                            已按综合考虑默认值补全{currentResult.featureCheck.description_updated ? '并回写清单' : ''}
+                          </div>
+                          <div className="space-y-1">
+                            {currentResult.featureCheck.default_fills?.map((fill, i) => (
+                              <div key={`${fill.feature_name}-${i}`} className="flex flex-wrap gap-x-2 gap-y-1">
+                                <span className="font-medium">{fill.feature_name}</span>
+                                <span>{fill.original_value || '综合考虑'} → {fill.default_value}</span>
+                                <span className="text-blue-600">来源：{fill.source_code}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {currentResult.featureCheck.normalized_description && (
+                            <div className="mt-2 whitespace-pre-wrap rounded bg-white/70 px-2 py-1 text-blue-800">
+                              {currentResult.featureCheck.normalized_description}
+                            </div>
+                          )}
+                        </div>
                       )}
                       <p className="text-xs text-gray-600">{currentResult.featureCheck.analysis}</p>
                     </section>
@@ -1411,6 +1699,34 @@ export default function PricingTaskDetailPage() {
                           )}
                         </div>
                       )}
+                    </section>
+                  )}
+
+                  {(currentResult.coefficientChecking || currentResult.coefficientCheck || currentResult.coefficientPreview || currentResult.coefficientError) && (
+                    <section className="px-4 py-4 border-b bg-violet-50 border-violet-200">
+                      <div className="mb-3 flex items-center justify-between">
+                        <h4 className="font-semibold text-sm text-violet-900">8. 系数换算<StepDuration result={currentResult} stepNo={8} /></h4>
+                        {currentResult.coefficientChecking && (
+                          <span className="inline-block h-4 w-4 rounded-full border-2 border-violet-200 border-t-violet-700 animate-spin" title="系数换算运行中" />
+                        )}
+                      </div>
+                      {currentResult.coefficientError && (
+                        <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                          系数换算失败：{currentResult.coefficientError}
+                        </div>
+                      )}
+                      {currentResult.coefficientChecking && !currentResult.coefficientCheck && (
+                        <p className="mb-3 text-xs text-violet-700">已查询系数换算说明，正在识别项目特征和作用对象。</p>
+                      )}
+                      <CoefficientCheckList
+                        items={currentResult.coefficientCheck?.items ?? currentResult.coefficientPreview ?? []}
+                        preview={!currentResult.coefficientCheck}
+                      />
+                      {currentResult.coefficientCheck?.issues.length ? (
+                        <ul className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 space-y-1 list-disc list-inside">
+                          {currentResult.coefficientCheck.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+                        </ul>
+                      ) : null}
                     </section>
                   )}
 

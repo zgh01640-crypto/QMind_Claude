@@ -14,6 +14,7 @@ const links = [
   { href: '/boq-standard-management', label: '国标清单管理' },
   { href: '/quota-management', label: '定额管理' },
   { href: '/pricing-task', label: '单条组价' },
+  { href: '/pricing-task/batch', label: '批量组价' },
   { href: '/new-boq', label: '新工程管理' },
   { href: '/prompt-templates', label: '提示词模板' },
   { href: '/manual-boq', label: '工程管理（人工）' },
@@ -26,6 +27,8 @@ function isActive(pathname: string, href: string) {
   // /boq 只匹配 /boq/[数字]（项目详情），不匹配 /boq/debug 等具名子路由
   if (href === '/boq') return /^\/boq\/\d/.test(pathname)
   if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
+  if (href === '/pricing-task') return /^\/pricing-task(\/\d+)?$/.test(pathname)
+  if (href === '/pricing-task/batch') return pathname.startsWith('/pricing-task/batch')
   if (href === '/quota-management') return pathname.startsWith('/quota-management') || pathname.startsWith('/quota-input-prompts')
   return pathname.startsWith(href + '/')
 }

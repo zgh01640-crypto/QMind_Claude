@@ -1039,6 +1039,36 @@ export interface BoqProcessList {
   items: BoqProcessItem[]
 }
 
+export interface BoqFeatureDefaultFeature {
+  id: number
+  feature_name: string
+  feature_value: string
+  default_value: string
+  source_sheet: string
+  source_rowid: number
+}
+
+export interface BoqFeatureDefaultItem {
+  id: number
+  qdkid: number
+  library_name: string
+  qdzmid: number | null
+  zmbh: string
+  zmmc: string | null
+  unit: string | null
+  chapter_name: string | null
+  linked: boolean
+  features: BoqFeatureDefaultFeature[]
+}
+
+export interface BoqFeatureDefaultList {
+  total: number
+  item_total: number
+  page: number
+  page_size: number
+  items: BoqFeatureDefaultItem[]
+}
+
 export interface PricingKbQuotaItem {
   id: number
   source_library_id: number
@@ -1278,6 +1308,25 @@ export interface PricingTask {
   latest_run_count: number
 }
 
+export interface PricingTaskBatch {
+  id: number
+  name: string
+  boq_project_id: number
+  project_id: number
+  project_name: string
+  manual_project_id: number | null
+  manual_project_name?: string | null
+  quota_library_ids: number[]
+  quota_library_names: string[]
+  status: string
+  selected_count: number
+  completed_count: number
+  failed_count: number
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
 export interface PricingTaskRun {
   id: number
   status: string
@@ -1288,6 +1337,7 @@ export interface PricingTaskRun {
   quota_match: { matches?: QuotaMatch[]; issues?: string[] } | null
   evaluation: PricingTaskEvaluation | null
   conversion_check: PricingTaskConversionCheck | null
+  coefficient_check: PricingTaskCoefficientCheck | null
   step_timings: Record<string, PricingTaskStepTiming> | null
   error_message: string | null
   created_at: string
@@ -1299,6 +1349,17 @@ export interface PricingTaskRun {
 export interface PricingTaskLatestRun {
   boq_item_id: number
   run: PricingTaskRun
+}
+
+export interface PricingTaskBatchItemRun {
+  boq_item_id: number
+  run: PricingTaskRun
+}
+
+export interface PricingTaskBatchDetail {
+  batch: PricingTaskBatch
+  items: BoqItem[]
+  runs: PricingTaskBatchItemRun[]
 }
 
 export interface PricingTaskEvaluation {
@@ -1400,6 +1461,39 @@ export interface PricingTaskConversionCheck {
   issues: string[]
 }
 
+export interface PricingTaskCoefficientRule {
+  rule_index: number
+  tsxx: string
+  hssm: string
+  group_no: number
+  matched: boolean
+  matched_feature: string
+  feature_value: string
+  factor: number
+  target_resource_types: Array<'1' | '2' | '3' | 'all'>
+  reason: string
+  requires_manual_review: boolean
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface PricingTaskCoefficientItem {
+  quota_key: string
+  source_type: 'base' | 'combo'
+  dekid: number
+  dezmid: number
+  quota_code: string
+  quota_name: string
+  resources?: PricingTaskConversionResource[]
+  coefficient_rules: PricingTaskCoefficientRule[]
+  missing_inputs: string[]
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface PricingTaskCoefficientCheck {
+  items: PricingTaskCoefficientItem[]
+  issues: string[]
+}
+
 export interface PricingTaskMatch {
   dezmid: number
   dekid: number
@@ -1417,7 +1511,16 @@ export type PricingTaskEvent =
   | { type: 'reasoning_token'; token: string }
   | { type: 'code_check'; item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   | { type: 'judgment'; is_consistent: boolean; reasoning: string }
-  | { type: 'feature_check'; is_complete: boolean; missing_features: string[]; analysis: string }
+  | {
+      type: 'feature_check'
+      is_complete: boolean
+      missing_features: string[]
+      analysis: string
+      normalized_description?: string
+      default_fills?: Array<{ feature_name: string; original_value: string; default_value: string; source_code: string; reason: string }>
+      description_updated?: boolean
+      default_candidates?: Array<{ source_code: string; feature_name: string; feature_value: string; default_value: string; source_rowid?: number }>
+    }
   | { type: 'work_procedures'; procedures: string[]; procedure_text?: string; found?: boolean; base_code?: string }
   | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
@@ -1425,6 +1528,9 @@ export type PricingTaskEvent =
   | { type: 'conversion_check_start'; run_id: number; total: number }
   | { type: 'combo_adjustment_rules'; items: PricingTaskConversionItem[] }
   | { type: 'conversion_check'; conversion_check: PricingTaskConversionCheck }
+  | { type: 'coefficient_check_start'; run_id: number; total: number }
+  | { type: 'coefficient_rules'; items: PricingTaskCoefficientItem[] }
+  | { type: 'coefficient_check'; coefficient_check: PricingTaskCoefficientCheck }
   | { type: 'step_timing'; step_no: number; name: string; duration_ms: number; started_at: string; finished_at: string }
   | { type: 'done'; run_id?: number }
   | { type: 'error'; error: string }
@@ -1440,6 +1546,34 @@ export interface LocalPricingTask {
 export const fetchPricingTasks = () => req<PricingTask[]>('/api/pricing-tasks')
 
 export const fetchPricingTask = (id: number) => req<PricingTask>(`/api/pricing-tasks/${id}`)
+
+export const fetchPricingTaskBatches = () => req<PricingTaskBatch[]>('/api/pricing-task-batches')
+
+export const fetchPricingTaskBatch = (id: number) => req<PricingTaskBatch>(`/api/pricing-task-batches/${id}`)
+
+export const fetchPricingTaskBatchDetail = (id: number) =>
+  req<PricingTaskBatchDetail>(`/api/pricing-task-batches/${id}/items`)
+
+export async function createPricingTaskBatch(body: {
+  name: string
+  boq_project_id: number
+  quota_library_ids: number[]
+  manual_project_id: number | null
+}): Promise<{ id: number }> {
+  return req<{ id: number }>('/api/pricing-task-batches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deletePricingTaskBatch(id: number) {
+  const res = await fetch(`${API}/api/pricing-task-batches/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `请求失败 ${res.status}`)
+  }
+}
 
 export async function createPricingTask(body: {
   name: string
@@ -1576,6 +1710,14 @@ export async function streamPricingTaskRunItem(
         }
       }
     }
+    const tail = buffer.trim()
+    if (tail.startsWith('data: ')) {
+      try {
+        onEvent(JSON.parse(tail.slice(6)) as PricingTaskEvent)
+      } catch (e) {
+        console.error('Parse error:', e, tail.slice(6))
+      }
+    }
   } finally {
     reader.releaseLock()
   }
@@ -1619,9 +1761,151 @@ export async function streamPricingTaskConversionCheck(
         }
       }
     }
+    const tail = buffer.trim()
+    if (tail.startsWith('data: ')) {
+      try {
+        onEvent(JSON.parse(tail.slice(6)) as PricingTaskEvent)
+      } catch (e) {
+        console.error('Parse error:', e, tail.slice(6))
+      }
+    }
   } finally {
     reader.releaseLock()
   }
+}
+
+export async function streamPricingTaskCoefficientCheck(
+  runId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API}/api/pricing-task-runs/${runId}/coefficient-check-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  })
+
+  if (!response.ok) {
+    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    onEvent({ type: 'error', error: 'No response body' })
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          onEvent(JSON.parse(line.slice(6)) as PricingTaskEvent)
+        } catch (e) {
+          console.error('Parse error:', e, line.slice(6))
+        }
+      }
+    }
+    const tail = buffer.trim()
+    if (tail.startsWith('data: ')) {
+      try {
+        onEvent(JSON.parse(tail.slice(6)) as PricingTaskEvent)
+      } catch (e) {
+        console.error('Parse error:', e, tail.slice(6))
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+async function readPricingTaskEventStream(response: Response, onEvent: (e: PricingTaskEvent) => void): Promise<void> {
+  if (!response.ok) {
+    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    return
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    onEvent({ type: 'error', error: 'No response body' })
+    return
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          onEvent(JSON.parse(line.slice(6)) as PricingTaskEvent)
+        } catch (e) {
+          console.error('Parse error:', e, line.slice(6))
+        }
+      }
+    }
+    const tail = buffer.trim()
+    if (tail.startsWith('data: ')) {
+      try {
+        onEvent(JSON.parse(tail.slice(6)) as PricingTaskEvent)
+      } catch (e) {
+        console.error('Parse error:', e, tail.slice(6))
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export async function streamPricingTaskBatchItemRun(
+  batchId: number,
+  boqItemId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  return readPricingTaskEventStream(
+    await fetch(`${API}/api/pricing-task-batches/${batchId}/items/${boqItemId}/run-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }),
+    onEvent,
+  )
+}
+
+export async function streamPricingTaskBatchConversionCheck(
+  itemRunId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  return readPricingTaskEventStream(
+    await fetch(`${API}/api/pricing-task-batch-item-runs/${itemRunId}/conversion-check-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }),
+    onEvent,
+  )
+}
+
+export async function streamPricingTaskBatchCoefficientCheck(
+  itemRunId: number,
+  onEvent: (e: PricingTaskEvent) => void,
+): Promise<void> {
+  return readPricingTaskEventStream(
+    await fetch(`${API}/api/pricing-task-batch-item-runs/${itemRunId}/coefficient-check-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }),
+    onEvent,
+  )
 }
 
 export interface QuotaTreeConversionRule {
@@ -1749,6 +2033,26 @@ export function fetchBoqProcesses(params: {
   if (params.page) query.set('page', String(params.page))
   if (params.page_size) query.set('page_size', String(params.page_size))
   return req<BoqProcessList>(`/api/pricing-kb/boq-processes?${query}`)
+}
+
+export function fetchBoqFeatureDefaults(params: {
+  q?: string
+  code?: string
+  item_name?: string
+  feature_name?: string
+  library_id?: number | null
+  page?: number
+  page_size?: number
+}) {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.code) query.set('code', params.code)
+  if (params.item_name) query.set('item_name', params.item_name)
+  if (params.feature_name) query.set('feature_name', params.feature_name)
+  if (params.library_id) query.set('library_id', String(params.library_id))
+  if (params.page) query.set('page', String(params.page))
+  if (params.page_size) query.set('page_size', String(params.page_size))
+  return req<BoqFeatureDefaultList>(`/api/pricing-kb/feature-defaults?${query}`)
 }
 
 export function fetchPricingKbQuotaItems(params: {
