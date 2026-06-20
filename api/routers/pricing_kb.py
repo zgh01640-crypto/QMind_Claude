@@ -44,7 +44,21 @@ def list_boq_top_categories(qdkid: int = 1020025):
                 """
                 SELECT c.id, c.qdkid, c.pid, c.zjmc, c.zjsm,
                        (SELECT COUNT(*) FROM tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count
+                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
+                       (
+                         WITH RECURSIVE subtree AS (
+                           SELECT root.qdkid, root.id
+                           FROM tqdk_tzjmc root
+                           WHERE root.qdkid = c.qdkid AND root.id = c.id
+                           UNION ALL
+                           SELECT child.qdkid, child.id
+                           FROM tqdk_tzjmc child
+                           JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
+                         )
+                         SELECT COUNT(*)
+                         FROM tqdk_tqdzm item
+                         JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
+                       ) AS descendant_item_count
                 FROM tqdk_tzjmc c
                 WHERE c.qdkid=%s AND COALESCE(c.pid, 0)=0
                 ORDER BY c.zjmc
@@ -61,6 +75,7 @@ def list_boq_top_categories(qdkid: int = 1020025):
                 "zjsm": r[4],
                 "child_count": r[5],
                 "item_count": r[6],
+                "descendant_item_count": r[7],
                 "enabled": True,
             }
             for r in rows
@@ -76,9 +91,23 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, qdkid, pid, zjmc, zjsm
-                FROM tqdk_tzjmc
-                WHERE qdkid=%s AND id=%s
+                SELECT c.id, c.qdkid, c.pid, c.zjmc, c.zjsm,
+                       (
+                         WITH RECURSIVE subtree AS (
+                           SELECT root.qdkid, root.id
+                           FROM tqdk_tzjmc root
+                           WHERE root.qdkid = c.qdkid AND root.id = c.id
+                           UNION ALL
+                           SELECT child.qdkid, child.id
+                           FROM tqdk_tzjmc child
+                           JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
+                         )
+                         SELECT COUNT(*)
+                         FROM tqdk_tqdzm item
+                         JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
+                       ) AS descendant_item_count
+                FROM tqdk_tzjmc c
+                WHERE c.qdkid=%s AND c.id=%s
                 """,
                 (qdkid, chapter_id),
             )
@@ -91,13 +120,28 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
                 "pid": row[2],
                 "zjmc": row[3],
                 "zjsm": row[4],
+                "descendant_item_count": row[5],
             }
 
             cur.execute(
                 """
                 SELECT c.id, c.qdkid, c.pid, c.zjmc, c.zjsm,
                        (SELECT COUNT(*) FROM tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count
+                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
+                       (
+                         WITH RECURSIVE subtree AS (
+                           SELECT root.qdkid, root.id
+                           FROM tqdk_tzjmc root
+                           WHERE root.qdkid = c.qdkid AND root.id = c.id
+                           UNION ALL
+                           SELECT child.qdkid, child.id
+                           FROM tqdk_tzjmc child
+                           JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
+                         )
+                         SELECT COUNT(*)
+                         FROM tqdk_tqdzm item
+                         JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
+                       ) AS descendant_item_count
                 FROM tqdk_tzjmc c
                 WHERE c.qdkid=%s AND c.pid=%s
                 ORDER BY c.zjmc
@@ -131,6 +175,7 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
                     "zjsm": r[4],
                     "child_count": r[5],
                     "item_count": r[6],
+                    "descendant_item_count": r[7],
                 }
                 for r in child_rows
             ],
@@ -228,12 +273,10 @@ def get_quota_chapter_children(chapter_id: int, dekid: int):
                        (SELECT COUNT(*) FROM tdek_tzmgc r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS resource_count,
                        (SELECT COUNT(*) FROM tdek_tznhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS conversion_rule_count,
                        (SELECT COUNT(*) FROM tdek_tzhhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS input_prompt_count,
-                       COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id
+                       'unlinked' AS link_status,
+                       NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id
                 FROM tdek_tdezm i
                 LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
-                LEFT JOIN pricing_kb_original_target_links link
-                  ON link.dekid=i.dekid AND link.dezmid=i.id
                 WHERE i.dekid=%s AND i.zjh=%s
                 ORDER BY i.zmbh NULLS LAST, i.id
                 """,
@@ -286,14 +329,12 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT i.id, i.dekid, i.zmbh, i.zmmc, i.dw, i.gznr, i.zjh, c.zjmc AS chapter_name,
-                       COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id, link.review_message,
+                       'unlinked' AS link_status,
+                       NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id, NULL::TEXT AS review_message,
                        i.dj, i.rgf, i.clf, i.jxf, i.zcf, i.sbf,
                        i.glf, i.lr, i.aqwmsgf, i.qtcsf, i.gf, i.sj
                 FROM tdek_tdezm i
                 LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
-                LEFT JOIN pricing_kb_original_target_links link
-                  ON link.dekid=i.dekid AND link.dezmid=i.id
                 WHERE i.dekid=%s AND i.id=%s
                 """,
                 (dekid, quota_item_id),
@@ -501,6 +542,98 @@ def list_quota_input_prompts(
         conn.close()
 
 
+@router.get("/pricing-kb/quota-conversion-rules")
+def list_quota_conversion_rules(
+    library_id: int | None = None,
+    q: str | None = Query(None, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if library_id:
+        clauses.append("i.dekid=%s")
+        params.append(library_id)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        clauses.append("(i.zmbh ILIKE %s OR i.zmmc ILIKE %s OR r.tsxx ILIKE %s OR r.hssm ILIKE %s)")
+        params.extend([like, like, like, like])
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    limit, offset = page_bounds(page, page_size)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM (
+                    SELECT i.dekid, i.id
+                    FROM tdek_tznhs r
+                    JOIN tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
+                    {where_sql}
+                    GROUP BY i.dekid, i.id
+                ) s
+                """,
+                params,
+            )
+            total = cur.fetchone()[0]
+
+            cur.execute(
+                f"""
+                SELECT i.dekid, l.mc AS library_name, i.id, i.zmbh, i.zmmc, i.dw,
+                       c.zjmc AS chapter_name,
+                       COUNT(*) AS rule_count,
+                       jsonb_agg(
+                         jsonb_build_object(
+                           'prompt', r.tsxx,
+                           'description', r.hssm,
+                           'group_no', r.groupno
+                         )
+                         ORDER BY r.groupno NULLS LAST, r.source_rowid
+                       ) AS conversion_rules
+                FROM tdek_tznhs r
+                JOIN tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
+                JOIN tlibs l ON l.id=i.dekid
+                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                {where_sql}
+                GROUP BY i.dekid, l.mc, i.id, i.zmbh, i.zmmc, i.dw, c.zjmc
+                ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            rows = cur.fetchall()
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "dekid": r[0],
+                    "library_name": r[1],
+                    "quota_item_id": r[2],
+                    "quota_code": r[3],
+                    "quota_name": r[4],
+                    "unit": r[5],
+                    "chapter_name": r[6],
+                    "rule_count": r[7],
+                    "conversion_rules": [
+                        {
+                            "prompt": rule.get("prompt"),
+                            "description": rule.get("description"),
+                            "group_no": rule.get("group_no"),
+                        }
+                        for rule in (r[8] or [])
+                    ],
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
 def build_filters(
     alias: str,
     name_col: str,
@@ -548,18 +681,11 @@ def get_summary():
                     (SELECT COUNT(*) FROM tdek_tzmgc) AS resource_count,
                     (SELECT COUNT(*) FROM tdek_tznhs) + (SELECT COUNT(*) FROM tdek_tzhhs) AS conversion_rule_count,
                     (SELECT COUNT(*) FROM tqdk_tqdzy) AS candidate_count,
-                    (SELECT COUNT(*) FROM pricing_kb_original_target_links) AS target_link_count,
+                    0 AS target_link_count,
                     (SELECT COUNT(*) FROM pricing_kb_import_issues) AS issue_count,
                     (SELECT COUNT(*) FROM boq_candidate_counts WHERE candidate_count > 0) AS boq_with_candidates,
                     (SELECT COUNT(*) FROM boq_candidate_counts WHERE candidate_count = 0) AS boq_without_candidates,
-                    COALESCE((
-                        SELECT jsonb_object_agg(link_status, cnt)
-                        FROM (
-                            SELECT link_status, COUNT(*) AS cnt
-                            FROM pricing_kb_original_target_links
-                            GROUP BY link_status
-                        ) s
-                    ), '{}'::jsonb) AS link_status_counts,
+                    '{}'::jsonb AS link_status_counts,
                     COALESCE((
                         SELECT jsonb_object_agg(issue_type, cnt)
                         FROM (
@@ -807,6 +933,135 @@ def list_boq_processes(
         conn.close()
 
 
+@router.get("/pricing-kb/feature-defaults")
+def list_feature_defaults(
+    q: str | None = Query(None, max_length=200),
+    code: str | None = Query(None, max_length=64),
+    item_name: str | None = Query(None, max_length=200),
+    feature_name: str | None = Query(None, max_length=200),
+    library_id: int | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if library_id:
+        clauses.append("f.qdkid = %s")
+        params.append(library_id)
+    if q:
+        like = f"%{q.strip()}%"
+        clauses.append(
+            """
+            (
+                f.zmbh ILIKE %s
+                OR COALESCE(q.zmmc, f.zmmc, '') ILIKE %s
+                OR f.chapter_name ILIKE %s
+                OR f.feature_name ILIKE %s
+                OR f.feature_value ILIKE %s
+                OR f.default_value ILIKE %s
+            )
+            """
+        )
+        params.extend([like, like, like, like, like, like])
+    if code:
+        clauses.append("f.zmbh ILIKE %s")
+        params.append(f"{code.strip()}%")
+    if item_name:
+        clauses.append("COALESCE(q.zmmc, f.zmmc, '') ILIKE %s")
+        params.append(f"%{item_name.strip()}%")
+    if feature_name:
+        clauses.append("f.feature_name ILIKE %s")
+        params.append(f"%{feature_name.strip()}%")
+
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    limit, offset = page_bounds(page, page_size)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM tqdk_tzhkl f LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh {where_sql}", params)
+            total = cur.fetchone()[0]
+            cur.execute(
+                f"""
+                SELECT COUNT(DISTINCT f.zmbh)
+                FROM tqdk_tzhkl f
+                LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
+                {where_sql}
+                """,
+                params,
+            )
+            item_total = cur.fetchone()[0]
+            cur.execute(
+                f"""
+                SELECT min(f.id) AS id,
+                       f.qdkid,
+                       COALESCE(l.mc, '') AS library_name,
+                       COALESCE(f.qdzmid, q.id) AS qdzmid,
+                       f.zmbh,
+                       COALESCE(q.zmmc, f.zmmc) AS zmmc,
+                       q.dw,
+                       COALESCE(c.zjmc, f.chapter_name) AS chapter_name,
+                       q.id IS NOT NULL AS linked,
+                       jsonb_agg(
+                         jsonb_build_object(
+                           'id', f.id,
+                           'feature_name', f.feature_name,
+                           'feature_value', f.feature_value,
+                           'default_value', f.default_value,
+                           'source_sheet', f.source_sheet,
+                           'source_rowid', f.source_rowid
+                         )
+                         ORDER BY f.source_rowid, f.feature_name
+                       ) AS features
+                FROM tqdk_tzhkl f
+                LEFT JOIN tlibs l ON l.id = f.qdkid
+                LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
+                LEFT JOIN tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
+                {where_sql}
+                GROUP BY f.qdkid, l.mc, COALESCE(f.qdzmid, q.id), f.zmbh,
+                         COALESCE(q.zmmc, f.zmmc), q.dw, COALESCE(c.zjmc, f.chapter_name),
+                         q.id IS NOT NULL
+                ORDER BY f.zmbh
+                LIMIT %s OFFSET %s
+                """,
+                params + [limit, offset],
+            )
+            rows = cur.fetchall()
+        return {
+            "total": total,
+            "item_total": item_total,
+            "page": page,
+            "page_size": page_size,
+            "items": [
+                {
+                    "id": r[0],
+                    "qdkid": r[1],
+                    "library_name": r[2],
+                    "qdzmid": r[3],
+                    "zmbh": r[4],
+                    "zmmc": r[5],
+                    "unit": r[6],
+                    "chapter_name": r[7],
+                    "linked": r[8],
+                    "features": [
+                        {
+                            "id": feature.get("id"),
+                            "feature_name": feature.get("feature_name"),
+                            "feature_value": feature.get("feature_value"),
+                            "default_value": feature.get("default_value"),
+                            "source_sheet": feature.get("source_sheet"),
+                            "source_rowid": feature.get("source_rowid"),
+                        }
+                        for feature in (r[9] or [])
+                    ],
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/pricing-kb/quota-items")
 def list_quota_items(
     q: str | None = Query(None, max_length=200),
@@ -826,13 +1081,11 @@ def list_quota_items(
                 f"""
                 SELECT i.id, i.dekid, l.mc AS library_name,
                        i.zmbh, i.zmmc, i.dw, c.zjmc AS chapter_name,
-                       COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id
+                       'unlinked' AS link_status,
+                       NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id
                 FROM tdek_tdezm i
                 JOIN tlibs l ON l.id = i.dekid
                 LEFT JOIN tdek_tzjmc c ON c.dekid = i.dekid AND c.id = i.zjh
-                LEFT JOIN pricing_kb_original_target_links link
-                  ON link.dekid = i.dekid AND link.dezmid = i.id
                 {where_sql}
                 ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
                 LIMIT %s OFFSET %s
@@ -896,16 +1149,14 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
                 """
                 SELECT cand.source_rowid, qi.id, qi.dekid, l.mc AS quota_library_name,
                        qi.zmbh, qi.zmmc, qi.dw, qi.gznr, qc.zjmc AS quota_chapter_name,
-                       COALESCE(link.link_status, 'unlinked') AS link_status,
-                       link.target_table, link.target_item_id, link.review_message,
+                       'unlinked' AS link_status,
+                       NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id, NULL::TEXT AS review_message,
                        qi.dj, qi.rgf, qi.clf, qi.jxf, qi.zcf, qi.sbf,
                        qi.glf, qi.lr, qi.aqwmsgf, qi.qtcsf, qi.gf, qi.sj
                 FROM tqdk_tqdzy cand
                 JOIN tdek_tdezm qi ON qi.dekid = cand.dekid AND qi.id = cand.dezmid
                 JOIN tlibs l ON l.id = qi.dekid
                 LEFT JOIN tdek_tzjmc qc ON qc.dekid = qi.dekid AND qc.id = qi.zjh
-                LEFT JOIN pricing_kb_original_target_links link
-                  ON link.dekid = qi.dekid AND link.dezmid = qi.id
                 WHERE cand.qdkid=%s AND cand.qdzmid=%s
                 ORDER BY qi.dekid, qi.zmbh NULLS LAST, qi.id, cand.source_rowid
                 """,

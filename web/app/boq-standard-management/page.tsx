@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  BoqFeatureDefaultList,
   BoqProcessList,
   BoqTreeCategory,
   BoqTreeChapterResponse,
@@ -13,6 +14,7 @@ import {
   QuotaTreeItemDetail,
   fetchBoqTreeChapter,
   fetchBoqTreeTopCategories,
+  fetchBoqFeatureDefaults,
   fetchBoqProcesses,
   fetchPricingKbBoqItems,
   fetchPricingKbCandidates,
@@ -21,6 +23,7 @@ import {
 
 const DEFAULT_CHAPTER_ID = 228
 const PROCESS_PAGE_SIZE = 80
+const FEATURE_DEFAULT_PAGE_SIZE = 80
 
 function splitTitle(title: string) {
   const match = title.match(/^([0-9A-Z]+)\s+(.+)$/)
@@ -80,18 +83,6 @@ function CategorySidebar({
       </div>
     </aside>
   )
-}
-
-function LinkStatusBadge({ status }: { status: string }) {
-  const cls =
-    status === 'matched'
-      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-      : status === 'review'
-        ? 'border-amber-200 bg-amber-50 text-amber-700'
-        : status === 'unmatched'
-          ? 'border-red-200 bg-red-50 text-red-700'
-          : 'border-gray-200 bg-gray-50 text-gray-500'
-  return <span className={`rounded border px-2 py-0.5 text-xs ${cls}`}>{status}</span>
 }
 
 const COST_LABELS = [
@@ -318,7 +309,7 @@ function CandidatePanel({
                   const loadingDetail = loadingDetailKeys.has(key)
                   return (
                     <div key={candidate.candidate_id} className="px-4 py-3">
-                      <div className="grid gap-2 text-sm lg:grid-cols-[140px_minmax(240px,1fr)_90px_110px_120px] lg:items-start">
+                      <div className="grid gap-2 text-sm lg:grid-cols-[140px_minmax(240px,1fr)_90px_120px] lg:items-start">
                         <div className="font-mono font-semibold text-blue-700">{candidate.quota_item.code ?? '-'}</div>
                         <div>
                           <div className="font-medium text-gray-900">{candidate.quota_item.name}</div>
@@ -329,7 +320,6 @@ function CandidatePanel({
                           )}
                         </div>
                         <div className="text-gray-500">单位：{candidate.quota_item.unit ?? '-'}</div>
-                        <LinkStatusBadge status={candidate.target_link.link_status} />
                         <button
                           onClick={() => onToggleDetail(candidate)}
                           className="w-fit rounded border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
@@ -615,9 +605,193 @@ function ProcessManagementPanel() {
   )
 }
 
+function FeatureDefaultsPanel() {
+  const [codeInput, setCodeInput] = useState('')
+  const [itemNameInput, setItemNameInput] = useState('')
+  const [featureNameInput, setFeatureNameInput] = useState('')
+  const [codeQuery, setCodeQuery] = useState('')
+  const [itemNameQuery, setItemNameQuery] = useState('')
+  const [featureNameQuery, setFeatureNameQuery] = useState('')
+  const [page, setPage] = useState(1)
+  const [data, setData] = useState<BoqFeatureDefaultList | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadFeatureDefaults = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await fetchBoqFeatureDefaults({
+        code: codeQuery,
+        item_name: itemNameQuery,
+        feature_name: featureNameQuery,
+        library_id: null,
+        page,
+        page_size: FEATURE_DEFAULT_PAGE_SIZE,
+      })
+      setData(result)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '加载综合考虑规则库失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [codeQuery, featureNameQuery, itemNameQuery, page])
+
+  useEffect(() => {
+    loadFeatureDefaults().catch(() => undefined)
+  }, [loadFeatureDefaults])
+
+  function handleSearch(event?: FormEvent) {
+    event?.preventDefault()
+    setCodeQuery(codeInput.trim())
+    setItemNameQuery(itemNameInput.trim())
+    setFeatureNameQuery(featureNameInput.trim())
+    setPage(1)
+  }
+
+  function clearSearch() {
+    setCodeInput('')
+    setItemNameInput('')
+    setFeatureNameInput('')
+    setCodeQuery('')
+    setItemNameQuery('')
+    setFeatureNameQuery('')
+    setPage(1)
+  }
+
+  const totalPages = Math.max(1, Math.ceil((data?.item_total ?? 0) / FEATURE_DEFAULT_PAGE_SIZE))
+  const hasQuery = Boolean(codeQuery || itemNameQuery || featureNameQuery)
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-gray-200 bg-white px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-gray-900">综合考虑规则库</div>
+            <div className="mt-1 text-xs text-gray-500">
+              展示清单编码关联的清单名称、特征名称、特征值和综合考虑默认值。
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <StatPill label="规则" value={loading ? '加载中' : data?.total ?? '-'} />
+            <StatPill label="清单" value={loading ? '加载中' : data?.item_total ?? '-'} />
+            <StatPill label="每页" value={FEATURE_DEFAULT_PAGE_SIZE} />
+          </div>
+        </div>
+
+        <form onSubmit={handleSearch} className="mt-3 grid gap-2 xl:grid-cols-[160px_minmax(220px,1fr)_220px_auto_auto]">
+          <input
+            value={codeInput}
+            onChange={event => setCodeInput(event.target.value)}
+            placeholder="字母编号/编码，如 010101"
+            className="min-w-0 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+          <input
+            value={itemNameInput}
+            onChange={event => setItemNameInput(event.target.value)}
+            placeholder="子目名称，如 砖砌体、混凝土"
+            className="min-w-0 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+          <input
+            value={featureNameInput}
+            onChange={event => setFeatureNameInput(event.target.value)}
+            placeholder="特征名称，如 运距、强度等级"
+            className="min-w-0 rounded border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+          <button type="submit" disabled={loading} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+            {loading ? '查询中...' : '查询'}
+          </button>
+          {hasQuery && (
+            <button type="button" onClick={clearSearch} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+              清除
+            </button>
+          )}
+        </form>
+
+        {error && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+      </div>
+
+      <div className="overflow-hidden border border-gray-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-gray-50 px-4 py-2.5 text-xs text-gray-600">
+          <span>综合考虑默认值：{loading ? '加载中...' : `共 ${data?.item_total ?? 0} 个清单、${data?.total ?? 0} 条规则，当前第 ${page}/${totalPages} 页`}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage(current => Math.max(1, current - 1))}
+              disabled={page <= 1 || loading}
+              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 disabled:opacity-40"
+            >
+              上一页
+            </button>
+            <button
+              onClick={() => setPage(current => Math.min(totalPages, current + 1))}
+              disabled={page >= totalPages || loading}
+              className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 disabled:opacity-40"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+        {!loading && (data?.items.length ?? 0) === 0 && (
+          <div className="px-4 py-12 text-center text-sm text-gray-400">暂无综合考虑规则数据</div>
+        )}
+        <div className="divide-y divide-gray-100">
+          {(data?.items ?? []).map(item => (
+            <div key={item.id} className="px-4 py-3">
+              <div className="grid gap-3 text-sm xl:grid-cols-[130px_minmax(240px,1fr)_150px] xl:items-start">
+                <div>
+                  <div className="font-mono font-semibold text-blue-700">{item.zmbh}</div>
+                  <div className="mt-1 text-xs text-gray-400">{item.features.length} 条特征</div>
+                </div>
+                <div>
+                  <div className="font-medium text-gray-900">{item.zmmc ?? '未关联清单名称'}</div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {item.chapter_name ?? item.library_name}
+                    {item.unit ? ` / 单位：${item.unit}` : ''}
+                  </div>
+                </div>
+                <div>
+                  <span className={`rounded border px-2 py-0.5 text-xs ${
+                    item.linked
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }`}>
+                    {item.linked ? '已关联清单' : '未关联清单'}
+                  </span>
+                </div>
+              </div>
+              <div className="mt-3 overflow-x-auto border border-gray-200">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">特征名称</th>
+                      <th className="px-3 py-2 text-left font-medium">特征值</th>
+                      <th className="px-3 py-2 text-left font-medium">综合考虑默认值</th>
+                      <th className="px-3 py-2 text-right font-medium">源行</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {item.features.map(feature => (
+                      <tr key={feature.id}>
+                        <td className="px-3 py-2 font-medium text-gray-900">{feature.feature_name}</td>
+                        <td className="px-3 py-2 text-gray-700">{feature.feature_value}</td>
+                        <td className="px-3 py-2 text-gray-900">{feature.default_value}</td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-400">{feature.source_rowid}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function BoqStandardManagementPage() {
   const [categories, setCategories] = useState<BoqTreeCategory[]>([])
-  const [activeTab, setActiveTab] = useState<'tree' | 'process'>('tree')
+  const [activeTab, setActiveTab] = useState<'tree' | 'process' | 'featureDefaults'>('tree')
   const [selectedCategory, setSelectedCategory] = useState<BoqTreeCategory | null>(null)
   const [chapterData, setChapterData] = useState<Record<number, BoqTreeChapterResponse>>({})
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
@@ -640,9 +814,15 @@ export default function BoqStandardManagementPage() {
     if (!selectedData) return { childCount: 0, itemCount: 0 }
     return {
       childCount: selectedData.children.length,
-      itemCount: selectedData.children.reduce((sum, child) => sum + child.item_count, selectedData.items.length),
+      itemCount:
+        selectedData.chapter.descendant_item_count
+        ?? selectedCategory?.descendant_item_count
+        ?? selectedData.children.reduce(
+          (sum, child) => sum + (child.descendant_item_count ?? child.item_count),
+          selectedData.items.length,
+        ),
     }
-  }, [selectedData])
+  }, [selectedCategory?.descendant_item_count, selectedData])
 
   const loadChapter = useCallback(async (chapterId: number) => {
     if (chapterData[chapterId]) return chapterData[chapterId]
@@ -843,6 +1023,17 @@ export default function BoqStandardManagementPage() {
           >
             清单工序管理
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('featureDefaults')}
+            className={`rounded border px-3 py-1.5 text-sm font-medium transition ${
+              activeTab === 'featureDefaults'
+                ? 'border-blue-600 bg-blue-600 text-white'
+                : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            综合考虑规则库
+          </button>
         </div>
         {activeTab === 'tree' && (
           <div className="mt-4 border-t border-gray-100 pt-4">
@@ -957,6 +1148,8 @@ export default function BoqStandardManagementPage() {
         <main className="min-w-0 p-4 sm:p-5">
           {activeTab === 'process' ? (
             <ProcessManagementPanel />
+          ) : activeTab === 'featureDefaults' ? (
+            <FeatureDefaultsPanel />
           ) : (
           <>
           <div className="mb-4 border border-gray-200 bg-white px-4 py-3">
