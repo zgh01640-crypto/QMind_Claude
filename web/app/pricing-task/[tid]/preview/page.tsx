@@ -129,12 +129,12 @@ function statusLabel(status?: string) {
 }
 
 function statusClassName(status?: string) {
-  if (status === 'confirmed') return 'bg-emerald-100 text-emerald-700 border-emerald-200'
-  if (status === 'completed') return 'bg-blue-100 text-blue-700 border-blue-200'
-  if (status === 'rejected') return 'bg-gray-100 text-gray-600 border-gray-200'
-  if (status === 'failed') return 'bg-red-100 text-red-700 border-red-200'
-  if (status === 'running') return 'bg-amber-100 text-amber-700 border-amber-200'
-  return 'bg-slate-100 text-slate-500 border-slate-200'
+  if (status === 'confirmed') return 'bg-emerald-400/14 text-emerald-100 border-emerald-300/45 shadow-[0_0_18px_rgba(16,185,129,0.18)]'
+  if (status === 'completed') return 'bg-cyan-400/14 text-cyan-100 border-cyan-300/45 shadow-[0_0_18px_rgba(34,211,238,0.16)]'
+  if (status === 'rejected') return 'bg-slate-500/16 text-slate-200 border-slate-300/28'
+  if (status === 'failed') return 'bg-rose-400/14 text-rose-100 border-rose-300/45'
+  if (status === 'running') return 'bg-amber-400/14 text-amber-100 border-amber-300/45 shadow-[0_0_18px_rgba(251,191,36,0.16)]'
+  return 'bg-slate-500/14 text-slate-300 border-slate-300/24'
 }
 
 function matchCountLabel(result?: ItemResult) {
@@ -167,7 +167,7 @@ function StepDuration({ result, stepNo }: { result: ItemResult; stepNo: number }
   const timing = stepTiming(result, stepNo)
   if (!timing) return null
   return (
-    <span className="ml-2 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-normal text-gray-500">
+    <span className="ml-2 rounded-full border border-cyan-300/25 bg-cyan-300/10 px-1.5 py-0.5 text-[10px] font-medium text-cyan-100 shadow-[0_0_12px_rgba(34,211,238,0.12)]">
       {formatDuration(timing.duration_ms)}
     </span>
   )
@@ -1169,7 +1169,7 @@ export default function PricingTaskDetailPage() {
 
   if (loading || !task) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="pricing-preview-skin min-h-screen flex items-center justify-center">
         <div className="text-gray-500">加载中...</div>
       </div>
     )
@@ -1190,7 +1190,7 @@ export default function PricingTaskDetailPage() {
   const quotaHitStats = buildQuotaHitStats(itemResults, items.length)
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="pricing-preview-skin min-h-screen bg-gray-50">
       <div className="bg-white border-b border-gray-200 px-6 py-3">
         <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0 flex-1">
@@ -1198,6 +1198,9 @@ export default function PricingTaskDetailPage() {
               <Link href="/pricing-task" className="shrink-0 rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50">
                 返回单条列表
               </Link>
+              <span className="shrink-0 rounded-full border border-cyan-300/30 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100 shadow-[0_0_22px_rgba(34,211,238,0.15)]">
+                试行皮肤
+              </span>
               <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
                 {task.name}
               </div>
@@ -1407,7 +1410,7 @@ export default function PricingTaskDetailPage() {
                   </div>
                 </div>
 
-                <div className="w-96 flex-shrink-0 overflow-y-auto">
+                <div className="pricing-preview-steps w-96 flex-shrink-0 overflow-y-auto">
                   {currentResult.codeCheck && (
                     <section className={`px-4 py-3 border-b ${currentResult.codeCheck.is_consistent ? 'bg-green-50 border-green-200' : 'bg-orange-50 border-orange-200'}`}>
                       <h4 className={`font-semibold text-sm mb-2 ${currentResult.codeCheck.is_consistent ? 'text-green-900' : 'text-orange-900'}`}>
@@ -1953,6 +1956,370 @@ export default function PricingTaskDetailPage() {
           </div>
         </div>
       )}
+      <style jsx global>{`
+        .pricing-preview-skin {
+          min-height: 100vh;
+          width: 100vw;
+          margin: -1.5rem calc(50% - 50vw);
+          padding: 1.5rem 0;
+          background:
+            radial-gradient(circle at 18% 8%, rgba(34, 211, 238, 0.16), transparent 28%),
+            radial-gradient(circle at 78% 0%, rgba(168, 85, 247, 0.13), transparent 24%),
+            linear-gradient(135deg, #071016 0%, #0f172a 46%, #111827 100%) !important;
+          color: #dbeafe;
+        }
+
+        .pricing-preview-skin::before {
+          content: "";
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          background-image:
+            linear-gradient(rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(148, 163, 184, 0.055) 1px, transparent 1px);
+          background-size: 42px 42px;
+          mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.78), transparent 82%);
+          z-index: 0;
+        }
+
+        .pricing-preview-skin > * {
+          position: relative;
+          z-index: 1;
+        }
+
+        .pricing-preview-skin .bg-white,
+        .pricing-preview-skin .bg-gray-50,
+        .pricing-preview-skin .bg-gray-100,
+        .pricing-preview-skin .bg-blue-50,
+        .pricing-preview-skin .bg-cyan-50,
+        .pricing-preview-skin .bg-emerald-50,
+        .pricing-preview-skin .bg-green-50,
+        .pricing-preview-skin .bg-amber-50,
+        .pricing-preview-skin .bg-orange-50,
+        .pricing-preview-skin .bg-indigo-50,
+        .pricing-preview-skin .bg-indigo-100,
+        .pricing-preview-skin .bg-purple-50,
+        .pricing-preview-skin .bg-purple-100,
+        .pricing-preview-skin .bg-violet-50,
+        .pricing-preview-skin .bg-red-50,
+        .pricing-preview-skin .bg-rose-50 {
+          background-color: rgba(15, 23, 42, 0.78) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-blue-50"],
+        .pricing-preview-skin [class*="bg-cyan-50"],
+        .pricing-preview-skin [class*="bg-indigo-50"],
+        .pricing-preview-skin [class*="bg-indigo-100"],
+        .pricing-preview-skin [class*="bg-purple-50"],
+        .pricing-preview-skin [class*="bg-purple-100"],
+        .pricing-preview-skin [class*="bg-violet-50"],
+        .pricing-preview-skin [class*="bg-slate-50"] {
+          background-color: rgba(15, 23, 42, 0.82) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-emerald-50"] {
+          background-color: rgba(6, 78, 59, 0.34) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-green-50"] {
+          background-color: rgba(6, 78, 59, 0.28) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-amber-50"] {
+          background-color: rgba(120, 53, 15, 0.28) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-orange-50"] {
+          background-color: rgba(124, 45, 18, 0.28) !important;
+        }
+
+        .pricing-preview-skin [class*="bg-red-50"],
+        .pricing-preview-skin [class*="bg-rose-50"] {
+          background-color: rgba(127, 29, 29, 0.26) !important;
+        }
+
+        .pricing-preview-skin .shadow,
+        .pricing-preview-skin .shadow-sm,
+        .pricing-preview-skin .shadow-lg,
+        .pricing-preview-skin .shadow-xl,
+        .pricing-preview-skin .shadow-2xl {
+          box-shadow: 0 18px 55px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(148, 163, 184, 0.08) !important;
+        }
+
+        .pricing-preview-skin .border,
+        .pricing-preview-skin .border-b,
+        .pricing-preview-skin .border-t,
+        .pricing-preview-skin .border-l,
+        .pricing-preview-skin .border-r,
+        .pricing-preview-skin .border-gray-100,
+        .pricing-preview-skin .border-gray-200,
+        .pricing-preview-skin .border-gray-300,
+        .pricing-preview-skin .border-blue-200,
+        .pricing-preview-skin .border-cyan-200,
+        .pricing-preview-skin .border-emerald-200,
+        .pricing-preview-skin .border-amber-200,
+        .pricing-preview-skin .border-violet-200,
+        .pricing-preview-skin .border-red-200 {
+          border-color: rgba(125, 211, 252, 0.18) !important;
+        }
+
+        .pricing-preview-skin [class*="border-emerald"] {
+          border-color: rgba(52, 211, 153, 0.28) !important;
+        }
+
+        .pricing-preview-skin [class*="border-green"] {
+          border-color: rgba(74, 222, 128, 0.24) !important;
+        }
+
+        .pricing-preview-skin [class*="border-amber"] {
+          border-color: rgba(251, 191, 36, 0.25) !important;
+        }
+
+        .pricing-preview-skin [class*="border-orange"] {
+          border-color: rgba(251, 146, 60, 0.25) !important;
+        }
+
+        .pricing-preview-skin [class*="border-indigo"],
+        .pricing-preview-skin [class*="border-purple"],
+        .pricing-preview-skin [class*="border-violet"] {
+          border-color: rgba(167, 139, 250, 0.24) !important;
+        }
+
+        .pricing-preview-skin .text-gray-900,
+        .pricing-preview-skin .text-gray-800,
+        .pricing-preview-skin .text-gray-700 {
+          color: #e5f3ff !important;
+        }
+
+        .pricing-preview-skin .text-gray-600,
+        .pricing-preview-skin .text-gray-500,
+        .pricing-preview-skin .text-gray-400 {
+          color: #94a3b8 !important;
+        }
+
+        .pricing-preview-skin .text-blue-600,
+        .pricing-preview-skin .text-blue-700,
+        .pricing-preview-skin .text-cyan-700,
+        .pricing-preview-skin .text-cyan-900,
+        .pricing-preview-skin .text-indigo-600,
+        .pricing-preview-skin .text-indigo-700,
+        .pricing-preview-skin .text-indigo-800,
+        .pricing-preview-skin .text-indigo-900 {
+          color: #67e8f9 !important;
+        }
+
+        .pricing-preview-skin .text-emerald-600,
+        .pricing-preview-skin .text-emerald-700,
+        .pricing-preview-skin .text-emerald-900,
+        .pricing-preview-skin .text-green-600,
+        .pricing-preview-skin .text-green-700,
+        .pricing-preview-skin .text-green-800,
+        .pricing-preview-skin .text-green-900 {
+          color: #6ee7b7 !important;
+        }
+
+        .pricing-preview-skin .text-amber-600,
+        .pricing-preview-skin .text-amber-700,
+        .pricing-preview-skin .text-amber-900,
+        .pricing-preview-skin .text-orange-600,
+        .pricing-preview-skin .text-orange-700,
+        .pricing-preview-skin .text-orange-800,
+        .pricing-preview-skin .text-orange-900 {
+          color: #fbbf24 !important;
+        }
+
+        .pricing-preview-skin .text-violet-600,
+        .pricing-preview-skin .text-violet-700,
+        .pricing-preview-skin .text-violet-900,
+        .pricing-preview-skin .text-purple-500,
+        .pricing-preview-skin .text-purple-600,
+        .pricing-preview-skin .text-purple-700,
+        .pricing-preview-skin .text-purple-800,
+        .pricing-preview-skin .text-purple-900 {
+          color: #c4b5fd !important;
+        }
+
+        .pricing-preview-skin .text-red-600,
+        .pricing-preview-skin .text-red-700,
+        .pricing-preview-skin .text-rose-600,
+        .pricing-preview-skin .text-rose-700 {
+          color: #fda4af !important;
+        }
+
+        .pricing-preview-skin input,
+        .pricing-preview-skin textarea,
+        .pricing-preview-skin select {
+          background-color: rgba(2, 6, 23, 0.72) !important;
+          border-color: rgba(125, 211, 252, 0.2) !important;
+          color: #e5f3ff !important;
+        }
+
+        .pricing-preview-skin input::placeholder,
+        .pricing-preview-skin textarea::placeholder {
+          color: rgba(148, 163, 184, 0.72) !important;
+        }
+
+        .pricing-preview-skin table thead,
+        .pricing-preview-skin .bg-slate-50 {
+          background-color: rgba(2, 6, 23, 0.55) !important;
+        }
+
+        .pricing-preview-skin table tbody tr {
+          border-color: rgba(125, 211, 252, 0.12) !important;
+        }
+
+        .pricing-preview-skin table tbody tr:hover {
+          background-color: rgba(14, 165, 233, 0.10) !important;
+        }
+
+        .pricing-preview-skin .hover\\:bg-gray-50:hover,
+        .pricing-preview-skin .hover\\:bg-gray-100:hover,
+        .pricing-preview-skin .hover\\:bg-blue-50\\/50:hover {
+          background-color: rgba(14, 165, 233, 0.16) !important;
+        }
+
+        .pricing-preview-skin .cursor-pointer:hover {
+          background-color: rgba(14, 165, 233, 0.12) !important;
+        }
+
+        .pricing-preview-skin .cursor-pointer:hover .text-gray-900,
+        .pricing-preview-skin .cursor-pointer:hover .text-gray-800,
+        .pricing-preview-skin .cursor-pointer:hover .text-gray-700,
+        .pricing-preview-skin .cursor-pointer:hover .text-gray-600 {
+          color: #e5f3ff !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps {
+          color: #b8c7dc;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps h4 {
+          color: #dbeafe !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-gray-900,
+        .pricing-preview-skin .pricing-preview-steps .text-gray-800,
+        .pricing-preview-skin .pricing-preview-steps .text-gray-700 {
+          color: #d8e2f0 !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-gray-600,
+        .pricing-preview-skin .pricing-preview-steps .text-gray-500,
+        .pricing-preview-skin .pricing-preview-steps .text-gray-400 {
+          color: #8ea1ba !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-cyan-700,
+        .pricing-preview-skin .pricing-preview-steps .text-cyan-800,
+        .pricing-preview-skin .pricing-preview-steps .text-cyan-900,
+        .pricing-preview-skin .pricing-preview-steps .text-blue-600,
+        .pricing-preview-skin .pricing-preview-steps .text-blue-700,
+        .pricing-preview-skin .pricing-preview-steps .text-indigo-800,
+        .pricing-preview-skin .pricing-preview-steps .text-indigo-900 {
+          color: #9ecfe0 !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-emerald-600,
+        .pricing-preview-skin .pricing-preview-steps .text-emerald-700,
+        .pricing-preview-skin .pricing-preview-steps .text-emerald-800,
+        .pricing-preview-skin .pricing-preview-steps .text-emerald-900,
+        .pricing-preview-skin .pricing-preview-steps .text-green-600,
+        .pricing-preview-skin .pricing-preview-steps .text-green-700,
+        .pricing-preview-skin .pricing-preview-steps .text-green-800,
+        .pricing-preview-skin .pricing-preview-steps .text-green-900 {
+          color: #9bd8c4 !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-amber-600,
+        .pricing-preview-skin .pricing-preview-steps .text-amber-700,
+        .pricing-preview-skin .pricing-preview-steps .text-amber-800,
+        .pricing-preview-skin .pricing-preview-steps .text-amber-900,
+        .pricing-preview-skin .pricing-preview-steps .text-orange-600,
+        .pricing-preview-skin .pricing-preview-steps .text-orange-700,
+        .pricing-preview-skin .pricing-preview-steps .text-orange-800,
+        .pricing-preview-skin .pricing-preview-steps .text-orange-900 {
+          color: #c9a86a !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-purple-500,
+        .pricing-preview-skin .pricing-preview-steps .text-purple-600,
+        .pricing-preview-skin .pricing-preview-steps .text-purple-700,
+        .pricing-preview-skin .pricing-preview-steps .text-purple-800,
+        .pricing-preview-skin .pricing-preview-steps .text-purple-900,
+        .pricing-preview-skin .pricing-preview-steps .text-violet-600,
+        .pricing-preview-skin .pricing-preview-steps .text-violet-700,
+        .pricing-preview-skin .pricing-preview-steps .text-violet-900 {
+          color: #b9acd8 !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps .text-red-600,
+        .pricing-preview-skin .pricing-preview-steps .text-red-700,
+        .pricing-preview-skin .pricing-preview-steps .text-rose-600,
+        .pricing-preview-skin .pricing-preview-steps .text-rose-700 {
+          color: #e7a8ad !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps section > h4 {
+          color: #dbeafe !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps section > h4[class*="text-"] {
+          color: #dbeafe !important;
+        }
+
+        .pricing-preview-skin .pricing-preview-steps section li {
+          color: #c7b58c !important;
+        }
+
+        .pricing-preview-skin .bg-blue-500,
+        .pricing-preview-skin .bg-blue-600 {
+          background: linear-gradient(135deg, #0891b2, #2563eb) !important;
+          box-shadow: 0 0 24px rgba(34, 211, 238, 0.16);
+        }
+
+        .pricing-preview-skin .bg-emerald-600 {
+          background: linear-gradient(135deg, #059669, #0f766e) !important;
+        }
+
+        .pricing-preview-skin .bg-gray-600 {
+          background-color: rgba(71, 85, 105, 0.85) !important;
+        }
+
+        .pricing-preview-skin .rounded-lg,
+        .pricing-preview-skin .rounded-md {
+          backdrop-filter: blur(12px);
+        }
+
+        .pricing-preview-skin ::selection {
+          background-color: rgba(34, 211, 238, 0.32);
+          color: #f8fafc;
+        }
+
+        .pricing-preview-skin * {
+          scrollbar-width: thin;
+          scrollbar-color: rgba(103, 232, 249, 0.34) rgba(15, 23, 42, 0.45);
+        }
+
+        .pricing-preview-skin *::-webkit-scrollbar {
+          width: 8px;
+          height: 8px;
+        }
+
+        .pricing-preview-skin *::-webkit-scrollbar-track {
+          background: rgba(15, 23, 42, 0.45);
+          border-radius: 999px;
+        }
+
+        .pricing-preview-skin *::-webkit-scrollbar-thumb {
+          background: linear-gradient(180deg, rgba(103, 232, 249, 0.55), rgba(96, 165, 250, 0.35));
+          border-radius: 999px;
+          border: 1px solid rgba(15, 23, 42, 0.75);
+        }
+
+        .pricing-preview-skin *::-webkit-scrollbar-thumb:hover {
+          background: linear-gradient(180deg, rgba(103, 232, 249, 0.75), rgba(96, 165, 250, 0.55));
+        }
+      `}</style>
     </div>
   )
 }

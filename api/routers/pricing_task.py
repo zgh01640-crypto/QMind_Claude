@@ -93,6 +93,7 @@ def _ensure_schema(conn):
                 evaluation          JSONB,
                 conversion_check    JSONB,
                 coefficient_check   JSONB,
+                accuracy_report     JSONB,
                 step_timings        JSONB,
                 error_message       TEXT,
                 created_at          TIMESTAMP DEFAULT NOW(),
@@ -178,6 +179,7 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resource_changes JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS selected_count INTEGER NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS completed_count INTEGER NOT NULL DEFAULT 0")
@@ -1073,6 +1075,121 @@ def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]
     }
 
 
+def _normalize_accuracy_report(raw: dict[str, Any], evaluation: dict[str, Any]) -> dict[str, Any]:
+    def text(key: str, default: str = "") -> str:
+        return str(raw.get(key) or default).strip()
+
+    def text_list(key: str, limit: int = 8) -> list[str]:
+        value = raw.get(key)
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value[:limit] if str(item).strip()]
+
+    hit_count = int(evaluation.get("hit_count") or 0)
+    missed_count = int(evaluation.get("missed_count") or 0)
+    extra_count = int(evaluation.get("extra_count") or 0)
+    manual_count = int(evaluation.get("manual_count") or 0)
+    ai_count = int(evaluation.get("ai_count") or 0)
+    accuracy_rate = round(hit_count / manual_count, 4) if manual_count else None
+
+    level = text("accuracy_level", "待复核")
+    if level not in {"高", "中", "低", "待复核"}:
+        level = "待复核"
+
+    return {
+        "summary": text("summary", "暂无分析摘要。"),
+        "accuracy_level": level,
+        "accuracy_rate": accuracy_rate,
+        "metrics": {
+            "hit_count": hit_count,
+            "missed_count": missed_count,
+            "extra_count": extra_count,
+            "manual_count": manual_count,
+            "ai_count": ai_count,
+        },
+        "key_findings": text_list("key_findings"),
+        "matched_analysis": text("matched_analysis"),
+        "missed_analysis": text("missed_analysis"),
+        "extra_analysis": text("extra_analysis"),
+        "business_recommendations": text_list("business_recommendations"),
+        "conclusion": text("conclusion"),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+def _generate_accuracy_report(
+    boq_item: dict[str, Any],
+    quota_match: dict[str, Any],
+    evaluation: dict[str, Any],
+    conversion_check: dict[str, Any] | None,
+    coefficient_check: dict[str, Any] | None,
+) -> dict[str, Any]:
+    matches = quota_match.get("matches", []) if isinstance(quota_match, dict) else []
+    payload = {
+        "清单": {
+            "编码": boq_item.get("item_code"),
+            "名称": boq_item.get("item_name"),
+            "项目特征": boq_item.get("item_description"),
+            "单位": boq_item.get("unit"),
+            "工程量": boq_item.get("quantity"),
+        },
+        "智能组价定额": [
+            {
+                "编码": item.get("zmbh"),
+                "名称": item.get("zmmc"),
+                "单位": item.get("dw"),
+                "系数": item.get("qty_factor"),
+                "置信度": item.get("confidence"),
+                "理由": item.get("match_reason"),
+            }
+            for item in matches
+        ],
+        "人工对比工程定额": evaluation.get("manual_quotas", []),
+        "对比统计": {
+            "命中": evaluation.get("hit_codes", []),
+            "遗漏": evaluation.get("missed_codes", []),
+            "额外": evaluation.get("extra_codes", []),
+            "hit_count": evaluation.get("hit_count", 0),
+            "missed_count": evaluation.get("missed_count", 0),
+            "extra_count": evaluation.get("extra_count", 0),
+            "manual_count": evaluation.get("manual_count", 0),
+            "ai_count": evaluation.get("ai_count", 0),
+        },
+        "组合换算": conversion_check or {},
+        "系数换算": coefficient_check or {},
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是资深造价复核专家。请对智能组价结果与人工对比工程套定额结果做准确性分析。"
+                "只基于输入数据，不编造不存在的定额。重点判断命中、遗漏、额外定额的业务原因，"
+                "说明智能组价结果是否可采纳、哪些地方需要人工复核。请输出合法 JSON。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请按以下 JSON 结构输出："
+                "{summary, accuracy_level, key_findings, matched_analysis, missed_analysis, "
+                "extra_analysis, business_recommendations, conclusion}。"
+                "accuracy_level 只能是 高/中/低/待复核；key_findings 和 business_recommendations 为字符串数组。"
+                f"\n\n输入数据：\n{_json_dumps(payload)}"
+            ),
+        },
+    ]
+    resp = _client(thinking=False).chat.completions.create(
+        model=_model(),
+        messages=messages,
+        response_format={"type": "json_object"},
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=4000,
+        stream=False,
+    )
+    raw = _parse_json_content(resp.choices[0].message.content)
+    return _normalize_accuracy_report(raw, evaluation)
+
+
 def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with conn.cursor() as cur:
         cur.execute(
@@ -1906,6 +2023,7 @@ def _update_run(conn, run_id: int, **fields: Any) -> None:
             "evaluation",
             "conversion_check",
             "coefficient_check",
+            "accuracy_report",
             "step_timings",
         } else value)
     values.append(run_id)
@@ -2831,7 +2949,8 @@ def list_item_runs(task_id: int, boq_item_id: int):
             cur.execute(
                 """
                 SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
-                       quota_match, evaluation, conversion_check, coefficient_check, step_timings, error_message, created_at, finished_at, reasoning_text
+                       quota_match, evaluation, conversion_check, coefficient_check, accuracy_report,
+                       step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s AND boq_item_id=%s
                 ORDER BY created_at DESC
@@ -2852,11 +2971,12 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "evaluation": r[7],
                 "conversion_check": _hydrate_conversion_combo_resources(conn, r[8]),
                 "coefficient_check": r[9],
-                "step_timings": r[10],
-                "error_message": r[11],
-                "created_at": r[12],
-                "finished_at": r[13],
-                "reasoning_text": r[14],
+                "accuracy_report": r[10],
+                "step_timings": r[11],
+                "error_message": r[12],
+                "created_at": r[13],
+                "finished_at": r[14],
+                "reasoning_text": r[15],
                 "confirmed_results": confirmed_results.get(int(r[0]), []),
             }
             for r in rows
@@ -2880,8 +3000,8 @@ def list_latest_task_runs(task_id: int):
                 """
                 SELECT DISTINCT ON (boq_item_id)
                        boq_item_id, id, status, code_check, feature_check, work_procedures,
-                       quota_candidates, quota_match, evaluation, conversion_check, coefficient_check, step_timings, error_message, created_at, finished_at,
-                       reasoning_text
+                       quota_candidates, quota_match, evaluation, conversion_check, coefficient_check,
+                       accuracy_report, step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s
                 ORDER BY boq_item_id, created_at DESC, id DESC
@@ -2904,11 +3024,12 @@ def list_latest_task_runs(task_id: int):
                     "evaluation": r[8],
                     "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
                     "coefficient_check": r[10],
-                    "step_timings": r[11],
-                    "error_message": r[12],
-                    "created_at": r[13],
-                    "finished_at": r[14],
-                    "reasoning_text": r[15],
+                    "accuracy_report": r[11],
+                    "step_timings": r[12],
+                    "error_message": r[13],
+                    "created_at": r[14],
+                    "finished_at": r[15],
+                    "reasoning_text": r[16],
                     "confirmed_results": confirmed_results.get(int(r[1]), []),
                 },
             }
@@ -2984,6 +3105,51 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/pricing-task-runs/{run_id}/accuracy-report")
+def generate_pricing_task_accuracy_report(run_id: int):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
+                       i.item_code, i.item_name, i.item_description, i.unit, i.quantity
+                FROM pricing_task_runs r
+                JOIN boq_items i ON i.id = r.boq_item_id
+                WHERE r.id=%s
+                """,
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="run not found")
+        quota_match = row[1] or {}
+        evaluation = row[2] or {}
+        if not isinstance(evaluation, dict) or "manual_quotas" not in evaluation:
+            raise HTTPException(status_code=400, detail="run has no manual comparison evaluation")
+        boq_item = {
+            "item_code": row[5],
+            "item_name": row[6],
+            "item_description": row[7] or "",
+            "unit": row[8] or "",
+            "quantity": float(row[9]) if row[9] is not None else None,
+        }
+        report = _generate_accuracy_report(
+            boq_item,
+            quota_match if isinstance(quota_match, dict) else {},
+            evaluation,
+            _hydrate_conversion_combo_resources(conn, row[3]) if isinstance(row[3], dict) else row[3],
+            row[4] if isinstance(row[4], dict) else row[4],
+        )
+        _update_run(conn, run_id, accuracy_report=report)
+        return report
+    finally:
+        conn.close()
 
 
 @router.post("/pricing-task-runs/{run_id}/conversion-check-stream")

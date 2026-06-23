@@ -1338,6 +1338,7 @@ export interface PricingTaskRun {
   evaluation: PricingTaskEvaluation | null
   conversion_check: PricingTaskConversionCheck | null
   coefficient_check: PricingTaskCoefficientCheck | null
+  accuracy_report: PricingTaskAccuracyReport | null
   step_timings: Record<string, PricingTaskStepTiming> | null
   error_message: string | null
   created_at: string
@@ -1372,6 +1373,26 @@ export interface PricingTaskEvaluation {
   extra_count: number
   manual_count: number
   ai_count: number
+}
+
+export interface PricingTaskAccuracyReport {
+  summary: string
+  accuracy_level: '高' | '中' | '低' | '待复核'
+  accuracy_rate: number | null
+  metrics: {
+    hit_count: number
+    missed_count: number
+    extra_count: number
+    manual_count: number
+    ai_count: number
+  }
+  key_findings: string[]
+  matched_analysis: string
+  missed_analysis: string
+  extra_analysis: string
+  business_recommendations: string[]
+  conclusion: string
+  generated_at: string
 }
 
 export interface PricingTaskStepTiming {
@@ -1613,6 +1634,10 @@ export async function confirmPricingTaskRun(runId: number, results?: QuotaMatch[
 
 export async function rejectPricingTaskRun(runId: number) {
   return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
+}
+
+export async function generatePricingTaskAccuracyReport(runId: number) {
+  return req<PricingTaskAccuracyReport>(`/api/pricing-task-runs/${runId}/accuracy-report`, { method: 'POST' })
 }
 
 export async function streamPricingTaskItem(

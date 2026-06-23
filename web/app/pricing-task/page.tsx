@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
   BoqProject,
@@ -140,11 +141,16 @@ export default function PricingTaskPage() {
                       </p>
                     </div>
                   </div>
-                  <Link href={`/pricing-task/${task.id}`}>
-                    <button className="px-4 py-2 ml-4 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors whitespace-nowrap">
-                      进入
-                    </button>
-                  </Link>
+                  <div className="ml-4 flex shrink-0 flex-col items-end gap-2">
+                    <Link href={`/pricing-task/${task.id}`}>
+                      <button className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors whitespace-nowrap">
+                        进入
+                      </button>
+                    </Link>
+                    <Link href={`/pricing-task/${task.id}/preview`} className="text-xs text-cyan-600 hover:text-cyan-700">
+                      试行皮肤
+                    </Link>
+                  </div>
                 </div>
               </div>
             ))}
