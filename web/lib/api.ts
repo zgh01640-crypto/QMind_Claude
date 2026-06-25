@@ -1548,7 +1548,6 @@ export type PricingTaskEvent =
       description_updated?: boolean
       default_candidates?: Array<{ source_code: string; feature_name: string; feature_value: string; default_value: string; source_rowid?: number }>
     }
-  | { type: 'work_procedures'; procedures: string[]; procedure_text?: string; found?: boolean; base_code?: string }
   | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }

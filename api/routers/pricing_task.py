@@ -284,26 +284,6 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
     },
 }
 
-_TOOL_SUBMIT_WORK_PROCEDURES = {
-    "type": "function",
-    "function": {
-        "name": "submit_work_procedures",
-        "description": "提交该清单项的标准施工工序拆解结果，按施工顺序列出每道工序名称。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "procedures": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "按顺序排列的标准工序名称列表",
-                },
-            },
-            "required": ["procedures"],
-            "additionalProperties": False,
-        },
-    },
-}
-
 _TOOL_SUBMIT_QUOTA_MATCH = {
     "type": "function",
     "function": {
@@ -456,7 +436,7 @@ _TOOL_SUBMIT_COEFFICIENT_CHECK = {
     "type": "function",
     "function": {
         "name": "submit_coefficient_check",
-        "description": "提交第八步系数换算判断结果。只保存和展示系数，不改写工料机含量。",
+        "description": "提交第七步系数换算判断结果。只保存和展示系数，不改写工料机含量。",
         "strict": True,
         "parameters": {
             "type": "object",
@@ -565,42 +545,6 @@ def exec_check_item_code(conn, item_code: str, item_name: str) -> dict[str, Any]
         "standard_names": standard_names,
         "found": bool(standard_names),
         "is_consistent": bool(std) and (boq == std or boq in std or std in boq),
-    }
-
-
-def exec_fetch_standard_work_procedure(conn, item_code: str) -> dict[str, Any]:
-    base_code = _base_code(item_code)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT zmbh, zmmc, appendix_code, appendix_name, procedure_text, source_rowid
-            FROM tqdk_tqdgx
-            WHERE zmbh = %s
-            ORDER BY source_rowid
-            LIMIT 1
-            """,
-            (base_code,),
-        )
-        row = cur.fetchone()
-    if not row:
-        return {
-            "item_code": item_code,
-            "base_code": base_code,
-            "found": False,
-            "procedure_text": "",
-            "procedures": [],
-        }
-    return {
-        "item_code": item_code,
-        "base_code": base_code,
-        "found": True,
-        "zmbh": row[0],
-        "zmmc": row[1],
-        "appendix_code": row[2],
-        "appendix_name": row[3],
-        "procedure_text": row[4] or "",
-        "procedures": [row[4]] if row[4] else [],
-        "source_rowid": row[5],
     }
 
 
@@ -2356,19 +2300,11 @@ def _stream_pricing_item(
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
-    procedures_result = exec_fetch_standard_work_procedure(conn, boq_item["item_code"])
-    yield ("work_procedures", procedures_result)
-    if persist_run and run_id is not None:
-        _update_run(conn, run_id, work_procedures=procedures_result)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "标准工序", step_started_at, step_started_perf))
-
-    step_started_at = datetime.now()
-    step_started_perf = perf_counter()
     candidates_data = exec_fetch_quota_candidates(conn, boq_item["item_code"], quota_library_ids)
     yield ("quota_candidates", candidates_data)
     if persist_run and run_id is not None:
         _update_run(conn, run_id, quota_candidates=candidates_data)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "定额候选", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "定额候选", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
@@ -2379,7 +2315,6 @@ def _stream_pricing_item(
         + (f"\n    工作内容：{c['gznr']}" if c.get("gznr") else "")
         for i, c in enumerate(candidates)
     ) or "（无候选定额）"
-    procedures_text = procedures_result.get("procedure_text") or " → ".join(procedures_result.get("procedures", []))
     messages_r5_analysis = [
         {"role": "system", "content": system_prompt},
         {
@@ -2387,12 +2322,11 @@ def _stream_pricing_item(
             "content": (
                 f"请先对候选定额进行套定额分析，不要调用工具，不要输出 JSON。\n"
                 f"请说明候选取舍、工程量系数、置信度依据和模糊问题，最后给出建议选择的 dekid/dezmid。\n\n"
-                f"套定额原则：原则上工序会对应一条或多条定额，请你注意拆解和判断。\n\n"
+                f"套定额原则：基于清单项目特征、候选定额名称和工作内容进行匹配分析和判断。\n\n"
                 f"【清单项】\n编码：{boq_item['item_code']}\n名称：{boq_item['item_name']}\n"
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
                 f"【编码核查】{_json_dumps(code_check)}\n"
                 f"【项目特征分析】{_json_dumps(feature_result)}\n"
-                f"【标准施工工序】{procedures_text or '（未获取）'}\n\n"
                 f"【候选定额子目（共 {candidates_data['total']} 条）】\n{candidate_text}\n"
             ),
         },
@@ -2413,12 +2347,11 @@ def _stream_pricing_item(
             "content": (
                 f"请根据以下套定额分析和候选定额，严格调用 submit_quota_match 提交最终结构化结果。\n"
                 f"只能提交候选中的 dekid/dezmid，不允许编造候选外子目。\n\n"
-                f"套定额原则：用清单项目特征信息+标准施工工序和候选定额名称+工作内容进行匹配分析和判断。\n\n"
+                f"套定额原则：用清单项目特征信息、候选定额名称和工作内容进行匹配分析和判断。\n\n"
                 f"【清单项】\n编码：{boq_item['item_code']}\n名称：{boq_item['item_name']}\n"
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
                 f"【编码核查】{_json_dumps(code_check)}\n"
                 f"【项目特征分析】{_json_dumps(feature_result)}\n"
-                f"【标准施工工序】{procedures_text or '（未获取）'}\n\n"
                 f"【第五轮A套定额分析】\n{quota_analysis or '（无分析文本）'}\n\n"
                 f"【候选定额子目（共 {candidates_data['total']} 条）】\n{candidate_text}\n"
             ),
@@ -2429,7 +2362,7 @@ def _stream_pricing_item(
     if persist_run and run_id is not None:
         _update_run(conn, run_id, quota_match=match_result)
     yield ("quota_match", match_result)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "套定额结果", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "套定额结果", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
@@ -2439,7 +2372,7 @@ def _stream_pricing_item(
         _update_run(conn, run_id, evaluation=evaluation)
         _save_pending_results(conn, task_id, run_id, boq_item, match_result, evaluation)
     yield ("evaluation", evaluation)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 6, "人工对比", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "人工对比", step_started_at, step_started_perf))
 
 
 def _row_to_task(row) -> dict[str, Any]:
@@ -2997,8 +2930,6 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
                         fields["code_check"] = data
                     elif event_type == "feature_check":
                         fields["feature_check"] = data
-                    elif event_type == "work_procedures":
-                        fields["work_procedures"] = data
                     elif event_type == "quota_candidates":
                         fields["quota_candidates"] = data
                     elif event_type == "quota_match":
@@ -3320,7 +3251,7 @@ def pricing_task_conversion_check_stream(run_id: int):
                 yield _sse({"type": "combo_adjustment_rules", "items": []})
                 _update_run(conn, run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -3341,15 +3272,15 @@ def pricing_task_conversion_check_stream(run_id: int):
                 )
                 _update_run(conn, run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
             analysis_prompt = (
-                "请对已人工确认的定额进行第七轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
+                "请对已人工确认的定额进行第六轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
                 "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
                 "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
                 "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n"
-                "第七轮结果只作为组合定额次数建议，不允许修改已确认定额，也不要改写工程量系数。\n\n"
+                "第六轮结果只作为组合定额次数建议，不允许修改已确认定额，也不要改写工程量系数。\n\n"
                 f"【输入数据】\n{context_text}"
             )
             conversion_analysis = ""
@@ -3366,7 +3297,7 @@ def pricing_task_conversion_check_stream(run_id: int):
                     conversion_analysis = data
 
             submit_prompt = (
-                "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
+                "请严格调用 submit_conversion_check 提交第六轮结构化换算建议。\n"
                 "必须覆盖每一条已确认定额。\n"
                 "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
                 "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
@@ -3375,7 +3306,7 @@ def pricing_task_conversion_check_stream(run_id: int):
                 "不要输出工料机调整、材料替换、工程量系数调整或其他非组合定额规则。\n"
                 "reason 写整体判断说明，missing_inputs 写缺失的数量特征或单位信息。\n"
                 "confidence 只能是 high、medium、low。\n\n"
-                f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
+                f"【第六轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
                 f"【输入数据】\n{context_text}"
             )
             raw_result = _run_submit_conversion_check(
@@ -3387,7 +3318,7 @@ def pricing_task_conversion_check_stream(run_id: int):
             result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
             _update_run(conn, run_id, conversion_check=result)
             yield _sse({"type": "conversion_check", "conversion_check": result})
-            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -3420,7 +3351,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 result = {"items": [], "issues": ["未找到已确认定额，无法进行系数换算。"]}
                 _update_run(conn, run_id, coefficient_check=result)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -3428,7 +3359,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 result = _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")
                 _update_run(conn, run_id, coefficient_check=result)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -3447,7 +3378,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
             context_text = _json_dumps(input_payload)
             system_prompt = build_system_prompt()
             analysis_prompt = (
-                "请进行第八轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
+                "请进行第七轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
                 "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
                 "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
                 "作用对象按说明判断：人工费=1，材料费=2，机械消耗量/机械费=3，子目乘以系数/相应子目乘以系数=all。\n"
@@ -3469,12 +3400,12 @@ def pricing_task_coefficient_check_stream(run_id: int):
                         analysis = data
 
                 submit_prompt = (
-                    "请严格调用 submit_coefficient_check 提交第八轮结构化系数换算判断。\n"
+                    "请严格调用 submit_coefficient_check 提交第七轮结构化系数换算判断。\n"
                     "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
                     "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
                     "factor 从 hssm 中的“系数X”提取；如果未命中，matched=false，factor 仍填写 hssm 中可识别的系数或 1。\n"
                     "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
-                    f"【第八轮分析】\n{analysis or '（无分析文本）'}\n\n"
+                    f"【第七轮分析】\n{analysis or '（无分析文本）'}\n\n"
                     f"【输入数据】\n{context_text}"
                 )
                 raw_result = _run_submit_coefficient_check(
@@ -3492,7 +3423,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 )
             _update_run(conn, run_id, coefficient_check=result)
             yield _sse({"type": "coefficient_check", "coefficient_check": result})
-            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -3525,7 +3456,7 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
                 yield _sse({"type": "combo_adjustment_rules", "items": []})
                 _update_batch_item_run(conn, item_run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": item_run_id})
                 return
 
@@ -3546,12 +3477,12 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
                 )
                 _update_batch_item_run(conn, item_run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": item_run_id})
                 return
 
             analysis_prompt = (
-                "请对已确认的批量定额进行第七轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
+                "请对已确认的批量定额进行第六轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
                 "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
                 "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
                 "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n\n"
@@ -3571,12 +3502,12 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
                     conversion_analysis = data
 
             submit_prompt = (
-                "请严格调用 submit_conversion_check 提交第七轮结构化换算建议。\n"
+                "请严格调用 submit_conversion_check 提交第六轮结构化换算建议。\n"
                 "必须覆盖每一条已确认定额。\n"
                 "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
                 "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
                 "不匹配时 matched=false，feature_value 和 calculated_times 填 0，并说明原因。\n\n"
-                f"【第七轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
+                f"【第六轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
                 f"【输入数据】\n{context_text}"
             )
             raw_result = _run_submit_conversion_check(
@@ -3588,7 +3519,7 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
             result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
             _update_batch_item_run(conn, item_run_id, conversion_check=result)
             yield _sse({"type": "conversion_check", "conversion_check": result})
-            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": item_run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -3624,7 +3555,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
                 _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
                 _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": item_run_id})
                 return
 
@@ -3633,7 +3564,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
                 _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
                 _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": item_run_id})
                 return
 
@@ -3652,7 +3583,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
             context_text = _json_dumps(input_payload)
             system_prompt = build_system_prompt()
             analysis_prompt = (
-                "请进行第八轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
+                "请进行第七轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
                 "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
                 "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
                 "本轮不计算调整后含量，只说明哪些工料机行应显示乘以的系数。\n\n"
@@ -3673,11 +3604,11 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
                         analysis = data
 
                 submit_prompt = (
-                    "请严格调用 submit_coefficient_check 提交第八轮结构化系数换算判断。\n"
+                    "请严格调用 submit_coefficient_check 提交第七轮结构化系数换算判断。\n"
                     "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
                     "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
                     "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
-                    f"【第八轮分析】\n{analysis or '（无分析文本）'}\n\n"
+                    f"【第七轮分析】\n{analysis or '（无分析文本）'}\n\n"
                     f"【输入数据】\n{context_text}"
                 )
                 raw_result = _run_submit_coefficient_check(
@@ -3696,7 +3627,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
             _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
             _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
             yield _sse({"type": "coefficient_check", "coefficient_check": result})
-            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": item_run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})

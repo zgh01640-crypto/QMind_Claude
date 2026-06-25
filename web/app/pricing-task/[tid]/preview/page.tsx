@@ -69,8 +69,6 @@ interface ItemResult {
   codeCheck?: CodeCheck
   judgment?: { is_consistent: boolean; reasoning: string }
   featureCheck?: FeatureCheck
-  workProcedures?: string[]
-  workProcedureText?: string
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
@@ -88,7 +86,6 @@ interface ItemResult {
 }
 
 function runToResult(run: PricingTaskRun): ItemResult {
-  const workProcedures = run.work_procedures as { procedures?: string[]; procedure_text?: string } | undefined
   return {
     phase: run.status === 'failed' ? 'error' : 'done',
     reasoning: run.reasoning_text || '',
@@ -102,8 +99,6 @@ function runToResult(run: PricingTaskRun): ItemResult {
         }
       : undefined,
     featureCheck: run.feature_check as ItemResult['featureCheck'],
-    workProcedures: workProcedures?.procedures,
-    workProcedureText: workProcedures?.procedure_text,
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
@@ -190,21 +185,16 @@ function stepBadges(result?: ItemResult) {
     },
     {
       no: 3,
-      title: '标准工序',
-      tone: !result?.workProcedures ? 'pending' : result.workProcedures.length > 0 ? 'success' : 'warning',
-    },
-    {
-      no: 4,
       title: '定额候选',
       tone: !result?.quotaCandidates ? 'pending' : result.quotaCandidates.total > 0 ? 'success' : 'warning',
     },
     {
-      no: 5,
+      no: 4,
       title: '套定额结果',
       tone: !result?.quotaMatch ? (result?.phase === 'error' ? 'error' : 'pending') : result.quotaMatch.matches.length > 0 ? 'success' : 'warning',
     },
     {
-      no: 6,
+      no: 5,
       title: '人工对比',
       tone: !result?.evaluation
         ? 'pending'
@@ -215,7 +205,7 @@ function stepBadges(result?: ItemResult) {
             : 'warning',
     },
     {
-      no: 7,
+      no: 6,
       title: '组合换算',
       tone: result?.conversionChecking
         ? 'pending'
@@ -226,7 +216,7 @@ function stepBadges(result?: ItemResult) {
             : 'success',
     },
     {
-      no: 8,
+      no: 7,
       title: '系数换算',
       tone: result?.coefficientChecking
         ? 'pending'
@@ -240,15 +230,14 @@ function stepBadges(result?: ItemResult) {
 }
 
 function activeStepNo(result?: ItemResult) {
-  if (result?.coefficientChecking) return 8
-  if (result?.conversionChecking) return 7
+  if (result?.coefficientChecking) return 7
+  if (result?.conversionChecking) return 6
   if (!result || result.phase !== 'reasoning') return null
   if (!result.codeCheck) return 1
   if (!result.featureCheck) return 2
-  if (!result.workProcedures) return 3
-  if (!result.quotaCandidates) return 4
-  if (!result.quotaMatch) return 5
-  if (!result.evaluation) return 6
+  if (!result.quotaCandidates) return 3
+  if (!result.quotaMatch) return 4
+  if (!result.evaluation) return 5
   return null
 }
 
@@ -1095,8 +1084,6 @@ export default function PricingTaskDetailPage() {
           if (evt.description_updated && evt.normalized_description) {
             setItems(prev => prev.map(item => item.id === itemId ? { ...item, item_description: evt.normalized_description || item.item_description } : item))
           }
-        } else if (evt.type === 'work_procedures') {
-          updateResult(itemId, s => ({ ...s, workProcedures: evt.procedures, workProcedureText: evt.procedure_text }))
         } else if (evt.type === 'quota_candidates') {
           updateResult(itemId, s => ({
             ...s,
@@ -1139,7 +1126,7 @@ export default function PricingTaskDetailPage() {
             ...s,
             conversionChecking: true,
             conversionError: undefined,
-            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 组合换算】\n`,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第六轮 组合换算】\n`,
           }))
         } else if (evt.type === 'combo_adjustment_rules') {
           updateResult(itemId, s => ({
@@ -1185,7 +1172,7 @@ export default function PricingTaskDetailPage() {
             ...s,
             coefficientChecking: true,
             coefficientError: undefined,
-            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第八轮 系数换算】\n`,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 系数换算】\n`,
           }))
         } else if (evt.type === 'coefficient_rules') {
           updateResult(itemId, s => ({
@@ -1646,25 +1633,6 @@ export default function PricingTaskDetailPage() {
                     </section>
                   )}
 
-                  {(currentResult.workProcedureText || currentResult.workProcedures) && (
-                    <section className="px-4 py-4 border-b bg-indigo-50 border-indigo-200">
-                      <h4 className="font-semibold text-sm text-indigo-900 mb-3">3. 标准工序<StepDuration result={currentResult} stepNo={3} /></h4>
-                      {currentResult.workProcedureText ? (
-                        <div className="rounded border border-indigo-200 bg-white px-3 py-2 text-xs leading-6 text-indigo-900">
-                          {currentResult.workProcedureText}
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap gap-1 text-xs">
-                          {currentResult.workProcedures?.map((p, i) => (
-                            <span key={i} className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded font-medium">
-                              {i + 1}. {p}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                  )}
-
                   {currentResult.quotaCandidates && (
                     <section className="px-4 py-4 border-b bg-slate-50 border-slate-200">
                       <button
@@ -1673,8 +1641,8 @@ export default function PricingTaskDetailPage() {
                         className="w-full flex items-center justify-between text-left"
                       >
                         <h4 className="font-semibold text-sm text-slate-900">
-                          4. 定额候选子目 <span className="text-xs font-normal text-slate-500">共 {currentResult.quotaCandidates.total} 条</span>
-                          <StepDuration result={currentResult} stepNo={4} />
+                          3. 定额候选子目 <span className="text-xs font-normal text-slate-500">共 {currentResult.quotaCandidates.total} 条</span>
+                          <StepDuration result={currentResult} stepNo={3} />
                         </h4>
                         <span className="text-xs text-slate-500">{quotaCandidatesExpanded ? '收起' : '展开'}</span>
                       </button>
@@ -1705,8 +1673,8 @@ export default function PricingTaskDetailPage() {
                   {currentResult.quotaMatch && (
                     <section className="px-4 py-4 border-b bg-emerald-50 border-emerald-200">
                       <h4 className="font-semibold text-sm text-emerald-900 mb-3">
-                        5. 套定额结果 <span className="text-xs font-normal text-emerald-600">{currentResult.quotaMatch.matches.length} 条匹配</span>
-                        <StepDuration result={currentResult} stepNo={5} />
+                        4. 套定额结果 <span className="text-xs font-normal text-emerald-600">{currentResult.quotaMatch.matches.length} 条匹配</span>
+                        <StepDuration result={currentResult} stepNo={4} />
                       </h4>
                       {currentResult.quotaMatch.matches.length === 0 ? (
                         <p className="text-xs text-gray-400">未找到匹配定额</p>
@@ -1743,7 +1711,7 @@ export default function PricingTaskDetailPage() {
 
                   {currentResult.evaluation && (
                     <section className="px-4 py-4 border-b bg-purple-50 border-purple-200">
-                      <h4 className="font-semibold text-sm text-purple-900 mb-2">6. 人工对比评估<StepDuration result={currentResult} stepNo={6} /></h4>
+                      <h4 className="font-semibold text-sm text-purple-900 mb-2">5. 人工对比评估<StepDuration result={currentResult} stepNo={5} /></h4>
                       <div className="grid grid-cols-3 gap-2 text-xs mb-2">
                         <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.hit_count}</div><div className="text-gray-500">命中</div></div>
                         <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.missed_count}</div><div className="text-gray-500">遗漏</div></div>
@@ -1792,7 +1760,7 @@ export default function PricingTaskDetailPage() {
                   {(currentResult.conversionChecking || currentResult.conversionCheck || currentResult.conversionError) && (
                     <section className="px-4 py-4 border-b bg-cyan-50 border-cyan-200">
                       <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-cyan-900">7. 组合换算<StepDuration result={currentResult} stepNo={7} /></h4>
+                        <h4 className="font-semibold text-sm text-cyan-900">6. 组合换算<StepDuration result={currentResult} stepNo={6} /></h4>
                         {currentResult.conversionChecking && (
                           <span className="inline-block h-4 w-4 rounded-full border-2 border-cyan-200 border-t-cyan-700 animate-spin" title="组合换算运行中" />
                         )}
@@ -1845,7 +1813,7 @@ export default function PricingTaskDetailPage() {
                   {(currentResult.coefficientChecking || currentResult.coefficientCheck || currentResult.coefficientPreview || currentResult.coefficientError) && (
                     <section className="px-4 py-4 border-b bg-violet-50 border-violet-200">
                       <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-violet-900">8. 系数换算<StepDuration result={currentResult} stepNo={8} /></h4>
+                        <h4 className="font-semibold text-sm text-violet-900">7. 系数换算<StepDuration result={currentResult} stepNo={7} /></h4>
                         {currentResult.coefficientChecking && (
                           <span className="inline-block h-4 w-4 rounded-full border-2 border-violet-200 border-t-violet-700 animate-spin" title="系数换算运行中" />
                         )}

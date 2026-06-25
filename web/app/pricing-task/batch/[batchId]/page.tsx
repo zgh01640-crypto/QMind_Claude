@@ -46,8 +46,6 @@ interface ItemResult {
   status?: string
   codeCheck?: CodeCheck
   featureCheck?: FeatureCheck
-  workProcedures?: string[]
-  workProcedureText?: string
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
@@ -123,7 +121,6 @@ function formatPercent(value: number | null) {
 }
 
 function runToResult(run: PricingTaskBatchItemRun['run']): ItemResult {
-  const workProcedures = run.work_procedures as { procedures?: string[]; procedure_text?: string } | undefined
   return {
     phase: run.status === 'failed' ? 'error' : 'done',
     reasoning: run.reasoning_text || '',
@@ -131,8 +128,6 @@ function runToResult(run: PricingTaskBatchItemRun['run']): ItemResult {
     status: run.status,
     codeCheck: run.code_check as CodeCheck | undefined,
     featureCheck: run.feature_check as FeatureCheck | undefined,
-    workProcedures: workProcedures?.procedures,
-    workProcedureText: workProcedures?.procedure_text,
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
@@ -217,7 +212,6 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
       },
     }
   }
-  if (evt.type === 'work_procedures') return { ...prev, workProcedures: evt.procedures, workProcedureText: evt.procedure_text }
   if (evt.type === 'quota_candidates') {
     return { ...prev, quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total } }
   }
@@ -249,20 +243,14 @@ function StepCards({ result }: { result?: ItemResult }) {
           <div className="mt-1 text-orange-800">{result.featureCheck.analysis}</div>
         </section>
       )}
-      {(result.workProcedureText || result.workProcedures) && (
-        <section className="rounded border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-indigo-900">3. 标准工序</div>
-          <div className="mt-1 text-indigo-800">{result.workProcedureText || result.workProcedures?.join(' → ')}</div>
-        </section>
-      )}
       {result.quotaCandidates && (
         <section className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-slate-900">4. 定额候选：{result.quotaCandidates.total} 条</div>
+          <div className="font-semibold text-slate-900">3. 定额候选：{result.quotaCandidates.total} 条</div>
         </section>
       )}
       {result.quotaMatch && (
         <section className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-emerald-900">5. 套定额结果：{result.quotaMatch.matches.length} 条</div>
+          <div className="font-semibold text-emerald-900">4. 套定额结果：{result.quotaMatch.matches.length} 条</div>
           <div className="mt-2 space-y-1">
             {result.quotaMatch.matches.map((match, index) => (
               <div key={`${match.zmbh}-${index}`} className="rounded bg-white px-2 py-1">
@@ -275,7 +263,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {result.evaluation && (
         <section className="rounded border border-purple-200 bg-purple-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-purple-900">6. 人工对比</div>
+          <div className="font-semibold text-purple-900">5. 人工对比</div>
           <div className="mt-1 text-purple-800">
             命中 {result.evaluation.hit_count}，遗漏 {result.evaluation.missed_count}，额外 {result.evaluation.extra_count}
           </div>
@@ -283,7 +271,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {(result.conversionChecking || result.conversionCheck || result.comboAdjustmentPreview || result.conversionError) && (
         <section className="rounded border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-cyan-900">7. 组合换算</div>
+          <div className="font-semibold text-cyan-900">6. 组合换算</div>
           {result.conversionChecking && <div className="mt-1 text-cyan-700">运行中...</div>}
           {result.conversionError && <div className="mt-1 text-red-700">{result.conversionError}</div>}
           {(result.conversionCheck || result.comboAdjustmentPreview) && (
@@ -320,7 +308,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {(result.coefficientChecking || result.coefficientCheck || result.coefficientPreview || result.coefficientError) && (
         <section className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-violet-900">8. 系数换算</div>
+          <div className="font-semibold text-violet-900">7. 系数换算</div>
           {result.coefficientChecking && <div className="mt-1 text-violet-700">运行中...</div>}
           {result.coefficientError && <div className="mt-1 text-red-700">{result.coefficientError}</div>}
           {(result.coefficientCheck || result.coefficientPreview) && (
@@ -462,7 +450,7 @@ export default function PricingTaskBatchPage() {
     snapshot = {
       ...snapshot,
       conversionChecking: true,
-      reasoning: `${snapshot.reasoning}${snapshot.reasoning ? '\n\n' : ''}【第七轮 组合换算】\n`,
+      reasoning: `${snapshot.reasoning}${snapshot.reasoning ? '\n\n' : ''}【第六轮 组合换算】\n`,
     }
     applySnapshot(itemId, snapshot)
     await streamPricingTaskBatchConversionCheck(runId, (evt: PricingTaskEvent) => {
@@ -493,7 +481,7 @@ export default function PricingTaskBatchPage() {
     snapshot = {
       ...snapshot,
       coefficientChecking: true,
-      reasoning: `${snapshot.reasoning}${snapshot.reasoning ? '\n\n' : ''}【第八轮 系数换算】\n`,
+      reasoning: `${snapshot.reasoning}${snapshot.reasoning ? '\n\n' : ''}【第七轮 系数换算】\n`,
     }
     applySnapshot(itemId, snapshot)
     await streamPricingTaskBatchCoefficientCheck(runId, (evt: PricingTaskEvent) => {
@@ -544,6 +532,7 @@ export default function PricingTaskBatchPage() {
       setBatchState(item.id, 'failed')
       return
     }
+    const runId = snapshot.runId
     const matches = snapshot.quotaMatch?.matches ?? []
     if (matches.length === 0) {
       setResult(item.id, prev => ({ ...prev, phase: 'done', status: 'completed' }))
@@ -553,7 +542,7 @@ export default function PricingTaskBatchPage() {
     try {
       snapshot = { ...snapshot, phase: 'done', status: 'confirmed' }
       applySnapshot(item.id, snapshot)
-      snapshot = await runConversionAndCoefficient(item.id, snapshot.runId, snapshot)
+      snapshot = await runConversionAndCoefficient(item.id, runId, snapshot)
       setResult(item.id, prev => ({ ...prev, ...snapshot, phase: 'done', status: 'confirmed' }))
       setBatchState(item.id, 'confirmed')
     } catch (err) {
