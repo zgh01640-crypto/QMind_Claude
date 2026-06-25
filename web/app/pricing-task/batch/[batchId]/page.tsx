@@ -171,6 +171,22 @@ function batchStateClass(state?: BatchState) {
   return 'bg-slate-100 text-slate-500 border-slate-200'
 }
 
+function formatDuration(ms?: number) {
+  if (ms == null) return ''
+  if (ms < 1000) return `${ms}ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = Math.round(seconds % 60)
+  return `${minutes}m${rest}s`
+}
+
+function totalDuration(result?: ItemResult) {
+  const timings = Object.values(result?.stepTimings ?? {})
+  if (timings.length === 0) return null
+  return timings.reduce((sum, timing) => sum + (timing.duration_ms ?? 0), 0)
+}
+
 function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemResult {
   if (evt.type === 'run_started') return { ...prev, runId: evt.run_id, status: 'running' }
   if (evt.type === 'reasoning_token') return { ...prev, reasoning: prev.reasoning + evt.token }
@@ -637,6 +653,7 @@ export default function PricingTaskBatchPage() {
               const result = itemResults.get(item.id)
               const focused = focusedItemId === item.id
               const expanded = expandedItemId === item.id
+              const duration = totalDuration(result)
               return (
                 <div
                   key={item.id}
@@ -657,7 +674,10 @@ export default function PricingTaskBatchPage() {
                     />
                     <div className="min-w-0 flex-1">
                       <div className="font-mono text-xs text-gray-500">{item.item_code}</div>
-                      <div className="truncate text-sm font-medium text-gray-900">{item.item_name}</div>
+                      <div className="flex min-w-0 items-center justify-between gap-3">
+                        <div className="truncate text-sm font-medium text-gray-900">{item.item_name}</div>
+                        {duration != null && <div className="shrink-0 text-[11px] text-gray-400">{formatDuration(duration)}</div>}
+                      </div>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${batchStateClass(state)}`}>{batchStateLabel(state)}</span>
                         {result?.status && <span className="text-[11px] text-gray-500">{statusLabel(result.status)}</span>}

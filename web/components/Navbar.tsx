@@ -15,6 +15,7 @@ const links = [
   { href: '/quota-management', label: '定额管理' },
   { href: '/pricing-task', label: '单条组价' },
   { href: '/pricing-task/batch', label: '批量组价' },
+  { href: '/pricing-task/demo', label: '组价演示' },
   { href: '/new-boq', label: '新工程管理' },
   { href: '/prompt-templates', label: '提示词模板' },
   { href: '/manual-boq', label: '工程管理（人工）' },
@@ -29,6 +30,7 @@ function isActive(pathname: string, href: string) {
   if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
   if (href === '/pricing-task') return /^\/pricing-task(\/\d+)?$/.test(pathname)
   if (href === '/pricing-task/batch') return pathname.startsWith('/pricing-task/batch')
+  if (href === '/pricing-task/demo') return pathname.startsWith('/pricing-task/demo')
   if (href === '/quota-management') return pathname.startsWith('/quota-management') || pathname.startsWith('/quota-input-prompts')
   return pathname.startsWith(href + '/')
 }

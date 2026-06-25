@@ -182,21 +182,14 @@ function CandidatePanel({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-sm font-semibold text-blue-700">{candidate.quota_item.code ?? '-'}</span>
-                    <StatusBadge status={candidate.target_link.link_status} />
                     <span className="text-xs text-gray-400">{candidate.quota_item.library_name}</span>
                   </div>
                   <div className="mt-1 text-sm font-medium text-gray-900">{candidate.quota_item.name}</div>
                   <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
                     <span>单位：{candidate.quota_item.unit ?? '-'}</span>
                     <span>工料机：{candidate.resource_count}</span>
-                    {candidate.target_link.review_message && <span>{candidate.target_link.review_message}</span>}
                   </div>
                 </div>
-                {candidate.target_link.target_item_id && (
-                  <div className="text-xs text-gray-400">
-                    {candidate.target_link.target_table} #{candidate.target_link.target_item_id}
-                  </div>
-                )}
               </div>
               {candidate.quota_item.work_content && (
                 <div className="mt-2 rounded bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-600">
@@ -443,7 +436,7 @@ export default function PricingKbPage() {
     setCandidateDetail(null)
     if (!item.candidate_count) return
     setCandidateLoading(true)
-    fetchPricingKbCandidates(item.id)
+    fetchPricingKbCandidates(item.id, item.source_library_id)
       .then(setCandidateDetail)
       .catch(reason => setError(reason instanceof Error ? reason.message : '加载候选定额失败'))
       .finally(() => setCandidateLoading(false))
@@ -470,8 +463,6 @@ export default function PricingKbPage() {
           <StatCard label="定额子目" value={fmt(summary?.quota_item_count)} />
           <StatCard label="工料机" value={fmt(summary?.resource_count)} />
           <StatCard label="候选关系" value={fmt(summary?.candidate_count)} />
-          <StatCard label="matched" value={fmt(summary?.link_status_counts?.matched ?? 0)} />
-          <StatCard label="review" value={fmt(summary?.link_status_counts?.review ?? 0)} />
           <StatCard label="导入问题" value={fmt(summary?.issue_count)} />
         </div>
         {error && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
@@ -610,12 +601,11 @@ export default function PricingKbPage() {
                         <th className="px-4 py-2.5 text-left font-medium">名称</th>
                         <th className="px-4 py-2.5 text-left font-medium">单位</th>
                         <th className="px-4 py-2.5 text-left font-medium">章节</th>
-                        <th className="px-4 py-2.5 text-left font-medium">链接状态</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {!loading && quotaItems.length === 0 && (
-                        <tr><td colSpan={6} className="px-4 py-12 text-center text-gray-400">暂无匹配定额</td></tr>
+                        <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">暂无匹配定额</td></tr>
                       )}
                       {quotaItems.map(item => (
                         <tr key={item.id} className="hover:bg-blue-50/40">
@@ -624,7 +614,6 @@ export default function PricingKbPage() {
                           <td className="px-4 py-2.5 font-medium text-gray-900">{item.name}</td>
                           <td className="px-4 py-2.5 text-gray-500">{item.unit ?? '-'}</td>
                           <td className="px-4 py-2.5 text-xs text-gray-500">{item.chapter_name ?? '-'}</td>
-                          <td className="px-4 py-2.5"><StatusBadge status={item.link_status} /></td>
                         </tr>
                       ))}
                     </tbody>

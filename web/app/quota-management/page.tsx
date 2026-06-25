@@ -40,7 +40,7 @@ function StatPill({ label, value }: { label: string; value: number | string }) {
   )
 }
 
-function ManagementCards({ active }: { active: 'library' | 'prompts' }) {
+function ManagementCards({ active }: { active: 'library' | 'prompts' | 'conversionRules' }) {
   const cards = [
     {
       key: 'library',
@@ -56,10 +56,17 @@ function ManagementCards({ active }: { active: 'library' | 'prompts' }) {
       description: '只查看 tdek_tzhhs 中存在实际值提示的定额，按定额库筛选和分页查询。',
       stat: 'tdek_tzhhs',
     },
+    {
+      key: 'conversionRules',
+      href: '/quota-conversion-rules',
+      title: '换算说明',
+      description: '只查看 TDEK_TZNHS 中存在换算说明的定额，集中核查提示、说明和分组。',
+      stat: 'TDEK_TZNHS',
+    },
   ] as const
 
   return (
-    <div className="mt-4 grid gap-3 border-t border-gray-100 pt-4 md:grid-cols-2">
+    <div className="mt-4 grid gap-3 border-t border-gray-100 pt-4 md:grid-cols-3">
       {cards.map(card => {
         const selected = active === card.key
         return (
@@ -126,18 +133,6 @@ function LibrarySidebar({
       </div>
     </aside>
   )
-}
-
-function LinkStatusBadge({ status }: { status: string }) {
-  const cls =
-    status === 'matched'
-      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-      : status === 'review'
-        ? 'border-amber-200 bg-amber-50 text-amber-700'
-        : status === 'unmatched'
-          ? 'border-red-200 bg-red-50 text-red-700'
-          : 'border-gray-200 bg-gray-50 text-gray-500'
-  return <span className={`rounded border px-2 py-0.5 text-xs ${cls}`}>{status}</span>
 }
 
 const COST_LABELS = [
@@ -257,7 +252,7 @@ function ItemRow({
 }) {
   return (
     <div className="border-t border-gray-100 bg-white px-3 py-3" style={{ paddingLeft: `${depth * 24 + 44}px` }}>
-      <div className="grid gap-2 text-sm lg:grid-cols-[140px_minmax(220px,1fr)_90px_120px_120px] lg:items-start">
+      <div className="grid gap-2 text-sm lg:grid-cols-[140px_minmax(220px,1fr)_90px_120px] lg:items-start">
         <div className="select-text font-mono font-semibold text-blue-700">{item.zmbh ?? '-'}</div>
         <div>
           <div className="select-text font-medium text-gray-900">{item.zmmc}</div>
@@ -265,7 +260,6 @@ function ItemRow({
           {item.gznr && <div className="mt-1 select-text text-xs leading-5 text-gray-500">工作内容：{item.gznr}</div>}
         </div>
         <div className="text-gray-500">单位：{item.dw ?? '-'}</div>
-        <LinkStatusBadge status={item.link_status} />
         <button
           onClick={() => onToggle(item)}
           className="w-fit rounded border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"

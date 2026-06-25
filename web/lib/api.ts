@@ -1304,6 +1304,7 @@ export interface PricingTask {
   quota_library_ids: number[]
   quota_library_names: string[]
   legacy_local_id: string | null
+  accuracy_report: PricingTaskAccuracyReport | null
   created_at: string
   latest_run_count: number
 }
@@ -1338,7 +1339,6 @@ export interface PricingTaskRun {
   evaluation: PricingTaskEvaluation | null
   conversion_check: PricingTaskConversionCheck | null
   coefficient_check: PricingTaskCoefficientCheck | null
-  accuracy_report: PricingTaskAccuracyReport | null
   step_timings: Record<string, PricingTaskStepTiming> | null
   error_message: string | null
   created_at: string
@@ -1380,16 +1380,22 @@ export interface PricingTaskAccuracyReport {
   accuracy_level: '高' | '中' | '低' | '待复核'
   accuracy_rate: number | null
   metrics: {
+    total_items?: number
+    evaluated_item_count?: number
+    exact_item_count?: number
     hit_count: number
     missed_count: number
     extra_count: number
     manual_count: number
     ai_count: number
+    hit_rate?: number | null
   }
   key_findings: string[]
   matched_analysis: string
   missed_analysis: string
   extra_analysis: string
+  risk_items?: string[]
+  representative_examples?: string[]
   business_recommendations: string[]
   conclusion: string
   generated_at: string
@@ -1636,8 +1642,8 @@ export async function rejectPricingTaskRun(runId: number) {
   return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
 }
 
-export async function generatePricingTaskAccuracyReport(runId: number) {
-  return req<PricingTaskAccuracyReport>(`/api/pricing-task-runs/${runId}/accuracy-report`, { method: 'POST' })
+export async function generatePricingTaskAccuracyReport(taskId: number) {
+  return req<PricingTaskAccuracyReport>(`/api/pricing-tasks/${taskId}/accuracy-report`, { method: 'POST' })
 }
 
 export async function streamPricingTaskItem(

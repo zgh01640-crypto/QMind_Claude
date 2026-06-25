@@ -74,9 +74,6 @@ interface ItemResult {
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
-  accuracyReport?: PricingTaskRun['accuracy_report']
-  accuracyReportGenerating?: boolean
-  accuracyReportError?: string
   comboAdjustmentPreview?: PricingTaskConversionCheck['items']
   conversionCheck?: PricingTaskConversionCheck
   conversionChecking?: boolean
@@ -110,7 +107,6 @@ function runToResult(run: PricingTaskRun): ItemResult {
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
-    accuracyReport: run.accuracy_report ?? undefined,
     conversionCheck: run.conversion_check ?? undefined,
     coefficientCheck: run.coefficient_check ?? undefined,
     confirmedResults: run.confirmed_results ?? undefined,
@@ -805,6 +801,105 @@ async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[]) {
   return entries
 }
 
+function AccuracyReportPanel({
+  report,
+  error,
+  dark = false,
+}: {
+  report: PricingTask['accuracy_report']
+  error?: string
+  dark?: boolean
+}) {
+  if (!report && !error) return null
+
+  const metrics = report?.metrics
+  const shell = dark
+    ? 'border-cyan-300/15 bg-slate-950/70 text-slate-200 shadow-[0_18px_60px_rgba(8,47,73,0.25)]'
+    : 'border-gray-200 bg-white text-gray-700 shadow-sm'
+  const muted = dark ? 'text-slate-400' : 'text-gray-500'
+  const heading = dark ? 'text-slate-100' : 'text-gray-900'
+  const chip = dark
+    ? 'border-cyan-300/20 bg-cyan-400/10 text-cyan-100'
+    : 'border-blue-100 bg-blue-50 text-blue-700'
+  const section = dark ? 'border-slate-700/70 bg-slate-900/70' : 'border-gray-100 bg-gray-50'
+
+  const list = (title: string, values?: string[]) => (
+    values && values.length > 0 ? (
+      <div className={`rounded-md border p-3 ${section}`}>
+        <div className={`mb-2 text-xs font-semibold ${heading}`}>{title}</div>
+        <ul className="space-y-1 text-xs leading-5">
+          {values.map((item, index) => <li key={index}>• {item}</li>)}
+        </ul>
+      </div>
+    ) : null
+  )
+
+  return (
+    <div className={`rounded-lg border p-4 ${shell}`}>
+      {error && (
+        <div className={`mb-3 rounded border px-3 py-2 text-xs ${dark ? 'border-rose-400/30 bg-rose-500/10 text-rose-100' : 'border-red-200 bg-red-50 text-red-700'}`}>
+          {error}
+        </div>
+      )}
+      {report && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className={`text-sm font-semibold ${heading}`}>智能组价全集准确性分析报告</div>
+              <p className={`mt-1 max-w-4xl text-xs leading-5 ${muted}`}>{report.summary}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-full border px-2.5 py-1 font-semibold ${chip}`}>等级：{report.accuracy_level}</span>
+              {report.accuracy_rate != null && (
+                <span className={`rounded-full border px-2.5 py-1 font-semibold ${chip}`}>命中率 {formatPercent(report.accuracy_rate)}</span>
+              )}
+            </div>
+          </div>
+
+          {metrics && (
+            <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4 lg:grid-cols-8">
+              {[
+                ['已评估', `${metrics.evaluated_item_count ?? 0}/${metrics.total_items ?? 0}`],
+                ['人工定额', metrics.manual_count],
+                ['AI 定额', metrics.ai_count],
+                ['命中', metrics.hit_count],
+                ['遗漏', metrics.missed_count],
+                ['额外', metrics.extra_count],
+                ['完全一致', metrics.exact_item_count ?? 0],
+                ['生成时间', report.generated_at ? new Date(report.generated_at).toLocaleString() : '-'],
+              ].map(([label, value]) => (
+                <div key={String(label)} className={`rounded-md border px-3 py-2 ${section}`}>
+                  <div className={muted}>{label}</div>
+                  <div className={`mt-1 font-semibold ${heading}`}>{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            {list('关键发现', report.key_findings)}
+            {list('风险清单类型', report.risk_items)}
+            {list('代表性样例', report.representative_examples)}
+            {list('复核与优化建议', report.business_recommendations)}
+          </div>
+
+          <div className="grid gap-3 text-xs leading-5 lg:grid-cols-3">
+            {report.matched_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>一致项分析：</span>{report.matched_analysis}</div>}
+            {report.missed_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>遗漏分析：</span>{report.missed_analysis}</div>}
+            {report.extra_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>额外分析：</span>{report.extra_analysis}</div>}
+          </div>
+
+          {report.conclusion && (
+            <div className={`rounded-md border p-3 text-xs leading-5 ${section}`}>
+              <span className={`font-semibold ${heading}`}>总体结论：</span>{report.conclusion}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function PricingTaskDetailPage() {
   const params = useParams()
   const taskId = Number(params.tid)
@@ -822,6 +917,9 @@ export default function PricingTaskDetailPage() {
   const [featureSaving, setFeatureSaving] = useState(false)
   const [featureEditError, setFeatureEditError] = useState('')
   const [featureImages, setFeatureImages] = useState<Array<{ url: string; name: string; size: number }>>([])
+  const [accuracyReportGenerating, setAccuracyReportGenerating] = useState(false)
+  const [accuracyReportError, setAccuracyReportError] = useState('')
+  const [showAccuracyReportModal, setShowAccuracyReportModal] = useState(false)
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
@@ -1124,19 +1222,27 @@ export default function PricingTaskDetailPage() {
   }
 
   async function handleGenerateAccuracyReport() {
-    if (!selectedItemId || !currentResult?.runId) return
-    const itemId = selectedItemId
-    updateResult(itemId, s => ({ ...s, accuracyReportGenerating: true, accuracyReportError: undefined }))
+    if (!task) return
+    setAccuracyReportGenerating(true)
+    setAccuracyReportError('')
+    setShowAccuracyReportModal(true)
     try {
-      const report = await generatePricingTaskAccuracyReport(currentResult.runId)
-      updateResult(itemId, s => ({ ...s, accuracyReport: report, accuracyReportGenerating: false }))
+      const report = await generatePricingTaskAccuracyReport(task.id)
+      setTask({ ...task, accuracy_report: report })
     } catch (err) {
-      updateResult(itemId, s => ({
-        ...s,
-        accuracyReportGenerating: false,
-        accuracyReportError: err instanceof Error ? err.message : '准确性分析报告生成失败',
-      }))
+      setAccuracyReportError(err instanceof Error ? err.message : '准确性分析报告生成失败')
+    } finally {
+      setAccuracyReportGenerating(false)
     }
+  }
+
+  function handleOpenAccuracyReport() {
+    setAccuracyReportError('')
+    if (task?.accuracy_report) {
+      setShowAccuracyReportModal(true)
+      return
+    }
+    void handleGenerateAccuracyReport()
   }
 
   async function handleConfirm() {
@@ -1250,6 +1356,16 @@ export default function PricingTaskDetailPage() {
             {quotaHitStats.manualCount === 0 && (
               <div className="mt-1 text-right text-xs text-gray-400">暂无人工套定额对比数据</div>
             )}
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={handleOpenAccuracyReport}
+                disabled={accuracyReportGenerating || quotaHitStats.evaluatedItemCount === 0 || quotaHitStats.manualCount === 0}
+                className="rounded border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {accuracyReportGenerating ? '生成中...' : task.accuracy_report ? '查看准确性报告' : '生成准确性报告'}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1667,67 +1783,6 @@ export default function PricingTaskDetailPage() {
                           </div>
                         )}
                       </div>
-                      <div className="mt-3 rounded border border-purple-200 bg-white/70 px-3 py-2 text-xs">
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <div className="font-semibold text-purple-900">智能组价准确性分析报告</div>
-                            <div className="mt-0.5 text-gray-500">由大模型分析智能组价与人工对比工程的差异原因。</div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => void handleGenerateAccuracyReport()}
-                            disabled={!currentResult.runId || currentResult.accuracyReportGenerating}
-                            className="shrink-0 rounded border border-purple-200 bg-purple-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-purple-700 disabled:opacity-50"
-                          >
-                            {currentResult.accuracyReportGenerating ? '生成中...' : currentResult.accuracyReport ? '重新生成' : '生成报告'}
-                          </button>
-                        </div>
-                        {currentResult.accuracyReportError && (
-                          <div className="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-red-700">
-                            {currentResult.accuracyReportError}
-                          </div>
-                        )}
-                        {currentResult.accuracyReport && (
-                          <div className="mt-3 space-y-2 text-gray-700">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="rounded bg-purple-100 px-2 py-0.5 font-semibold text-purple-800">
-                                准确性：{currentResult.accuracyReport.accuracy_level}
-                              </span>
-                              {currentResult.accuracyReport.accuracy_rate != null && (
-                                <span className="text-gray-500">
-                                  命中率 {(currentResult.accuracyReport.accuracy_rate * 100).toFixed(1)}%
-                                </span>
-                              )}
-                            </div>
-                            <p className="leading-5">{currentResult.accuracyReport.summary}</p>
-                            {currentResult.accuracyReport.key_findings.length > 0 && (
-                              <div>
-                                <div className="mb-1 font-semibold text-gray-900">关键发现</div>
-                                <ul className="list-disc space-y-0.5 pl-4">
-                                  {currentResult.accuracyReport.key_findings.map((item, i) => <li key={i}>{item}</li>)}
-                                </ul>
-                              </div>
-                            )}
-                            {currentResult.accuracyReport.missed_analysis && (
-                              <div><span className="font-semibold text-gray-900">遗漏分析：</span>{currentResult.accuracyReport.missed_analysis}</div>
-                            )}
-                            {currentResult.accuracyReport.extra_analysis && (
-                              <div><span className="font-semibold text-gray-900">额外分析：</span>{currentResult.accuracyReport.extra_analysis}</div>
-                            )}
-                            {currentResult.accuracyReport.business_recommendations.length > 0 && (
-                              <div>
-                                <div className="mb-1 font-semibold text-gray-900">复核建议</div>
-                                <ul className="list-disc space-y-0.5 pl-4">
-                                  {currentResult.accuracyReport.business_recommendations.map((item, i) => <li key={i}>{item}</li>)}
-                                </ul>
-                              </div>
-                            )}
-                            {currentResult.accuracyReport.conclusion && (
-                              <div><span className="font-semibold text-gray-900">结论：</span>{currentResult.accuracyReport.conclusion}</div>
-                            )}
-                          </div>
-                        )}
-                      </div>
                     </section>
                   )}
 
@@ -1838,6 +1893,45 @@ export default function PricingTaskDetailPage() {
         </div>
         <SelectedItemResultPanel item={selectedItem} result={currentResult} />
       </div>
+      {showAccuracyReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+          <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-5 py-4">
+              <div>
+                <div className="text-base font-semibold text-gray-900">智能组价全集准确性分析报告</div>
+                <div className="mt-0.5 text-xs text-gray-500">基于当前任务下所有清单最新组价结果与人工对比工程生成。</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateAccuracyReport()}
+                  disabled={accuracyReportGenerating}
+                  className="rounded border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50"
+                >
+                  {accuracyReportGenerating ? '生成中...' : '重新生成'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAccuracyReportModal(false)}
+                  className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div className="overflow-y-auto p-5">
+              {accuracyReportGenerating && !task.accuracy_report ? (
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-10 text-center text-sm text-gray-500">
+                  正在生成任务全集准确性分析报告...
+                </div>
+              ) : (
+                <AccuracyReportPanel report={task.accuracy_report} error={accuracyReportError} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {editingFeatureItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 px-4" onClick={() => !featureSaving && closeFeatureEditor()}>
           <div className="w-full max-w-5xl rounded-lg bg-white shadow-2xl" onClick={event => event.stopPropagation()}>

@@ -34,7 +34,7 @@ function StatPill({ label, value }: { label: string; value: number | string }) {
   )
 }
 
-function ManagementCards({ active }: { active: 'library' | 'prompts' }) {
+function ManagementCards({ active }: { active: 'library' | 'prompts' | 'conversionRules' }) {
   const cards = [
     {
       key: 'library',
@@ -50,10 +50,17 @@ function ManagementCards({ active }: { active: 'library' | 'prompts' }) {
       description: '只查看 tdek_tzhhs 中存在实际值提示的定额，按定额库筛选和分页查询。',
       stat: 'tdek_tzhhs',
     },
+    {
+      key: 'conversionRules',
+      href: '/quota-conversion-rules',
+      title: '换算说明',
+      description: '只查看 TDEK_TZNHS 中存在换算说明的定额，集中核查提示、说明和分组。',
+      stat: 'TDEK_TZNHS',
+    },
   ] as const
 
   return (
-    <div className="mt-4 grid gap-3 border-t border-gray-100 pt-4 md:grid-cols-2">
+    <div className="mt-4 grid gap-3 border-t border-gray-100 pt-4 md:grid-cols-3">
       {cards.map(card => {
         const selected = active === card.key
         return (

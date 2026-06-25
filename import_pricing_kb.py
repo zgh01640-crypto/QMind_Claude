@@ -524,70 +524,12 @@ def normalize_unit(value: str | None) -> str:
 
 
 def link_targets(pg, source_hash: str) -> dict[str, int]:
+    # The imported pricing knowledge base now stands alone. Do not link it to
+    # bs2024_subitems, because that authoritative quota library is no longer
+    # part of smart pricing.
     with pg.cursor() as cur:
-        cur.execute("SELECT to_regclass('public.bs2024_subitems')")
-        if cur.fetchone()[0] is None:
-            return {"matched": 0, "review": 0, "unmatched": 0}
-        cur.execute(
-            """
-            WITH target AS (
-                SELECT DISTINCT ON (subitem_code)
-                       id, subitem_code, COALESCE(subitem_name, '') AS subitem_name,
-                       COALESCE(variant_desc, '') AS variant_desc, unit
-                FROM bs2024_subitems
-                ORDER BY subitem_code, document_id DESC, id DESC
-            )
-            SELECT k.dekid, k.id, k.zmbh, k.zmmc, k.dw,
-                   b.id, b.subitem_name, b.variant_desc, b.unit
-            FROM tdek_tdezm k
-            LEFT JOIN target b ON b.subitem_code = k.zmbh
-            WHERE k.dekid = 1020109
-              AND k.source_file_sha256 = %s
-            """,
-            (source_hash,),
-        )
-        values = []
-        counts = {"matched": 0, "review": 0, "unmatched": 0}
-        for dekid, dezmid, code, name, unit, bid, sub_name, variant, b_unit in cur.fetchall():
-            if bid is None:
-                status = "unmatched"
-                message = "No bs2024_subitems record with the same subitem code"
-                score = 0
-            else:
-                target_name = " ".join(part for part in [sub_name, variant] if part).strip()
-                name_ok = normalize_name(name) == normalize_name(target_name)
-                unit_ok = normalize_unit(unit) == normalize_unit(b_unit)
-                status = "matched" if name_ok and unit_ok else "review"
-                message = "" if status == "matched" else f"name_ok={name_ok}; unit_ok={unit_ok}"
-                score = 1 if status == "matched" else 0.5
-            counts[status] += 1
-            values.append((
-                dekid, dezmid, "bs2024_subitems", bid, status, "code_exact",
-                score, message, source_hash,
-                json.dumps({"code": code, "kb_name": name, "kb_unit": unit}, ensure_ascii=False),
-            ))
-        if values:
-            execute_values(
-                cur,
-                """
-                INSERT INTO pricing_kb_original_target_links
-                    (dekid, dezmid, target_table, target_item_id, link_status, link_method,
-                     similarity_score, review_message, source_file_sha256, raw_json)
-                VALUES %s
-                ON CONFLICT (dekid, dezmid, target_table) DO UPDATE SET
-                    target_item_id=EXCLUDED.target_item_id,
-                    link_status=EXCLUDED.link_status,
-                    link_method=EXCLUDED.link_method,
-                    similarity_score=EXCLUDED.similarity_score,
-                    review_message=EXCLUDED.review_message,
-                    source_file_sha256=EXCLUDED.source_file_sha256,
-                    raw_json=EXCLUDED.raw_json,
-                    updated_at=NOW()
-                """,
-                values,
-                page_size=5000,
-            )
-        return counts
+        cur.execute("DELETE FROM pricing_kb_original_target_links WHERE target_table='bs2024_subitems'")
+    return {"matched": 0, "review": 0, "unmatched": 0}
 
 
 def resolve_source(path: Path) -> Path:

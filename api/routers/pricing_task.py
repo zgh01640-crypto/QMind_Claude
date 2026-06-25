@@ -70,6 +70,7 @@ def _ensure_schema(conn):
                 quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
                 legacy_local_id     TEXT UNIQUE,
+                accuracy_report     JSONB,
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
                 created_at          TIMESTAMP DEFAULT NOW(),
                 updated_at          TIMESTAMP DEFAULT NOW()
@@ -177,6 +178,7 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_confirmed_at TIMESTAMP")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resources JSONB")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resource_changes JSONB")
+        cur.execute("ALTER TABLE pricing_tasks ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
@@ -1190,6 +1192,103 @@ def _generate_accuracy_report(
     return _normalize_accuracy_report(raw, evaluation)
 
 
+def _normalize_task_accuracy_report(raw: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+    def text(key: str, default: str = "") -> str:
+        value = raw.get(key)
+        if isinstance(value, list):
+            return "；".join(str(item).strip() for item in value if str(item).strip())
+        return str(value or default).strip()
+
+    def text_list(key: str, limit: int = 12) -> list[str]:
+        value = raw.get(key)
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value[:limit] if str(item).strip()]
+
+    level = text("accuracy_level", "待复核")
+    if level not in {"高", "中", "低", "待复核"}:
+        level = "待复核"
+    return {
+        "summary": text("summary", "暂无分析摘要。"),
+        "accuracy_level": level,
+        "accuracy_rate": metrics.get("hit_rate"),
+        "metrics": metrics,
+        "key_findings": text_list("key_findings"),
+        "matched_analysis": text("matched_analysis"),
+        "missed_analysis": text("missed_analysis"),
+        "extra_analysis": text("extra_analysis"),
+        "risk_items": text_list("risk_items"),
+        "representative_examples": text_list("representative_examples"),
+        "business_recommendations": text_list("business_recommendations"),
+        "conclusion": text("conclusion"),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+def _generate_task_accuracy_report(task: dict[str, Any], items: list[dict[str, Any]], metrics: dict[str, Any]) -> dict[str, Any]:
+    compact_items = []
+    for item in items:
+        evaluation = item.get("evaluation") or {}
+        quota_match = item.get("quota_match") or {}
+        compact_items.append(
+            {
+                "清单编码": item.get("item_code"),
+                "清单名称": item.get("item_name"),
+                "项目特征": item.get("item_description"),
+                "智能定额": [
+                    {
+                        "编码": match.get("zmbh"),
+                        "名称": match.get("zmmc"),
+                        "置信度": match.get("confidence"),
+                        "理由": match.get("match_reason"),
+                    }
+                    for match in (quota_match.get("matches", []) if isinstance(quota_match, dict) else [])
+                ],
+                "人工定额": evaluation.get("manual_quotas", []) if isinstance(evaluation, dict) else [],
+                "命中": evaluation.get("hit_codes", []) if isinstance(evaluation, dict) else [],
+                "遗漏": evaluation.get("missed_codes", []) if isinstance(evaluation, dict) else [],
+                "额外": evaluation.get("extra_codes", []) if isinstance(evaluation, dict) else [],
+                "组合换算": item.get("conversion_check") or {},
+                "系数换算": item.get("coefficient_check") or {},
+            }
+        )
+    payload = {
+        "任务": task,
+        "总体指标": metrics,
+        "清单明细": compact_items,
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是资深造价复核专家。请对一个组价任务下全部清单的智能组价结果与人工对比工程结果做整体准确性分析。"
+                "只基于输入数据，不编造定额。重点分析整体命中率、遗漏定额原因、额外定额原因、风险清单类型，"
+                "并给出哪些结果可采纳、哪些需要人工复核。请输出合法 JSON。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请按以下 JSON 结构输出："
+                "{summary, accuracy_level, key_findings, matched_analysis, missed_analysis, extra_analysis, "
+                "risk_items, representative_examples, business_recommendations, conclusion}。"
+                "accuracy_level 只能是 高/中/低/待复核；其余数组字段输出字符串数组。"
+                f"\n\n输入数据：\n{_json_dumps(payload)}"
+            ),
+        },
+    ]
+    resp = _client(thinking=False).chat.completions.create(
+        model=_model(),
+        messages=messages,
+        response_format={"type": "json_object"},
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=6000,
+        stream=False,
+    )
+    raw = _parse_json_content(resp.choices[0].message.content)
+    return _normalize_task_accuracy_report(raw, metrics)
+
+
 def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     with conn.cursor() as cur:
         cur.execute(
@@ -2023,7 +2122,6 @@ def _update_run(conn, run_id: int, **fields: Any) -> None:
             "evaluation",
             "conversion_check",
             "coefficient_check",
-            "accuracy_report",
             "step_timings",
         } else value)
     values.append(run_id)
@@ -2345,7 +2443,7 @@ def _stream_pricing_item(
 
 
 def _row_to_task(row) -> dict[str, Any]:
-    ids = row[5] or []
+    ids = row[6] or []
     return {
         "id": row[0],
         "name": row[1],
@@ -2359,6 +2457,7 @@ def _row_to_task(row) -> dict[str, Any]:
         "legacy_local_id": row[8],
         "created_at": row[9],
         "latest_run_count": row[10],
+        "accuracy_report": row[11] if len(row) > 11 else None,
     }
 
 
@@ -2397,6 +2496,7 @@ def list_pricing_tasks():
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
+                       , t.accuracy_report
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
@@ -2489,6 +2589,7 @@ def get_pricing_task(task_id: int):
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
+                       , t.accuracy_report
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
@@ -2949,7 +3050,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
             cur.execute(
                 """
                 SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
-                       quota_match, evaluation, conversion_check, coefficient_check, accuracy_report,
+                       quota_match, evaluation, conversion_check, coefficient_check,
                        step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s AND boq_item_id=%s
@@ -2971,12 +3072,11 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "evaluation": r[7],
                 "conversion_check": _hydrate_conversion_combo_resources(conn, r[8]),
                 "coefficient_check": r[9],
-                "accuracy_report": r[10],
-                "step_timings": r[11],
-                "error_message": r[12],
-                "created_at": r[13],
-                "finished_at": r[14],
-                "reasoning_text": r[15],
+                "step_timings": r[10],
+                "error_message": r[11],
+                "created_at": r[12],
+                "finished_at": r[13],
+                "reasoning_text": r[14],
                 "confirmed_results": confirmed_results.get(int(r[0]), []),
             }
             for r in rows
@@ -3001,7 +3101,7 @@ def list_latest_task_runs(task_id: int):
                 SELECT DISTINCT ON (boq_item_id)
                        boq_item_id, id, status, code_check, feature_check, work_procedures,
                        quota_candidates, quota_match, evaluation, conversion_check, coefficient_check,
-                       accuracy_report, step_timings, error_message, created_at, finished_at, reasoning_text
+                       step_timings, error_message, created_at, finished_at, reasoning_text
                 FROM pricing_task_runs
                 WHERE task_id=%s
                 ORDER BY boq_item_id, created_at DESC, id DESC
@@ -3024,12 +3124,11 @@ def list_latest_task_runs(task_id: int):
                     "evaluation": r[8],
                     "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
                     "coefficient_check": r[10],
-                    "accuracy_report": r[11],
-                    "step_timings": r[12],
-                    "error_message": r[13],
-                    "created_at": r[14],
-                    "finished_at": r[15],
-                    "reasoning_text": r[16],
+                    "step_timings": r[11],
+                    "error_message": r[12],
+                    "created_at": r[13],
+                    "finished_at": r[14],
+                    "reasoning_text": r[15],
                     "confirmed_results": confirmed_results.get(int(r[1]), []),
                 },
             }
@@ -3107,8 +3206,8 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-@router.post("/pricing-task-runs/{run_id}/accuracy-report")
-def generate_pricing_task_accuracy_report(run_id: int):
+@router.post("/pricing-tasks/{task_id}/accuracy-report")
+def generate_pricing_task_accuracy_report(task_id: int):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3117,36 +3216,86 @@ def generate_pricing_task_accuracy_report(run_id: int):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT r.id, r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
+                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id, mp.project_name
+                FROM pricing_tasks t
+                JOIN boq_projects p ON p.id = t.boq_project_id
+                LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
+                WHERE t.id=%s AND t.status <> 'deleted'
+                """,
+                (task_id,),
+            )
+            task_row = cur.fetchone()
+            if not task_row:
+                raise HTTPException(status_code=404, detail="task not found")
+            cur.execute(
+                """
+                SELECT DISTINCT ON (r.boq_item_id)
+                       r.id, r.boq_item_id, r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
                        i.item_code, i.item_name, i.item_description, i.unit, i.quantity
                 FROM pricing_task_runs r
                 JOIN boq_items i ON i.id = r.boq_item_id
-                WHERE r.id=%s
+                WHERE r.task_id=%s
+                ORDER BY r.boq_item_id, r.created_at DESC, r.id DESC
                 """,
-                (run_id,),
+                (task_id,),
             )
-            row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="run not found")
-        quota_match = row[1] or {}
-        evaluation = row[2] or {}
-        if not isinstance(evaluation, dict) or "manual_quotas" not in evaluation:
-            raise HTTPException(status_code=400, detail="run has no manual comparison evaluation")
-        boq_item = {
-            "item_code": row[5],
-            "item_name": row[6],
-            "item_description": row[7] or "",
-            "unit": row[8] or "",
-            "quantity": float(row[9]) if row[9] is not None else None,
+            rows = cur.fetchall()
+        task = {
+            "id": task_row[0],
+            "name": task_row[1],
+            "boq_project_id": task_row[2],
+            "project_name": task_row[3],
+            "manual_project_id": task_row[4],
+            "manual_project_name": task_row[5],
         }
-        report = _generate_accuracy_report(
-            boq_item,
-            quota_match if isinstance(quota_match, dict) else {},
-            evaluation,
-            _hydrate_conversion_combo_resources(conn, row[3]) if isinstance(row[3], dict) else row[3],
-            row[4] if isinstance(row[4], dict) else row[4],
-        )
-        _update_run(conn, run_id, accuracy_report=report)
+        items = []
+        metrics = {
+            "total_items": len(rows),
+            "evaluated_item_count": 0,
+            "exact_item_count": 0,
+            "hit_count": 0,
+            "missed_count": 0,
+            "extra_count": 0,
+            "manual_count": 0,
+            "ai_count": 0,
+            "hit_rate": None,
+        }
+        for row in rows:
+            quota_match = row[2] if isinstance(row[2], dict) else {}
+            evaluation = row[3] if isinstance(row[3], dict) else {}
+            if "manual_quotas" in evaluation:
+                metrics["evaluated_item_count"] += 1
+                metrics["hit_count"] += int(evaluation.get("hit_count") or 0)
+                metrics["missed_count"] += int(evaluation.get("missed_count") or 0)
+                metrics["extra_count"] += int(evaluation.get("extra_count") or 0)
+                metrics["manual_count"] += int(evaluation.get("manual_count") or 0)
+                metrics["ai_count"] += int(evaluation.get("ai_count") or 0)
+                if int(evaluation.get("manual_count") or 0) > 0 and int(evaluation.get("missed_count") or 0) == 0 and int(evaluation.get("extra_count") or 0) == 0:
+                    metrics["exact_item_count"] += 1
+            items.append(
+                {
+                    "run_id": row[0],
+                    "boq_item_id": row[1],
+                    "quota_match": quota_match,
+                    "evaluation": evaluation,
+                    "conversion_check": _hydrate_conversion_combo_resources(conn, row[4]) if isinstance(row[4], dict) else row[4],
+                    "coefficient_check": row[5] if isinstance(row[5], dict) else row[5],
+                    "item_code": row[6],
+                    "item_name": row[7],
+                    "item_description": row[8] or "",
+                    "unit": row[9] or "",
+                    "quantity": float(row[10]) if row[10] is not None else None,
+                }
+            )
+        if metrics["evaluated_item_count"] == 0:
+            raise HTTPException(status_code=400, detail="task has no evaluated pricing runs")
+        if metrics["manual_count"] == 0:
+            raise HTTPException(status_code=400, detail="task has no manual comparison data")
+        metrics["hit_rate"] = round(metrics["hit_count"] / metrics["manual_count"], 4) if metrics["manual_count"] else None
+        report = _generate_task_accuracy_report(task, items, metrics)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE pricing_tasks SET accuracy_report=%s, updated_at=NOW() WHERE id=%s", (Json(report, dumps=_json_dumps), task_id))
+        conn.commit()
         return report
     finally:
         conn.close()
