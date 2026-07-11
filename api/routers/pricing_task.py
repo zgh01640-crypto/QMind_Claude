@@ -10,9 +10,11 @@ import json
 import os
 import re
 import sys
+from io import BytesIO
 from datetime import datetime
 from time import perf_counter
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -1231,6 +1233,386 @@ def _generate_task_accuracy_report(task: dict[str, Any], items: list[dict[str, A
     )
     raw = _parse_json_content(resp.choices[0].message.content)
     return _normalize_task_accuracy_report(raw, metrics)
+
+
+def _quota_code(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _quota_hit(ai_code: str, manual_codes: list[str]) -> bool:
+    return bool(ai_code) and any(ai_code in manual_code for manual_code in manual_codes)
+
+
+def _manual_hit(manual_code: str, ai_codes: list[str]) -> bool:
+    return bool(manual_code) and any(ai_code in manual_code for ai_code in ai_codes if ai_code)
+
+
+def _build_item_consistency_report(quota_match: dict[str, Any], evaluation: dict[str, Any]) -> dict[str, Any]:
+    matches = quota_match.get("matches", []) if isinstance(quota_match, dict) else []
+    manual_quotas = evaluation.get("manual_quotas", []) if isinstance(evaluation, dict) else []
+    ai_codes = [_quota_code(item.get("zmbh")) for item in matches if _quota_code(item.get("zmbh"))]
+    manual_codes = [_quota_code(item.get("quota_code")) for item in manual_quotas if _quota_code(item.get("quota_code"))]
+
+    ai_results = []
+    for item in matches:
+        code = _quota_code(item.get("zmbh"))
+        hit = _quota_hit(code, manual_codes)
+        ai_results.append(
+            {
+                "code": code,
+                "name": item.get("zmmc") or "",
+                "unit": item.get("dw") or "",
+                "qty_factor": item.get("qty_factor"),
+                "confidence": item.get("confidence") or "",
+                "match_reason": item.get("match_reason") or "",
+                "in_manual": hit,
+                "analysis": "AI定额在人工套定额中命中。" if hit else "AI定额未在人工套定额中命中，属于额外定额，需复核是否多套或编码口径不一致。",
+            }
+        )
+
+    manual_results = []
+    for item in manual_quotas:
+        code = _quota_code(item.get("quota_code"))
+        hit = _manual_hit(code, ai_codes)
+        manual_results.append(
+            {
+                "code": code,
+                "name": item.get("quota_name") or "",
+                "unit": item.get("quota_unit") or "",
+                "quantity": item.get("quantity"),
+                "qty_factor": item.get("qty_factor"),
+                "in_ai": hit,
+                "analysis": "人工定额已被AI套定额覆盖。" if hit else "人工定额未被AI命中，属于遗漏定额，需复核项目特征、工作内容或候选定额召回。",
+            }
+        )
+
+    missed_count = int(evaluation.get("missed_count") or 0) if isinstance(evaluation, dict) else 0
+    extra_count = int(evaluation.get("extra_count") or 0) if isinstance(evaluation, dict) else 0
+    manual_count = int(evaluation.get("manual_count") or 0) if isinstance(evaluation, dict) else len(manual_codes)
+    hit_count = int(evaluation.get("hit_count") or 0) if isinstance(evaluation, dict) else 0
+    ai_count = int(evaluation.get("ai_count") or 0) if isinstance(evaluation, dict) else len(ai_codes)
+
+    if manual_count == 0:
+        status = "无人工对比"
+        summary = "未配置或未找到人工套定额，无法判断一致性。"
+    elif missed_count == 0 and extra_count == 0:
+        status = "一致"
+        summary = "AI套定额与人工套定额一致。"
+    elif hit_count > 0:
+        status = "部分一致"
+        summary = "AI套定额与人工套定额部分一致，存在遗漏或额外定额。"
+    else:
+        status = "不一致"
+        summary = "AI套定额与人工套定额未形成有效命中。"
+
+    return {
+        "status": status,
+        "summary": summary,
+        "hit_codes": evaluation.get("hit_codes", []) if isinstance(evaluation, dict) else [],
+        "missed_codes": evaluation.get("missed_codes", []) if isinstance(evaluation, dict) else [],
+        "extra_codes": evaluation.get("extra_codes", []) if isinstance(evaluation, dict) else [],
+        "hit_count": hit_count,
+        "missed_count": missed_count,
+        "extra_count": extra_count,
+        "manual_count": manual_count,
+        "ai_count": ai_count,
+        "ai_results": ai_results,
+        "manual_results": manual_results,
+    }
+
+
+def _round_payload(name: str, step_no: int, data: Any, timing: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "step_no": step_no,
+        "name": name,
+        "data": data,
+        "duration_ms": timing.get("duration_ms") if isinstance(timing, dict) else None,
+        "started_at": timing.get("started_at") if isinstance(timing, dict) else None,
+        "finished_at": timing.get("finished_at") if isinstance(timing, dict) else None,
+    }
+
+
+def _build_pricing_task_detail_report(conn, task: dict[str, Any], rows: list[Any]) -> dict[str, Any]:
+    report_items = []
+    metrics = {
+        "total_items": len(rows),
+        "evaluated_item_count": 0,
+        "consistent_item_count": 0,
+        "partial_item_count": 0,
+        "inconsistent_item_count": 0,
+        "no_manual_item_count": 0,
+        "hit_count": 0,
+        "missed_count": 0,
+        "extra_count": 0,
+        "manual_count": 0,
+        "ai_count": 0,
+        "hit_rate": None,
+    }
+
+    for row in rows:
+        (
+            run_id,
+            boq_item_id,
+            status,
+            code_check,
+            feature_check,
+            quota_candidates,
+            quota_match,
+            evaluation,
+            conversion_check,
+            coefficient_check,
+            step_timings,
+            reasoning_text,
+            created_at,
+            finished_at,
+            item_code,
+            item_name,
+            item_description,
+            unit,
+            quantity,
+            item_seq,
+        ) = row
+        code_check = code_check if isinstance(code_check, dict) else {}
+        feature_check = feature_check if isinstance(feature_check, dict) else {}
+        quota_candidates = quota_candidates if isinstance(quota_candidates, dict) else {}
+        quota_match = quota_match if isinstance(quota_match, dict) else {}
+        evaluation = evaluation if isinstance(evaluation, dict) else {}
+        conversion_check = _hydrate_conversion_combo_resources(conn, conversion_check) if isinstance(conversion_check, dict) else conversion_check
+        coefficient_check = coefficient_check if isinstance(coefficient_check, dict) else {}
+        step_timings = step_timings if isinstance(step_timings, dict) else {}
+        consistency = _build_item_consistency_report(quota_match, evaluation)
+
+        if "manual_quotas" in evaluation:
+            metrics["evaluated_item_count"] += 1
+            metrics["hit_count"] += int(consistency["hit_count"] or 0)
+            metrics["missed_count"] += int(consistency["missed_count"] or 0)
+            metrics["extra_count"] += int(consistency["extra_count"] or 0)
+            metrics["manual_count"] += int(consistency["manual_count"] or 0)
+            metrics["ai_count"] += int(consistency["ai_count"] or 0)
+        if consistency["status"] == "一致":
+            metrics["consistent_item_count"] += 1
+        elif consistency["status"] == "部分一致":
+            metrics["partial_item_count"] += 1
+        elif consistency["status"] == "无人工对比":
+            metrics["no_manual_item_count"] += 1
+        else:
+            metrics["inconsistent_item_count"] += 1
+
+        report_items.append(
+            {
+                "run_id": run_id,
+                "boq_item_id": boq_item_id,
+                "status": status,
+                "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+                "finished_at": finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at,
+                "item": {
+                    "id": boq_item_id,
+                    "item_seq": item_seq,
+                    "item_code": item_code,
+                    "item_name": item_name,
+                    "item_description": item_description or "",
+                    "unit": unit or "",
+                    "quantity": float(quantity) if quantity is not None else None,
+                },
+                "rounds": [
+                    _round_payload("编码核查", 1, code_check, step_timings.get("1")),
+                    _round_payload("项目特征", 2, feature_check, step_timings.get("2")),
+                    _round_payload("定额候选", 3, quota_candidates, step_timings.get("3")),
+                    _round_payload("AI套定额结果", 4, quota_match, step_timings.get("4")),
+                    _round_payload("人工套定额对比", 5, evaluation, step_timings.get("5")),
+                    _round_payload("组合换算", 6, conversion_check or {}, step_timings.get("6")),
+                    _round_payload("系数换算", 7, coefficient_check or {}, step_timings.get("7")),
+                ],
+                "ai_quota_results": consistency["ai_results"],
+                "manual_quota_results": consistency["manual_results"],
+                "consistency": consistency,
+                "reasoning_text": reasoning_text or "",
+            }
+        )
+
+    if metrics["manual_count"]:
+        metrics["hit_rate"] = round(metrics["hit_count"] / metrics["manual_count"], 4)
+
+    return {
+        "task": task,
+        "metrics": metrics,
+        "items": report_items,
+        "generated_at": datetime.now().isoformat(),
+    }
+
+
+def _join_quota_values(items: list[dict[str, Any]], key: str) -> str:
+    return "\n".join(str(item.get(key) or "").strip() for item in items if str(item.get(key) or "").strip())
+
+
+def _append_report_summary_sheet(wb, report: dict[str, Any]) -> None:
+    ws = wb.active
+    ws.title = "汇总"
+    task = report.get("task") or {}
+    metrics = report.get("metrics") or {}
+    rows = [
+        ("任务ID", task.get("id")),
+        ("任务名称", task.get("name")),
+        ("组价工程", task.get("project_name")),
+        ("人工对比工程", task.get("manual_project_name")),
+        ("生成时间", report.get("generated_at")),
+        ("清单数", metrics.get("total_items")),
+        ("已对比清单数", metrics.get("evaluated_item_count")),
+        ("一致清单数", metrics.get("consistent_item_count")),
+        ("部分一致清单数", metrics.get("partial_item_count")),
+        ("不一致清单数", metrics.get("inconsistent_item_count")),
+        ("无人工对比清单数", metrics.get("no_manual_item_count")),
+        ("AI定额数", metrics.get("ai_count")),
+        ("人工定额数", metrics.get("manual_count")),
+        ("命中定额数", metrics.get("hit_count")),
+        ("遗漏定额数", metrics.get("missed_count")),
+        ("额外定额数", metrics.get("extra_count")),
+        ("命中率", metrics.get("hit_rate")),
+    ]
+    ws.append(["指标", "值"])
+    for row in rows:
+        ws.append(list(row))
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 80
+
+
+def _append_report_item_sheet(wb, report: dict[str, Any]) -> None:
+    ws = wb.create_sheet("清单对比")
+    ws.append(
+        [
+            "序号",
+            "清单编码",
+            "清单名称",
+            "项目特征",
+            "单位",
+            "工程量",
+            "AI定额编码",
+            "AI定额名称",
+            "人工定额编码",
+            "人工定额名称",
+            "一致性状态",
+            "一致性分析",
+            "命中编码",
+            "遗漏编码",
+            "额外编码",
+        ]
+    )
+    for index, item in enumerate(report.get("items") or [], start=1):
+        boq = item.get("item") or {}
+        consistency = item.get("consistency") or {}
+        ai_items = item.get("ai_quota_results") or []
+        manual_items = item.get("manual_quota_results") or []
+        ws.append(
+            [
+                index,
+                boq.get("item_code"),
+                boq.get("item_name"),
+                boq.get("item_description"),
+                boq.get("unit"),
+                boq.get("quantity"),
+                _join_quota_values(ai_items, "code"),
+                _join_quota_values(ai_items, "name"),
+                _join_quota_values(manual_items, "code"),
+                _join_quota_values(manual_items, "name"),
+                consistency.get("status"),
+                consistency.get("summary"),
+                "\n".join(consistency.get("hit_codes") or []),
+                "\n".join(consistency.get("missed_codes") or []),
+                "\n".join(consistency.get("extra_codes") or []),
+            ]
+        )
+    widths = [8, 18, 28, 48, 10, 14, 24, 42, 24, 42, 14, 42, 24, 24, 24]
+    for col, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+
+
+def _append_report_quota_sheet(wb, report: dict[str, Any]) -> None:
+    ws = wb.create_sheet("定额明细")
+    ws.append(
+        [
+            "序号",
+            "清单编码",
+            "清单名称",
+            "来源",
+            "定额编码",
+            "定额名称",
+            "单位",
+            "工程量/系数",
+            "置信度",
+            "是否命中",
+            "分析",
+            "匹配理由",
+        ]
+    )
+    row_no = 1
+    for item in report.get("items") or []:
+        boq = item.get("item") or {}
+        for quota in item.get("ai_quota_results") or []:
+            row_no += 1
+            ws.append(
+                [
+                    row_no - 1,
+                    boq.get("item_code"),
+                    boq.get("item_name"),
+                    "AI",
+                    quota.get("code"),
+                    quota.get("name"),
+                    quota.get("unit"),
+                    quota.get("qty_factor"),
+                    quota.get("confidence"),
+                    "是" if quota.get("in_manual") else "否",
+                    quota.get("analysis"),
+                    quota.get("match_reason"),
+                ]
+            )
+        for quota in item.get("manual_quota_results") or []:
+            row_no += 1
+            ws.append(
+                [
+                    row_no - 1,
+                    boq.get("item_code"),
+                    boq.get("item_name"),
+                    "人工",
+                    quota.get("code"),
+                    quota.get("name"),
+                    quota.get("unit"),
+                    quota.get("quantity") if quota.get("quantity") is not None else quota.get("qty_factor"),
+                    "",
+                    "是" if quota.get("in_ai") else "否",
+                    quota.get("analysis"),
+                    "",
+                ]
+            )
+    widths = [8, 18, 28, 10, 18, 42, 10, 14, 12, 10, 48, 48]
+    for col, width in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
+
+
+def _build_pricing_task_detail_report_excel(report: dict[str, Any]) -> BytesIO:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = Workbook()
+    _append_report_summary_sheet(wb, report)
+    _append_report_item_sheet(wb, report)
+    _append_report_quota_sheet(wb, report)
+
+    header_fill = PatternFill("solid", fgColor="E5E7EB")
+    for ws in wb.worksheets:
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return stream
 
 
 def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -3230,6 +3612,73 @@ def generate_pricing_task_accuracy_report(task_id: int):
         return report
     finally:
         conn.close()
+
+
+@router.get("/pricing-tasks/{task_id}/detail-report")
+def get_pricing_task_detail_report(task_id: int):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.id, t.name, t.boq_project_id, p.project_name, t.manual_project_id, mp.project_name,
+                       t.quota_library_ids
+                FROM pricing_tasks t
+                JOIN boq_projects p ON p.id = t.boq_project_id
+                LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
+                WHERE t.id=%s AND t.status <> 'deleted'
+                """,
+                (task_id,),
+            )
+            task_row = cur.fetchone()
+            if not task_row:
+                raise HTTPException(status_code=404, detail="task not found")
+            cur.execute(
+                """
+                SELECT DISTINCT ON (r.boq_item_id)
+                       r.id, r.boq_item_id, r.status, r.code_check, r.feature_check,
+                       r.quota_candidates, r.quota_match, r.evaluation, r.conversion_check,
+                       r.coefficient_check, r.step_timings, r.reasoning_text, r.created_at, r.finished_at,
+                       i.item_code, i.item_name, i.item_description, i.unit, i.quantity, i.item_seq
+                FROM pricing_task_runs r
+                JOIN boq_items i ON i.id = r.boq_item_id
+                WHERE r.task_id=%s
+                ORDER BY r.boq_item_id, r.created_at DESC, r.id DESC
+                """,
+                (task_id,),
+            )
+            rows = cur.fetchall()
+        task = {
+            "id": task_row[0],
+            "name": task_row[1],
+            "boq_project_id": task_row[2],
+            "project_name": task_row[3],
+            "manual_project_id": task_row[4],
+            "manual_project_name": task_row[5],
+            "quota_library_ids": task_row[6] or [],
+        }
+        return _build_pricing_task_detail_report(conn, task, rows)
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-tasks/{task_id}/detail-report/export")
+def export_pricing_task_detail_report(task_id: int):
+    report = get_pricing_task_detail_report(task_id)
+    stream = _build_pricing_task_detail_report_excel(report)
+    task_name = str((report.get("task") or {}).get("name") or f"task-{task_id}")
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", task_name).strip() or f"task-{task_id}"
+    filename = f"单条组价明细报表-{safe_name}.xlsx"
+    quoted = quote(filename)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"}
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 @router.post("/pricing-task-runs/{run_id}/conversion-check-stream")

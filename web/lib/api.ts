@@ -1401,6 +1401,91 @@ export interface PricingTaskAccuracyReport {
   generated_at: string
 }
 
+export interface PricingTaskDetailReportQuota {
+  code: string
+  name: string
+  unit?: string
+  qty_factor?: number | null
+  quantity?: number | null
+  confidence?: string
+  match_reason?: string
+  in_manual?: boolean
+  in_ai?: boolean
+  analysis: string
+}
+
+export interface PricingTaskDetailReportRound {
+  step_no: number
+  name: string
+  data: any
+  duration_ms: number | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface PricingTaskDetailReportItem {
+  run_id: number
+  boq_item_id: number
+  status: string
+  created_at: string | null
+  finished_at: string | null
+  item: {
+    id: number
+    item_seq?: number | null
+    item_code: string
+    item_name: string
+    item_description: string
+    unit: string
+    quantity: number | null
+  }
+  rounds: PricingTaskDetailReportRound[]
+  ai_quota_results: PricingTaskDetailReportQuota[]
+  manual_quota_results: PricingTaskDetailReportQuota[]
+  consistency: {
+    status: string
+    summary: string
+    hit_codes: string[]
+    missed_codes: string[]
+    extra_codes: string[]
+    hit_count: number
+    missed_count: number
+    extra_count: number
+    manual_count: number
+    ai_count: number
+    ai_results: PricingTaskDetailReportQuota[]
+    manual_results: PricingTaskDetailReportQuota[]
+  }
+  reasoning_text: string
+}
+
+export interface PricingTaskDetailReport {
+  task: {
+    id: number
+    name: string
+    boq_project_id: number
+    project_name: string
+    manual_project_id: number | null
+    manual_project_name?: string | null
+    quota_library_ids: number[]
+  }
+  metrics: {
+    total_items: number
+    evaluated_item_count: number
+    consistent_item_count: number
+    partial_item_count: number
+    inconsistent_item_count: number
+    no_manual_item_count: number
+    hit_count: number
+    missed_count: number
+    extra_count: number
+    manual_count: number
+    ai_count: number
+    hit_rate: number | null
+  }
+  items: PricingTaskDetailReportItem[]
+  generated_at: string
+}
+
 export interface PricingTaskStepTiming {
   step_no: number
   name: string
@@ -1643,6 +1728,19 @@ export async function rejectPricingTaskRun(runId: number) {
 
 export async function generatePricingTaskAccuracyReport(taskId: number) {
   return req<PricingTaskAccuracyReport>(`/api/pricing-tasks/${taskId}/accuracy-report`, { method: 'POST' })
+}
+
+export async function fetchPricingTaskDetailReport(taskId: number) {
+  return req<PricingTaskDetailReport>(`/api/pricing-tasks/${taskId}/detail-report`)
+}
+
+export async function exportPricingTaskDetailReportExcel(taskId: number) {
+  const response = await fetch(`${API}/api/pricing-tasks/${taskId}/detail-report/export`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.detail || `请求失败 ${response.status}`)
+  }
+  return response.blob()
 }
 
 export async function streamPricingTaskItem(
