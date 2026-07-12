@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from psycopg2.extras import execute_values
 
 from db.connection import get_connection
+from db.pricing_kb_versions import apply_version_schema
 
 
 SCHEMA_PATH = Path(__file__).parent / "db" / "schema_pricing_kb_original.sql"
@@ -94,20 +95,140 @@ def inspect_sqlite(source: Path) -> dict[str, Any]:
         conn.close()
 
 
+def sqlite_schema_signature(source: Path) -> str:
+    conn = sqlite_connect(source)
+    try:
+        schema: dict[str, list[tuple[str, str, int]]] = {}
+        cur = conn.cursor()
+        for table in SQLITE_TABLES:
+            schema[table] = [
+                (str(row[1]), str(row[2]), int(row[3]))
+                for row in cur.execute(f"PRAGMA table_info({table})")
+            ]
+        payload = json.dumps(schema, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+    finally:
+        conn.close()
+
+
+def validate_sqlite_relations(source: Path) -> dict[str, int]:
+    conn = sqlite_connect(source)
+    try:
+        cur = conn.cursor()
+        def keys(query: str) -> tuple[set[tuple[Any, ...]], int]:
+            seen: set[tuple[Any, ...]] = set()
+            duplicates = 0
+            for row in cur.execute(query):
+                key = tuple(row)
+                if key in seen:
+                    duplicates += 1
+                else:
+                    seen.add(key)
+            return seen, duplicates
+
+        _, duplicate_libraries = keys("SELECT ID FROM TLibs")
+        _, duplicate_boq_chapters = keys("SELECT QDKID,ID FROM TQDK_TZJMC")
+        _, duplicate_quota_chapters = keys("SELECT DEKID,ID FROM TDEK_TZJMC")
+        boq_items, duplicate_boq_items = keys("SELECT QDKID,ID FROM TQDK_TQDZM")
+        quota_items, duplicate_quota_items = keys("SELECT DEKID,ID FROM TDEK_TDEZM")
+
+        orphan_candidate_boq = 0
+        orphan_candidate_quota = 0
+        for row in cur.execute("SELECT QDKID,QDZMID,DEKID,DEZMID FROM TQDK_TQDZY"):
+            orphan_candidate_boq += (row[0], row[1]) not in boq_items
+            orphan_candidate_quota += (row[2], row[3]) not in quota_items
+
+        def orphan_count(query: str) -> int:
+            return sum(tuple(row) not in quota_items for row in cur.execute(query))
+
+        return {
+            "duplicate_libraries": duplicate_libraries,
+            "duplicate_boq_chapters": duplicate_boq_chapters,
+            "duplicate_quota_chapters": duplicate_quota_chapters,
+            "duplicate_boq_items": duplicate_boq_items,
+            "duplicate_quota_items": duplicate_quota_items,
+            "orphan_candidate_boq": orphan_candidate_boq,
+            "orphan_candidate_quota": orphan_candidate_quota,
+            "orphan_resources": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZMGC"),
+            "orphan_conversion_rules": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZHHS"),
+            "orphan_coefficient_rules": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZNHS"),
+        }
+    finally:
+        conn.close()
+
+
 def apply_schema(pg) -> None:
     with pg.cursor() as cur:
         cur.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+    pg.commit()
+    apply_version_schema(pg)
 
 
-def insert_run(pg, source: Path, source_hash: str) -> int:
+def begin_version(pg, source: Path, source_hash: str, inspection: dict[str, Any]) -> tuple[int, bool]:
+    """Return the immutable version id and whether it needs importing."""
+    with pg.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext('pricing_kb_import'))")
+        cur.execute(
+            "SELECT id, status FROM pricing_kb_versions WHERE source_file_sha256=%s FOR UPDATE",
+            (source_hash,),
+        )
+        row = cur.fetchone()
+        if row and row[1] in {"validated", "active", "retired"}:
+            return int(row[0]), False
+        if row:
+            version_id = int(row[0])
+            cur.execute(
+                """
+                UPDATE pricing_kb_versions
+                SET source_file=%s, status='importing', schema_signature=%s,
+                    table_counts=%s::jsonb, validation_report='{}'::jsonb,
+                    error_message=NULL, updated_at=NOW()
+                WHERE id=%s
+                """,
+                (
+                    str(source),
+                    sqlite_schema_signature(source),
+                    json.dumps(inspection, ensure_ascii=False),
+                    version_id,
+                ),
+            )
+            return version_id, True
+        cur.execute(
+            """
+            INSERT INTO pricing_kb_versions(
+                source_file, source_file_sha256, status, schema_signature, table_counts
+            )
+            VALUES (%s, %s, 'importing', %s, %s::jsonb)
+            RETURNING id
+            """,
+            (
+                str(source),
+                source_hash,
+                sqlite_schema_signature(source),
+                json.dumps(inspection, ensure_ascii=False),
+            ),
+        )
+        return int(cur.fetchone()[0]), True
+
+
+def clear_version_rows(pg, version_id: int) -> None:
+    with pg.cursor() as cur:
+        for table in [
+            "tqdk_tqdzy", "tdek_tzhhs", "tdek_tznhs", "tdek_tzmgc",
+            "tdek_tdezm", "tqdk_tqdzm", "tdek_tzjmc", "tqdk_tzjmc", "tlibs",
+        ]:
+            cur.execute(f"DELETE FROM {table} WHERE kb_version_id=%s", (version_id,))
+
+
+def insert_run(pg, source: Path, source_hash: str, version_id: int) -> int:
     with pg.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO pricing_kb_import_runs (source_file, source_file_sha256, status)
-            VALUES (%s, %s, 'running')
+            INSERT INTO pricing_kb_import_runs (source_file, source_file_sha256, kb_version_id, status)
+            VALUES (%s, %s, %s, 'running')
             RETURNING id
             """,
-            (str(source), source_hash),
+            (str(source), source_hash, version_id),
         )
         return int(cur.fetchone()[0])
 
@@ -125,21 +246,7 @@ def finalize_run(pg, run_id: int, status: str, stats: dict[str, Any], error: str
 
 
 def clear_source(pg, source_hash: str) -> None:
-    with pg.cursor() as cur:
-        cur.execute("DELETE FROM pricing_kb_import_issues WHERE source_file_sha256=%s", (source_hash,))
-        cur.execute("DELETE FROM pricing_kb_original_target_links WHERE source_file_sha256=%s", (source_hash,))
-        for table in [
-            "tqdk_tqdzy",
-            "tdek_tzhhs",
-            "tdek_tznhs",
-            "tdek_tzmgc",
-            "tdek_tdezm",
-            "tqdk_tqdzm",
-            "tdek_tzjmc",
-            "tqdk_tzjmc",
-            "tlibs",
-        ]:
-            cur.execute(f"DELETE FROM {table} WHERE source_file_sha256=%s", (source_hash,))
+    raise RuntimeError("Imported knowledge-base versions are immutable and cannot be cleared")
 
 
 def clear_import_issues(pg, source_hash: str) -> None:
@@ -147,7 +254,7 @@ def clear_import_issues(pg, source_hash: str) -> None:
         cur.execute("DELETE FROM pricing_kb_import_issues WHERE source_file_sha256=%s", (source_hash,))
 
 
-def remove_combo_quota_candidates(pg) -> int:
+def remove_combo_quota_candidates(pg, version_id: int) -> int:
     """Remove candidate relations that point to combo-only quota items."""
     with pg.cursor() as cur:
         cur.execute(
@@ -156,26 +263,34 @@ def remove_combo_quota_candidates(pg) -> int:
             USING tdek_tdezm q
             WHERE q.dekid = cand.dekid
               AND q.id = cand.dezmid
+              AND q.kb_version_id = cand.kb_version_id
+              AND cand.kb_version_id = %s
               AND EXISTS (
                   SELECT 1
                   FROM tdek_tzhhs h
                   WHERE h.dekid = q.dekid
                     AND h.zmbh = q.zmbh
+                    AND h.kb_version_id = q.kb_version_id
               )
-            """
+            """,
+            (version_id,),
         )
         return int(cur.rowcount)
 
 
-def import_source_table(sqlite_cur: sqlite3.Cursor, pg, source_hash: str, source_table: str) -> int:
+def import_source_table(
+    sqlite_cur: sqlite3.Cursor,
+    pg,
+    version_id: int,
+    source_hash: str,
+    source_table: str,
+) -> int:
     pg_table, pg_columns, select_sql = SQLITE_TABLES[source_table]
-    all_columns = pg_columns + ["source_file_sha256", "source_rowid"]
-    update_columns = [c for c in all_columns if c not in {"source_file_sha256", "source_rowid"}]
-    update_sql = ", ".join([f"{c}=EXCLUDED.{c}" for c in update_columns] + ["updated_at=NOW()"])
+    all_columns = pg_columns + ["kb_version_id", "source_file_sha256", "source_rowid"]
     insert_sql = f"""
         INSERT INTO {pg_table} ({", ".join(all_columns)})
         VALUES %s
-        ON CONFLICT (source_file_sha256, source_rowid) DO UPDATE SET {update_sql}
+        ON CONFLICT (source_file_sha256, source_rowid) DO NOTHING
     """
 
     total = 0
@@ -194,7 +309,10 @@ def import_source_table(sqlite_cur: sqlite3.Cursor, pg, source_hash: str, source
             break
         values = []
         for row in rows:
-            values.append(tuple(row[col.upper()] for col in pg_columns) + (source_hash, row["rowid"]))
+            values.append(
+                tuple(row[col.upper()] for col in pg_columns)
+                + (version_id, source_hash, row["rowid"])
+            )
         with pg.cursor() as cur:
             execute_values(cur, insert_sql, values, page_size=10000)
         total += len(rows)
@@ -317,6 +435,11 @@ def validate_replacement_staging(pg, expected_quota: int, expected_prompts: int)
 
 
 def replace_quota_tables(source: Path, should_link: bool) -> dict[str, Any]:
+    raise RuntimeError(
+        "--replace-quota-tables is disabled: import a new immutable version and publish it instead"
+    )
+
+    # Kept temporarily below for migration history; this path is intentionally unreachable.
     source = resolve_source(source).resolve()
     if not source.exists():
         raise FileNotFoundError(source)
@@ -324,6 +447,7 @@ def replace_quota_tables(source: Path, should_link: bool) -> dict[str, Any]:
     inspection = inspect_sqlite(source)
     if inspection["quick_check"] != "ok":
         raise RuntimeError(f"SQLite quick_check failed: {inspection['quick_check']}")
+    relation_validation = validate_sqlite_relations(source)
 
     load_dotenv(".env")
     sqlite_conn = sqlite_connect(source)
@@ -527,8 +651,6 @@ def link_targets(pg, source_hash: str) -> dict[str, int]:
     # The imported pricing knowledge base now stands alone. Do not link it to
     # bs2024_subitems, because that authoritative quota library is no longer
     # part of smart pricing.
-    with pg.cursor() as cur:
-        cur.execute("DELETE FROM pricing_kb_original_target_links WHERE target_table='bs2024_subitems'")
     return {"matched": 0, "review": 0, "unmatched": 0}
 
 
@@ -549,41 +671,85 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
     inspection = inspect_sqlite(source)
     if inspection["quick_check"] != "ok":
         raise RuntimeError(f"SQLite quick_check failed: {inspection['quick_check']}")
+    relation_validation = validate_sqlite_relations(source)
     if report_only:
-        return {"source": str(source), "source_file_sha256": source_hash, **inspection}
+        return {
+            "source": str(source),
+            "source_file_sha256": source_hash,
+            **inspection,
+            "relation_validation": relation_validation,
+        }
 
     load_dotenv(".env")
     sqlite_conn = sqlite_connect(source)
     pg = get_connection()
     run_id: int | None = None
+    version_id: int | None = None
     try:
         apply_schema(pg)
-        if force:
-            clear_source(pg, source_hash)
-        else:
-            clear_import_issues(pg, source_hash)
-        run_id = insert_run(pg, source, source_hash)
+        with pg.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext('pricing_kb_import'))")
+        version_id, needs_import = begin_version(
+            pg, source, source_hash, {**inspection, "relations": relation_validation}
+        )
+        if not needs_import:
+            pg.rollback()
+            return {
+                "version_id": version_id,
+                "source": str(source),
+                "source_file_sha256": source_hash,
+                "status": "already_imported",
+                **inspection,
+            }
+        clear_version_rows(pg, version_id)
+        clear_import_issues(pg, source_hash)
+        run_id = insert_run(pg, source, source_hash, version_id)
         pg.commit()
+        if any(relation_validation.values()):
+            raise RuntimeError(
+                f"knowledge-base relation validation failed: {relation_validation}"
+            )
 
         sqlite_cur = sqlite_conn.cursor()
         imported: dict[str, int] = {}
         for source_table in SQLITE_TABLES:
             pg_table = SQLITE_TABLES[source_table][0]
-            imported[pg_table] = import_source_table(sqlite_cur, pg, source_hash, source_table)
+            imported[pg_table] = import_source_table(
+                sqlite_cur, pg, version_id, source_hash, source_table
+            )
 
-        removed_combo_candidates = remove_combo_quota_candidates(pg)
+        removed_combo_candidates = remove_combo_quota_candidates(pg, version_id)
         issue_counts = record_import_issues(pg, sqlite_cur, source_hash, run_id)
+        with pg.cursor() as cur:
+            cur.execute(
+                "UPDATE pricing_kb_import_issues SET kb_version_id=%s WHERE run_id=%s",
+                (version_id, run_id),
+            )
         link_counts = link_targets(pg, source_hash) if should_link else {"matched": 0, "review": 0, "unmatched": 0}
 
         stats = {
+            "version_id": version_id,
             "source_file_sha256": source_hash,
             **inspection,
+            "relation_validation": relation_validation,
             "imported_tables": imported,
             "removed_combo_candidates": removed_combo_candidates,
             **issue_counts,
             "target_links": link_counts,
         }
         finalize_run(pg, run_id, "done", stats)
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE pricing_kb_versions
+                SET status='validated', validation_report=%s::jsonb,
+                    validated_at=NOW(), error_message=NULL, updated_at=NOW()
+                WHERE id=%s
+                """,
+                (json.dumps(stats, ensure_ascii=False), version_id),
+            )
+            for table in [value[0] for value in SQLITE_TABLES.values()]:
+                cur.execute(f"ANALYZE {table}")
         pg.commit()
         return stats
     except Exception as exc:
@@ -594,8 +760,28 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
                 pg.commit()
             except Exception:
                 pg.rollback()
+        if version_id is not None:
+            try:
+                with pg.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE pricing_kb_versions
+                        SET status='failed', error_message=%s, updated_at=NOW()
+                        WHERE id=%s AND status='importing'
+                        """,
+                        (str(exc), version_id),
+                    )
+                pg.commit()
+            except Exception:
+                pg.rollback()
         raise
     finally:
+        try:
+            with pg.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(hashtext('pricing_kb_import'))")
+            pg.commit()
+        except Exception:
+            pg.rollback()
         sqlite_conn.close()
         pg.close()
 

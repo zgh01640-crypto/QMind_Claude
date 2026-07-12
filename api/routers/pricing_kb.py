@@ -3,11 +3,23 @@
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
-from db.connection import get_connection
+from db.connection import get_connection as _raw_get_connection
+from db.pricing_kb_versions import apply_version_schema, version_to_dict
 
 
 router = APIRouter()
+
+
+def _kb_connection():
+    conn = _raw_get_connection()
+    try:
+        apply_version_schema(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 RESOURCE_TYPES = {
     1: "人工",
@@ -23,6 +35,106 @@ COST_FIELDS = (
     "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj",
 )
 
+VERSION_SELECT = """
+    SELECT v.id, v.source_file, v.source_file_sha256, v.status,
+           v.schema_signature, v.table_counts, v.validation_report,
+           v.error_message, v.imported_at, v.validated_at, v.published_at,
+           v.published_by, (a.kb_version_id IS NOT NULL) AS is_active
+    FROM pricing_kb_versions v
+    LEFT JOIN pricing_kb_active_version a ON a.kb_version_id=v.id
+"""
+
+
+class PublishVersionRequest(BaseModel):
+    published_by: str | None = None
+
+
+@router.get("/pricing-kb/versions")
+def list_pricing_kb_versions():
+    conn = _kb_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(VERSION_SELECT + " ORDER BY v.imported_at DESC, v.id DESC")
+            return [version_to_dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-kb/versions/{version_id}")
+def get_pricing_kb_version(version_id: int):
+    conn = _kb_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(VERSION_SELECT + " WHERE v.id=%s", (version_id,))
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="knowledge-base version not found")
+        return version_to_dict(row)
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-kb/versions/{version_id}/validation")
+def get_pricing_kb_version_validation(version_id: int):
+    version = get_pricing_kb_version(version_id)
+    return {
+        "id": version["id"],
+        "status": version["status"],
+        "table_counts": version["table_counts"],
+        "validation_report": version["validation_report"],
+        "error_message": version["error_message"],
+    }
+
+
+@router.post("/pricing-kb/versions/{version_id}/publish")
+def publish_pricing_kb_version(version_id: int, body: PublishVersionRequest):
+    conn = _kb_connection()
+    publisher = (body.published_by or "api").strip() or "api"
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('pricing_kb_publish'))")
+            cur.execute(
+                "SELECT status FROM pricing_kb_versions WHERE id=%s FOR UPDATE",
+                (version_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="knowledge-base version not found")
+            if row[0] not in {"validated", "active", "retired"}:
+                raise HTTPException(status_code=409, detail="only validated versions can be published")
+            cur.execute(
+                """
+                UPDATE pricing_kb_versions SET status='retired', updated_at=NOW()
+                WHERE status='active' AND id<>%s
+                """,
+                (version_id,),
+            )
+            cur.execute(
+                """
+                INSERT INTO pricing_kb_active_version(singleton, kb_version_id, updated_at, updated_by)
+                VALUES (TRUE, %s, NOW(), %s)
+                ON CONFLICT (singleton) DO UPDATE
+                SET kb_version_id=EXCLUDED.kb_version_id,
+                    updated_at=NOW(), updated_by=EXCLUDED.updated_by
+                """,
+                (version_id, publisher),
+            )
+            cur.execute(
+                """
+                UPDATE pricing_kb_versions
+                SET status='active', published_at=NOW(), published_by=%s, updated_at=NOW()
+                WHERE id=%s
+                """,
+                (publisher, version_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_pricing_kb_version(version_id)
+
 
 def cost_breakdown(values: tuple[Any, ...] | list[Any]) -> dict[str, float | None]:
     return {
@@ -37,29 +149,29 @@ def page_bounds(page: int, page_size: int) -> tuple[int, int]:
 
 @router.get("/pricing-kb/boq-tree/top-categories")
 def list_boq_top_categories(qdkid: int = 1020025):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT c.id, c.qdkid, c.pid, c.zjmc, c.zjsm,
-                       (SELECT COUNT(*) FROM tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
+                       (SELECT COUNT(*) FROM active_tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
+                       (SELECT COUNT(*) FROM active_tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
                        (
                          WITH RECURSIVE subtree AS (
                            SELECT root.qdkid, root.id
-                           FROM tqdk_tzjmc root
+                           FROM active_tqdk_tzjmc root
                            WHERE root.qdkid = c.qdkid AND root.id = c.id
                            UNION ALL
                            SELECT child.qdkid, child.id
-                           FROM tqdk_tzjmc child
+                           FROM active_tqdk_tzjmc child
                            JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
                          )
                          SELECT COUNT(*)
-                         FROM tqdk_tqdzm item
+                         FROM active_tqdk_tqdzm item
                          JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
                        ) AS descendant_item_count
-                FROM tqdk_tzjmc c
+                FROM active_tqdk_tzjmc c
                 WHERE c.qdkid=%s AND COALESCE(c.pid, 0)=0
                 ORDER BY c.zjmc
                 """,
@@ -86,7 +198,7 @@ def list_boq_top_categories(qdkid: int = 1020025):
 
 @router.get("/pricing-kb/boq-tree/chapter/{chapter_id}")
 def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -95,18 +207,18 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
                        (
                          WITH RECURSIVE subtree AS (
                            SELECT root.qdkid, root.id
-                           FROM tqdk_tzjmc root
+                           FROM active_tqdk_tzjmc root
                            WHERE root.qdkid = c.qdkid AND root.id = c.id
                            UNION ALL
                            SELECT child.qdkid, child.id
-                           FROM tqdk_tzjmc child
+                           FROM active_tqdk_tzjmc child
                            JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
                          )
                          SELECT COUNT(*)
-                         FROM tqdk_tqdzm item
+                         FROM active_tqdk_tqdzm item
                          JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
                        ) AS descendant_item_count
-                FROM tqdk_tzjmc c
+                FROM active_tqdk_tzjmc c
                 WHERE c.qdkid=%s AND c.id=%s
                 """,
                 (qdkid, chapter_id),
@@ -126,23 +238,23 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
             cur.execute(
                 """
                 SELECT c.id, c.qdkid, c.pid, c.zjmc, c.zjsm,
-                       (SELECT COUNT(*) FROM tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
+                       (SELECT COUNT(*) FROM active_tqdk_tzjmc child WHERE child.qdkid=c.qdkid AND child.pid=c.id) AS child_count,
+                       (SELECT COUNT(*) FROM active_tqdk_tqdzm item WHERE item.qdkid=c.qdkid AND item.zjh=c.id) AS item_count,
                        (
                          WITH RECURSIVE subtree AS (
                            SELECT root.qdkid, root.id
-                           FROM tqdk_tzjmc root
+                           FROM active_tqdk_tzjmc root
                            WHERE root.qdkid = c.qdkid AND root.id = c.id
                            UNION ALL
                            SELECT child.qdkid, child.id
-                           FROM tqdk_tzjmc child
+                           FROM active_tqdk_tzjmc child
                            JOIN subtree parent ON parent.qdkid = child.qdkid AND parent.id = child.pid
                          )
                          SELECT COUNT(*)
-                         FROM tqdk_tqdzm item
+                         FROM active_tqdk_tqdzm item
                          JOIN subtree s ON s.qdkid = item.qdkid AND s.id = item.zjh
                        ) AS descendant_item_count
-                FROM tqdk_tzjmc c
+                FROM active_tqdk_tzjmc c
                 WHERE c.qdkid=%s AND c.pid=%s
                 ORDER BY c.zjmc
                 """,
@@ -154,9 +266,9 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
                 """
                 SELECT i.id, i.qdkid, i.zmbh, i.zmmc, i.dw, i.zjh, c.zjmc AS chapter_name,
                        COUNT(cand.source_rowid) AS candidate_count
-                FROM tqdk_tqdzm i
-                LEFT JOIN tqdk_tzjmc c ON c.qdkid=i.qdkid AND c.id=i.zjh
-                LEFT JOIN tqdk_tqdzy cand ON cand.qdkid=i.qdkid AND cand.qdzmid=i.id
+                FROM active_tqdk_tqdzm i
+                LEFT JOIN active_tqdk_tzjmc c ON c.qdkid=i.qdkid AND c.id=i.zjh
+                LEFT JOIN active_tqdk_tqdzy cand ON cand.qdkid=i.qdkid AND cand.qdzmid=i.id
                 WHERE i.qdkid=%s AND i.zjh=%s
                 GROUP BY i.id, i.qdkid, i.zmbh, i.zmmc, i.dw, i.zjh, c.zjmc
                 ORDER BY i.zmbh, i.id
@@ -199,15 +311,15 @@ def get_boq_chapter_children(chapter_id: int, qdkid: int = 1020025):
 
 @router.get("/pricing-kb/quota-tree/top-libraries")
 def list_quota_tree_top_libraries():
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT c.dekid, c.id, c.pid, c.zjmc, c.zjsm,
-                       (SELECT COUNT(*) FROM tdek_tzjmc child WHERE child.dekid=c.dekid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tdek_tdezm item WHERE item.dekid=c.dekid) AS quota_count
-                FROM tdek_tzjmc c
+                       (SELECT COUNT(*) FROM active_tdek_tzjmc child WHERE child.dekid=c.dekid AND child.pid=c.id) AS child_count,
+                       (SELECT COUNT(*) FROM active_tdek_tdezm item WHERE item.dekid=c.dekid) AS quota_count
+                FROM active_tdek_tzjmc c
                 WHERE COALESCE(c.pid, 0)=0
                 ORDER BY c.dekid, c.id
                 """
@@ -232,13 +344,13 @@ def list_quota_tree_top_libraries():
 
 @router.get("/pricing-kb/quota-tree/chapter/{chapter_id}")
 def get_quota_chapter_children(chapter_id: int, dekid: int):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id, dekid, pid, zjmc, zjsm
-                FROM tdek_tzjmc
+                FROM active_tdek_tzjmc
                 WHERE dekid=%s AND id=%s
                 """,
                 (dekid, chapter_id),
@@ -257,9 +369,9 @@ def get_quota_chapter_children(chapter_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT c.id, c.dekid, c.pid, c.zjmc, c.zjsm,
-                       (SELECT COUNT(*) FROM tdek_tzjmc child WHERE child.dekid=c.dekid AND child.pid=c.id) AS child_count,
-                       (SELECT COUNT(*) FROM tdek_tdezm item WHERE item.dekid=c.dekid AND item.zjh=c.id) AS item_count
-                FROM tdek_tzjmc c
+                       (SELECT COUNT(*) FROM active_tdek_tzjmc child WHERE child.dekid=c.dekid AND child.pid=c.id) AS child_count,
+                       (SELECT COUNT(*) FROM active_tdek_tdezm item WHERE item.dekid=c.dekid AND item.zjh=c.id) AS item_count
+                FROM active_tdek_tzjmc c
                 WHERE c.dekid=%s AND c.pid=%s
                 ORDER BY c.zjmc, c.id
                 """,
@@ -270,13 +382,13 @@ def get_quota_chapter_children(chapter_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT i.id, i.dekid, i.zmbh, i.zmmc, i.dw, i.gznr, i.zjh, c.zjmc AS chapter_name,
-                       (SELECT COUNT(*) FROM tdek_tzmgc r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS resource_count,
-                       (SELECT COUNT(*) FROM tdek_tznhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS conversion_rule_count,
-                       (SELECT COUNT(*) FROM tdek_tzhhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS input_prompt_count,
+                       (SELECT COUNT(*) FROM active_tdek_tzmgc r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS resource_count,
+                       (SELECT COUNT(*) FROM active_tdek_tznhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS conversion_rule_count,
+                       (SELECT COUNT(*) FROM active_tdek_tzhhs r WHERE r.dekid=i.dekid AND r.dezmid=i.id) AS input_prompt_count,
                        'unlinked' AS link_status,
                        NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id
-                FROM tdek_tdezm i
-                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                FROM active_tdek_tdezm i
+                LEFT JOIN active_tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
                 WHERE i.dekid=%s AND i.zjh=%s
                 ORDER BY i.zmbh NULLS LAST, i.id
                 """,
@@ -323,7 +435,7 @@ def get_quota_chapter_children(chapter_id: int, dekid: int):
 
 @router.get("/pricing-kb/quota-tree/items/{quota_item_id}")
 def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -333,8 +445,8 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
                        NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id, NULL::TEXT AS review_message,
                        i.dj, i.rgf, i.clf, i.jxf, i.zcf, i.sbf,
                        i.glf, i.lr, i.aqwmsgf, i.qtcsf, i.gf, i.sj
-                FROM tdek_tdezm i
-                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                FROM active_tdek_tdezm i
+                LEFT JOIN active_tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
                 WHERE i.dekid=%s AND i.id=%s
                 """,
                 (dekid, quota_item_id),
@@ -361,7 +473,7 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT lx, zmbh, zmmc, dw, gcl
-                FROM tdek_tzmgc
+                FROM active_tdek_tzmgc
                 WHERE dekid=%s AND dezmid=%s
                 ORDER BY source_rowid
                 """,
@@ -381,7 +493,7 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT tsxx, hssm, groupno
-                FROM tdek_tznhs
+                FROM active_tdek_tznhs
                 WHERE dekid=%s AND dezmid=%s
                 ORDER BY groupno NULLS LAST, source_rowid
                 """,
@@ -395,7 +507,7 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
             cur.execute(
                 """
                 SELECT tsxx, zmbh, jcz, zjdw
-                FROM tdek_tzhhs
+                FROM active_tdek_tzhhs
                 WHERE dekid=%s AND dezmid=%s
                 ORDER BY source_rowid
                 """,
@@ -426,13 +538,13 @@ def get_quota_tree_item_detail(quota_item_id: int, dekid: int):
 
 @router.get("/pricing-kb/quota-tree/item-by-code/{quota_code}")
 def get_quota_tree_item_detail_by_code(quota_code: str, dekid: int):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT id
-                FROM tdek_tdezm
+                FROM active_tdek_tdezm
                 WHERE dekid=%s AND zmbh=%s
                 ORDER BY id
                 LIMIT 1
@@ -467,7 +579,7 @@ def list_quota_input_prompts(
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     limit, offset = page_bounds(page, page_size)
 
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -475,8 +587,8 @@ def list_quota_input_prompts(
                 SELECT COUNT(*)
                 FROM (
                     SELECT i.dekid, i.id
-                    FROM tdek_tzhhs h
-                    JOIN tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
+                    FROM active_tdek_tzhhs h
+                    JOIN active_tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
                     {where_sql}
                     GROUP BY i.dekid, i.id
                 ) s
@@ -499,10 +611,10 @@ def list_quota_input_prompts(
                          )
                          ORDER BY h.source_rowid
                        ) AS prompt_rules
-                FROM tdek_tzhhs h
-                JOIN tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
-                JOIN tlibs l ON l.id=i.dekid
-                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                FROM active_tdek_tzhhs h
+                JOIN active_tdek_tdezm i ON i.dekid=h.dekid AND i.id=h.dezmid
+                JOIN active_tlibs l ON l.id=i.dekid
+                LEFT JOIN active_tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
                 {where_sql}
                 GROUP BY i.dekid, l.mc, i.id, i.zmbh, i.zmmc, i.dw, c.zjmc
                 ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
@@ -561,7 +673,7 @@ def list_quota_conversion_rules(
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     limit, offset = page_bounds(page, page_size)
 
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -569,8 +681,8 @@ def list_quota_conversion_rules(
                 SELECT COUNT(*)
                 FROM (
                     SELECT i.dekid, i.id
-                    FROM tdek_tznhs r
-                    JOIN tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
+                    FROM active_tdek_tznhs r
+                    JOIN active_tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
                     {where_sql}
                     GROUP BY i.dekid, i.id
                 ) s
@@ -592,10 +704,10 @@ def list_quota_conversion_rules(
                          )
                          ORDER BY r.groupno NULLS LAST, r.source_rowid
                        ) AS conversion_rules
-                FROM tdek_tznhs r
-                JOIN tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
-                JOIN tlibs l ON l.id=i.dekid
-                LEFT JOIN tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
+                FROM active_tdek_tznhs r
+                JOIN active_tdek_tdezm i ON i.dekid=r.dekid AND i.id=r.dezmid
+                JOIN active_tlibs l ON l.id=i.dekid
+                LEFT JOIN active_tdek_tzjmc c ON c.dekid=i.dekid AND c.id=i.zjh
                 {where_sql}
                 GROUP BY i.dekid, l.mc, i.id, i.zmbh, i.zmmc, i.dw, c.zjmc
                 ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
@@ -662,25 +774,25 @@ def build_filters(
 
 @router.get("/pricing-kb/summary")
 def get_summary():
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 WITH boq_candidate_counts AS (
                     SELECT bi.qdkid, bi.id, COUNT(c.source_rowid) AS candidate_count
-                    FROM tqdk_tqdzm bi
-                    LEFT JOIN tqdk_tqdzy c ON c.qdkid = bi.qdkid AND c.qdzmid = bi.id
+                    FROM active_tqdk_tqdzm bi
+                    LEFT JOIN active_tqdk_tqdzy c ON c.qdkid = bi.qdkid AND c.qdzmid = bi.id
                     GROUP BY bi.qdkid, bi.id
                 )
                 SELECT
-                    (SELECT COUNT(*) FROM tlibs) AS library_count,
-                    (SELECT COUNT(*) FROM tqdk_tzjmc) + (SELECT COUNT(*) FROM tdek_tzjmc) AS chapter_count,
-                    (SELECT COUNT(*) FROM tqdk_tqdzm) AS boq_item_count,
-                    (SELECT COUNT(*) FROM tdek_tdezm) AS quota_item_count,
-                    (SELECT COUNT(*) FROM tdek_tzmgc) AS resource_count,
-                    (SELECT COUNT(*) FROM tdek_tznhs) + (SELECT COUNT(*) FROM tdek_tzhhs) AS conversion_rule_count,
-                    (SELECT COUNT(*) FROM tqdk_tqdzy) AS candidate_count,
+                    (SELECT COUNT(*) FROM active_tlibs) AS library_count,
+                    (SELECT COUNT(*) FROM active_tqdk_tzjmc) + (SELECT COUNT(*) FROM active_tdek_tzjmc) AS chapter_count,
+                    (SELECT COUNT(*) FROM active_tqdk_tqdzm) AS boq_item_count,
+                    (SELECT COUNT(*) FROM active_tdek_tdezm) AS quota_item_count,
+                    (SELECT COUNT(*) FROM active_tdek_tzmgc) AS resource_count,
+                    (SELECT COUNT(*) FROM active_tdek_tznhs) + (SELECT COUNT(*) FROM active_tdek_tzhhs) AS conversion_rule_count,
+                    (SELECT COUNT(*) FROM active_tqdk_tqdzy) AS candidate_count,
                     0 AS target_link_count,
                     (SELECT COUNT(*) FROM pricing_kb_import_issues) AS issue_count,
                     (SELECT COUNT(*) FROM boq_candidate_counts WHERE candidate_count > 0) AS boq_with_candidates,
@@ -718,15 +830,15 @@ def get_summary():
 
 @router.get("/pricing-kb/libraries")
 def list_libraries():
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT l.id, l.mc,
-                       (SELECT COUNT(*) FROM tdek_tdezm qi WHERE qi.dekid = l.id) AS quota_count,
-                       (SELECT COUNT(*) FROM tqdk_tqdzm bi WHERE bi.qdkid = l.id) AS boq_count
-                FROM tlibs l
+                       (SELECT COUNT(*) FROM active_tdek_tdezm qi WHERE qi.dekid = l.id) AS quota_count,
+                       (SELECT COUNT(*) FROM active_tqdk_tqdzm bi WHERE bi.qdkid = l.id) AS boq_count
+                FROM active_tlibs l
                 ORDER BY l.id
                 """
             )
@@ -755,10 +867,10 @@ def list_boq_items(
 ):
     where_sql, params = build_filters("i", "zmmc", "zmbh", "qdkid", q, code, library_id)
     limit, offset = page_bounds(page, page_size)
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM tqdk_tqdzm i {where_sql}", params)
+            cur.execute(f"SELECT COUNT(*) FROM active_tqdk_tqdzm i {where_sql}", params)
             total = cur.fetchone()[0]
             cur.execute(
                 f"""
@@ -766,7 +878,7 @@ def list_boq_items(
                     SELECT c.qdkid, c.id, c.pid, c.zjmc,
                            ARRAY[c.id] AS path_ids,
                            ARRAY[c.zjmc]::TEXT[] AS path_names
-                    FROM tqdk_tzjmc c
+                    FROM active_tqdk_tzjmc c
                     WHERE COALESCE(c.pid, 0) = 0
 
                     UNION ALL
@@ -774,7 +886,7 @@ def list_boq_items(
                     SELECT child.qdkid, child.id, child.pid, child.zjmc,
                            parent.path_ids || child.id,
                            parent.path_names || child.zjmc
-                    FROM tqdk_tzjmc child
+                    FROM active_tqdk_tzjmc child
                     JOIN chapter_paths parent
                       ON parent.qdkid = child.qdkid AND parent.id = child.pid
                     WHERE NOT child.id = ANY(parent.path_ids)
@@ -783,11 +895,11 @@ def list_boq_items(
                        i.zmbh, i.zmmc, i.dw, c.zjmc AS chapter_name,
                        COUNT(cand.source_rowid) AS candidate_count,
                        COALESCE(cp.path_names, ARRAY[]::TEXT[]) AS chapter_path
-                FROM tqdk_tqdzm i
-                JOIN tlibs l ON l.id = i.qdkid
-                LEFT JOIN tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
+                FROM active_tqdk_tqdzm i
+                JOIN active_tlibs l ON l.id = i.qdkid
+                LEFT JOIN active_tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
                 LEFT JOIN chapter_paths cp ON cp.qdkid = i.qdkid AND cp.id = i.zjh
-                LEFT JOIN tqdk_tqdzy cand ON cand.qdkid = i.qdkid AND cand.qdzmid = i.id
+                LEFT JOIN active_tqdk_tqdzy cand ON cand.qdkid = i.qdkid AND cand.qdzmid = i.id
                 {where_sql}
                 GROUP BY i.id, i.qdkid, l.mc, i.zmbh, i.zmmc, i.dw, c.zjmc, cp.path_names
                 ORDER BY i.qdkid, i.zmbh NULLS LAST, i.id
@@ -848,7 +960,7 @@ def list_boq_processes(
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     limit, offset = page_bounds(page, page_size)
 
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM tqdk_tqdgx p {where_sql}", params)
@@ -885,9 +997,9 @@ def list_boq_processes(
                        p.procedure_text,
                        p.source_sheet, p.source_rowid, p.qdzmid IS NOT NULL AS linked
                 FROM tqdk_tqdgx p
-                LEFT JOIN tlibs l ON l.id = p.qdkid
-                LEFT JOIN tqdk_tqdzm q ON q.qdkid = p.qdkid AND q.id = p.qdzmid
-                LEFT JOIN tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
+                LEFT JOIN active_tlibs l ON l.id = p.qdkid
+                LEFT JOIN active_tqdk_tqdzm q ON q.qdkid = p.qdkid AND q.id = p.qdzmid
+                LEFT JOIN active_tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
                 {where_sql}
                 ORDER BY p.appendix_code NULLS LAST, p.zmbh, p.source_rowid
                 LIMIT %s OFFSET %s
@@ -976,16 +1088,16 @@ def list_feature_defaults(
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     limit, offset = page_bounds(page, page_size)
 
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM tqdk_tzhkl f LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh {where_sql}", params)
+            cur.execute(f"SELECT COUNT(*) FROM tqdk_tzhkl f LEFT JOIN active_tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh {where_sql}", params)
             total = cur.fetchone()[0]
             cur.execute(
                 f"""
                 SELECT COUNT(DISTINCT f.zmbh)
                 FROM tqdk_tzhkl f
-                LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
+                LEFT JOIN active_tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
                 {where_sql}
                 """,
                 params,
@@ -1014,9 +1126,9 @@ def list_feature_defaults(
                          ORDER BY f.source_rowid, f.feature_name
                        ) AS features
                 FROM tqdk_tzhkl f
-                LEFT JOIN tlibs l ON l.id = f.qdkid
-                LEFT JOIN tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
-                LEFT JOIN tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
+                LEFT JOIN active_tlibs l ON l.id = f.qdkid
+                LEFT JOIN active_tqdk_tqdzm q ON q.qdkid = f.qdkid AND q.zmbh = f.zmbh
+                LEFT JOIN active_tqdk_tzjmc c ON c.qdkid = q.qdkid AND c.id = q.zjh
                 {where_sql}
                 GROUP BY f.qdkid, l.mc, COALESCE(f.qdzmid, q.id), f.zmbh,
                          COALESCE(q.zmmc, f.zmmc), q.dw, COALESCE(c.zjmc, f.chapter_name),
@@ -1072,10 +1184,10 @@ def list_quota_items(
 ):
     where_sql, params = build_filters("i", "zmmc", "zmbh", "dekid", q, code, library_id)
     limit, offset = page_bounds(page, page_size)
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM tdek_tdezm i {where_sql}", params)
+            cur.execute(f"SELECT COUNT(*) FROM active_tdek_tdezm i {where_sql}", params)
             total = cur.fetchone()[0]
             cur.execute(
                 f"""
@@ -1083,9 +1195,9 @@ def list_quota_items(
                        i.zmbh, i.zmmc, i.dw, c.zjmc AS chapter_name,
                        'unlinked' AS link_status,
                        NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id
-                FROM tdek_tdezm i
-                JOIN tlibs l ON l.id = i.dekid
-                LEFT JOIN tdek_tzjmc c ON c.dekid = i.dekid AND c.id = i.zjh
+                FROM active_tdek_tdezm i
+                JOIN active_tlibs l ON l.id = i.dekid
+                LEFT JOIN active_tdek_tzjmc c ON c.dekid = i.dekid AND c.id = i.zjh
                 {where_sql}
                 ORDER BY i.dekid, i.zmbh NULLS LAST, i.id
                 LIMIT %s OFFSET %s
@@ -1119,15 +1231,15 @@ def list_quota_items(
 
 @router.get("/pricing-kb/boq-items/{boq_item_id}/candidates")
 def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT i.id, i.qdkid, l.mc, i.zmbh, i.zmmc, i.dw, c.zjmc
-                FROM tqdk_tqdzm i
-                JOIN tlibs l ON l.id = i.qdkid
-                LEFT JOIN tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
+                FROM active_tqdk_tqdzm i
+                JOIN active_tlibs l ON l.id = i.qdkid
+                LEFT JOIN active_tqdk_tzjmc c ON c.qdkid = i.qdkid AND c.id = i.zjh
                 WHERE i.id=%s AND (%s::BIGINT IS NULL OR i.qdkid=%s)
                 """,
                 (boq_item_id, qdkid, qdkid),
@@ -1153,10 +1265,10 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
                        NULL::TEXT AS target_table, NULL::BIGINT AS target_item_id, NULL::TEXT AS review_message,
                        qi.dj, qi.rgf, qi.clf, qi.jxf, qi.zcf, qi.sbf,
                        qi.glf, qi.lr, qi.aqwmsgf, qi.qtcsf, qi.gf, qi.sj
-                FROM tqdk_tqdzy cand
-                JOIN tdek_tdezm qi ON qi.dekid = cand.dekid AND qi.id = cand.dezmid
-                JOIN tlibs l ON l.id = qi.dekid
-                LEFT JOIN tdek_tzjmc qc ON qc.dekid = qi.dekid AND qc.id = qi.zjh
+                FROM active_tqdk_tqdzy cand
+                JOIN active_tdek_tdezm qi ON qi.dekid = cand.dekid AND qi.id = cand.dezmid
+                JOIN active_tlibs l ON l.id = qi.dekid
+                LEFT JOIN active_tdek_tzjmc qc ON qc.dekid = qi.dekid AND qc.id = qi.zjh
                 WHERE cand.qdkid=%s AND cand.qdzmid=%s
                 ORDER BY qi.dekid, qi.zmbh NULLS LAST, qi.id, cand.source_rowid
                 """,
@@ -1172,7 +1284,7 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
                 cur.execute(
                     """
                     SELECT r.dekid, r.dezmid, r.lx, r.zmbh, r.zmmc, r.dw, r.gcl
-                    FROM tdek_tzmgc r
+                    FROM active_tdek_tzmgc r
                     JOIN (SELECT * FROM unnest(%s::bigint[], %s::bigint[]) AS k(dekid, dezmid)) k
                       ON k.dekid = r.dekid AND k.dezmid = r.dezmid
                     ORDER BY r.dekid, r.dezmid, r.source_rowid
@@ -1191,12 +1303,12 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
                 cur.execute(
                     """
                     SELECT r.dekid, r.dezmid, 'conversion' AS rule_type, r.tsxx, r.hssm, r.groupno
-                    FROM tdek_tznhs r
+                    FROM active_tdek_tznhs r
                     JOIN (SELECT * FROM unnest(%s::bigint[], %s::bigint[]) AS k(dekid, dezmid)) k
                       ON k.dekid = r.dekid AND k.dezmid = r.dezmid
                     UNION ALL
                     SELECT r.dekid, r.dezmid, 'input_prompt' AS rule_type, r.tsxx, NULL AS hssm, NULL AS groupno
-                    FROM tdek_tzhhs r
+                    FROM active_tdek_tzhhs r
                     JOIN (SELECT * FROM unnest(%s::bigint[], %s::bigint[]) AS k(dekid, dezmid)) k
                       ON k.dekid = r.dekid AND k.dezmid = r.dezmid
                     ORDER BY dekid, dezmid, rule_type
@@ -1217,7 +1329,7 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
                 cur.execute(
                     """
                     SELECT r.dekid, r.dezmid, r.tsxx, r.zmbh, r.jcz, r.zjdw
-                    FROM tdek_tzhhs r
+                    FROM active_tdek_tzhhs r
                     JOIN (SELECT * FROM unnest(%s::bigint[], %s::bigint[]) AS k(dekid, dezmid)) k
                       ON k.dekid = r.dekid AND k.dezmid = r.dezmid
                     ORDER BY r.dekid, r.dezmid, r.source_rowid
@@ -1270,7 +1382,7 @@ def get_boq_item_candidates(boq_item_id: int, qdkid: int | None = None):
 @router.get("/pricing-kb/import-runs")
 def list_import_runs(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
     limit, offset = page_bounds(page, page_size)
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM pricing_kb_import_runs")
@@ -1325,7 +1437,7 @@ def list_import_issues(
         params.append(issue_type)
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
     limit, offset = page_bounds(page, page_size)
-    conn = get_connection()
+    conn = _kb_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM pricing_kb_import_issues {where_sql}", params)

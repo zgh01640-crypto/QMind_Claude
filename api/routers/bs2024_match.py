@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from db.connection import get_connection
+from db.pricing_kb_versions import apply_version_schema
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -27,6 +28,7 @@ router = APIRouter()
 
 def _ensure_schema(conn):
     """确保 bs2024_match_runs / bs2024_quota_matches 表已存在。"""
+    apply_version_schema(conn)
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bs2024_match_runs (
@@ -137,7 +139,7 @@ def exec_check_item_code(conn, item_code: str, item_name: str) -> dict:
     """
     base_code = strip_serial(item_code)
     with conn.cursor() as cur:
-        cur.execute("SELECT zmmc FROM tqdk_tqdzm WHERE zmbh = %s LIMIT 5", (base_code,))
+        cur.execute("SELECT zmmc FROM active_tqdk_tqdzm WHERE zmbh = %s LIMIT 5", (base_code,))
         rows = cur.fetchall()
     standard_names = list({r[0] for r in rows if r[0]})
     return {

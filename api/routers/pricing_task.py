@@ -22,6 +22,8 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from psycopg2.extras import Json
 
+from db.pricing_kb_versions import apply_version_schema, resolve_version_id
+
 router = APIRouter()
 
 
@@ -62,6 +64,7 @@ def _base_code(item_code: str | None) -> str:
 
 def _ensure_schema(conn):
     """Idempotent schema for the pricing-task workflow."""
+    apply_version_schema(conn)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -71,6 +74,7 @@ def _ensure_schema(conn):
                 boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
                 quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 legacy_local_id     TEXT UNIQUE,
                 accuracy_report     JSONB,
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
@@ -86,6 +90,7 @@ def _ensure_schema(conn):
                 task_id             INTEGER REFERENCES pricing_tasks(id) ON DELETE CASCADE,
                 boq_item_id         INTEGER NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
                 boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 status              VARCHAR(16) NOT NULL DEFAULT 'running',
                 reasoning_text      TEXT,
                 code_check          JSONB,
@@ -133,6 +138,7 @@ def _ensure_schema(conn):
                 boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
                 quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
                 selected_count      INTEGER NOT NULL DEFAULT 0,
                 completed_count     INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +157,7 @@ def _ensure_schema(conn):
                 batch_id            INTEGER NOT NULL REFERENCES pricing_task_batches(id) ON DELETE CASCADE,
                 boq_item_id         INTEGER NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
                 boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 status              VARCHAR(16) NOT NULL DEFAULT 'idle',
                 reasoning_text      TEXT,
                 code_check          JSONB,
@@ -181,6 +188,10 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resources JSONB")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS conversion_resource_changes JSONB")
         cur.execute("ALTER TABLE pricing_tasks ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
+        cur.execute("ALTER TABLE pricing_tasks ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
@@ -193,11 +204,43 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS confirmed_results JSONB")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
+        cur.execute(
+            """
+            UPDATE pricing_tasks t SET kb_version_id=a.kb_version_id
+            FROM pricing_kb_active_version a WHERE t.kb_version_id IS NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE pricing_task_runs r
+            SET kb_version_id=COALESCE(
+                (SELECT t.kb_version_id FROM pricing_tasks t WHERE t.id=r.task_id),
+                a.kb_version_id
+            )
+            FROM pricing_kb_active_version a
+            WHERE r.kb_version_id IS NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE pricing_task_batches b SET kb_version_id=a.kb_version_id
+            FROM pricing_kb_active_version a WHERE b.kb_version_id IS NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE pricing_task_batch_item_runs r SET kb_version_id=b.kb_version_id
+            FROM pricing_task_batches b
+            WHERE r.batch_id=b.id AND r.kb_version_id IS NULL
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_project ON pricing_tasks(boq_project_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_boq_item ON pricing_task_results(boq_item_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_run ON pricing_task_results(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptr_task ON pricing_task_results(task_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_task_item ON pricing_task_runs(task_id, boq_item_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_kb_version ON pricing_tasks(kb_version_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_kb_version ON pricing_task_runs(kb_version_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_project ON pricing_task_batches(boq_project_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch ON pricing_task_batch_item_runs(batch_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch_item ON pricing_task_batch_item_runs(batch_id, boq_item_id)")
@@ -210,6 +253,7 @@ class PricingTaskCreate(BaseModel):
     quota_library_ids: list[int] = Field(default_factory=list)
     manual_project_id: Optional[int] = None
     legacy_local_id: Optional[str] = None
+    kb_version_id: Optional[int] = None
 
 
 class PricingTaskImportItem(BaseModel):
@@ -229,6 +273,7 @@ class PricingTaskBatchCreate(BaseModel):
     boq_project_id: int
     quota_library_ids: list[int] = Field(default_factory=list)
     manual_project_id: Optional[int] = None
+    kb_version_id: Optional[int] = None
 
 
 class RunRequest(BaseModel):
@@ -530,10 +575,13 @@ def _model() -> str:
     return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
 
-def exec_check_item_code(conn, item_code: str, item_name: str) -> dict[str, Any]:
+def exec_check_item_code(conn, item_code: str, item_name: str, kb_version_id: int) -> dict[str, Any]:
     base_code = _base_code(item_code)
     with conn.cursor() as cur:
-        cur.execute("SELECT zmmc FROM tqdk_tqdzm WHERE zmbh = %s LIMIT 5", (base_code,))
+        cur.execute(
+            "SELECT zmmc FROM tqdk_tqdzm WHERE kb_version_id=%s AND zmbh=%s LIMIT 5",
+            (kb_version_id, base_code),
+        )
         rows = cur.fetchall()
     standard_names = sorted({r[0] for r in rows if r[0]})
     standard_name = standard_names[0] if standard_names else ""
@@ -640,9 +688,14 @@ def _normalize_feature_analysis_result(
     }
 
 
-def exec_fetch_quota_candidates(conn, item_code: str, quota_library_ids: list[int] | None = None) -> dict[str, Any]:
+def exec_fetch_quota_candidates(
+    conn,
+    item_code: str,
+    kb_version_id: int,
+    quota_library_ids: list[int] | None = None,
+) -> dict[str, Any]:
     base_code = _base_code(item_code)
-    params: list[Any] = [base_code]
+    params: list[Any] = [kb_version_id, base_code]
     library_filter = ""
     if quota_library_ids:
         library_filter = "AND q.dekid = ANY(%s)"
@@ -652,11 +705,11 @@ def exec_fetch_quota_candidates(conn, item_code: str, quota_library_ids: list[in
             f"""
             SELECT DISTINCT q.id, q.dekid, l.mc, q.zmbh, q.zmmc, q.dw, q.gznr, c.zjmc
             FROM tqdk_tqdzm zm
-            JOIN tqdk_tqdzy cand ON cand.qdkid = zm.qdkid AND cand.qdzmid = zm.id
-            JOIN tdek_tdezm q ON q.dekid = cand.dekid AND q.id = cand.dezmid
-            JOIN tlibs l ON l.id = q.dekid
-            LEFT JOIN tdek_tzjmc c ON c.dekid = q.dekid AND c.id = q.zjh
-            WHERE zm.zmbh = %s
+            JOIN tqdk_tqdzy cand ON cand.kb_version_id=zm.kb_version_id AND cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+            JOIN tdek_tdezm q ON q.kb_version_id=cand.kb_version_id AND q.dekid=cand.dekid AND q.id=cand.dezmid
+            JOIN tlibs l ON l.kb_version_id=q.kb_version_id AND l.id=q.dekid
+            LEFT JOIN tdek_tzjmc c ON c.kb_version_id=q.kb_version_id AND c.dekid=q.dekid AND c.id=q.zjh
+            WHERE zm.kb_version_id=%s AND zm.zmbh=%s
               {library_filter}
             ORDER BY q.dekid, q.zmbh NULLS LAST, q.id
             LIMIT 80
@@ -681,6 +734,7 @@ def exec_fetch_quota_candidates(conn, item_code: str, quota_library_ids: list[in
     return {
         "item_code": item_code,
         "base_code": base_code,
+        "kb_version_id": kb_version_id,
         "quota_library_ids": quota_library_ids or [],
         "candidates": candidates,
         "total": len(candidates),
@@ -1377,7 +1431,7 @@ def _build_pricing_task_detail_report(conn, task: dict[str, Any], rows: list[Any
         quota_candidates = quota_candidates if isinstance(quota_candidates, dict) else {}
         quota_match = quota_match if isinstance(quota_match, dict) else {}
         evaluation = evaluation if isinstance(evaluation, dict) else {}
-        conversion_check = _hydrate_conversion_combo_resources(conn, conversion_check) if isinstance(conversion_check, dict) else conversion_check
+        conversion_check = _hydrate_conversion_for_run(conn, run_id, conversion_check) if isinstance(conversion_check, dict) else conversion_check
         coefficient_check = coefficient_check if isinstance(coefficient_check, dict) else {}
         step_timings = step_timings if isinstance(step_timings, dict) else {}
         consistency = _build_item_consistency_report(quota_match, evaluation)
@@ -1619,7 +1673,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT r.id, r.status, i.item_code, i.item_name, i.item_description, i.unit
+            SELECT r.id, r.status, i.item_code, i.item_name, i.item_description, i.unit, r.kb_version_id
             FROM pricing_task_runs r
             JOIN boq_items i ON i.id = r.boq_item_id
             WHERE r.id = %s
@@ -1638,18 +1692,19 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
             "item_name": run_row[3],
             "item_description": run_row[4] or "",
             "unit": run_row[5] or "",
+            "kb_version_id": int(run_row[6]),
         }
         cur.execute(
             """
             SELECT r.dekid, r.dezmid, r.subitem_code, r.subitem_name, r.qty_factor,
                    r.confidence, r.match_reason, q.dw, q.gznr, l.mc
             FROM pricing_task_results r
-            LEFT JOIN tdek_tdezm q ON q.dekid = r.dekid AND q.id = r.dezmid
-            LEFT JOIN tlibs l ON l.id = r.dekid
+            LEFT JOIN tdek_tdezm q ON q.kb_version_id=%s AND q.dekid=r.dekid AND q.id=r.dezmid
+            LEFT JOIN tlibs l ON l.kb_version_id=%s AND l.id=r.dekid
             WHERE r.run_id = %s AND r.status = 'confirmed'
             ORDER BY r.id
             """,
-            (run_id,),
+            (run_row[6], run_row[6], run_id),
         )
         result_rows = cur.fetchall()
         items: list[dict[str, Any]] = []
@@ -1662,11 +1717,11 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                        combo.id, combo.zmmc, combo.dw, combo.gznr,
                        combo.rgf, combo.clf, combo.jxf
                 FROM tdek_tzhhs h
-                LEFT JOIN tdek_tdezm combo ON combo.dekid = h.dekid AND combo.zmbh = h.zmbh
-                WHERE h.dekid=%s AND h.dezmid=%s
+                LEFT JOIN tdek_tdezm combo ON combo.kb_version_id=h.kb_version_id AND combo.dekid=h.dekid AND combo.zmbh=h.zmbh
+                WHERE h.kb_version_id=%s AND h.dekid=%s AND h.dezmid=%s
                 ORDER BY h.source_rowid
                 """,
-                (dekid, dezmid),
+                (run_row[6], dekid, dezmid),
             )
             adjustment_rules = []
             for idx, r in enumerate(cur.fetchall(), start=1):
@@ -1677,10 +1732,10 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                         """
                         SELECT zmbh, zmmc, dw, gcl, lx
                         FROM tdek_tzmgc
-                        WHERE dekid=%s AND dezmid=%s
+                        WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
                         ORDER BY lx NULLS LAST, source_rowid
                         """,
-                        (dekid, combo_dezmid),
+                        (run_row[6], dekid, combo_dezmid),
                     )
                     combo_resources = [
                         {
@@ -1713,10 +1768,10 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 """
                 SELECT zmbh, zmmc, dw, gcl, lx
                 FROM tdek_tzmgc
-                WHERE dekid=%s AND dezmid=%s
+                WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
                 """,
-                (dekid, dezmid),
+                (run_row[6], dekid, dezmid),
             )
             resources = [
                 {
@@ -1747,7 +1802,9 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
     return boq_item, items
 
 
-def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _confirmed_items_from_matches(
+    conn, matches: list[dict[str, Any]], kb_version_id: int
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     with conn.cursor() as cur:
         for match in matches:
@@ -1762,10 +1819,10 @@ def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[d
                 """
                 SELECT q.zmbh, q.zmmc, q.dw, q.gznr, l.mc
                 FROM tdek_tdezm q
-                LEFT JOIN tlibs l ON l.id = q.dekid
-                WHERE q.dekid=%s AND q.id=%s
+                LEFT JOIN tlibs l ON l.kb_version_id=q.kb_version_id AND l.id=q.dekid
+                WHERE q.kb_version_id=%s AND q.dekid=%s AND q.id=%s
                 """,
-                (dekid, dezmid),
+                (kb_version_id, dekid, dezmid),
             )
             qrow = cur.fetchone()
             if not qrow:
@@ -1776,16 +1833,16 @@ def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[d
                        combo.id, combo.zmmc, combo.dw, combo.gznr,
                        combo.rgf, combo.clf, combo.jxf
                 FROM tdek_tzhhs h
-                LEFT JOIN tdek_tdezm combo ON combo.dekid = h.dekid AND combo.zmbh = h.zmbh
-                WHERE h.dekid=%s AND h.dezmid=%s
+                LEFT JOIN tdek_tdezm combo ON combo.kb_version_id=h.kb_version_id AND combo.dekid=h.dekid AND combo.zmbh=h.zmbh
+                WHERE h.kb_version_id=%s AND h.dekid=%s AND h.dezmid=%s
                 ORDER BY h.source_rowid
                 """,
-                (dekid, dezmid),
+                (kb_version_id, dekid, dezmid),
             )
             adjustment_rules = []
             for idx, rule_row in enumerate(cur.fetchall(), start=1):
                 combo_dezmid = int(rule_row[4]) if rule_row[4] is not None else 0
-                combo_resources = _load_combo_resources(conn, dekid, combo_dezmid, rule_row[1] or "") if combo_dezmid or rule_row[1] else []
+                combo_resources = _load_combo_resources(conn, kb_version_id, dekid, combo_dezmid, rule_row[1] or "") if combo_dezmid or rule_row[1] else []
                 adjustment_rules.append(
                     {
                         "rule_index": idx,
@@ -1807,10 +1864,10 @@ def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[d
                 """
                 SELECT zmbh, zmmc, dw, gcl, lx
                 FROM tdek_tzmgc
-                WHERE dekid=%s AND dezmid=%s
+                WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
                 """,
-                (dekid, dezmid),
+                (kb_version_id, dekid, dezmid),
             )
             resources = [
                 {
@@ -1841,7 +1898,9 @@ def _confirmed_items_from_matches(conn, matches: list[dict[str, Any]]) -> list[d
     return items
 
 
-def _confirmed_results_from_matches(conn, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _confirmed_results_from_matches(
+    conn, matches: list[dict[str, Any]], kb_version_id: int
+) -> list[dict[str, Any]]:
     return [
         {
             "dekid": item["dekid"],
@@ -1856,7 +1915,7 @@ def _confirmed_results_from_matches(conn, matches: list[dict[str, Any]]) -> list
             "conversion_resources": item.get("resources", []),
             "conversion_resource_changes": [],
         }
-        for item in _confirmed_items_from_matches(conn, matches)
+        for item in _confirmed_items_from_matches(conn, matches, kb_version_id)
     ]
 
 
@@ -2160,7 +2219,10 @@ def _normalize_conversion_check(
     return {"items": normalized, "issues": [str(v) for v in raw.get("issues", []) if v]}
 
 
-def _load_combo_resources(conn, dekid: int, combo_dezmid: int | None, combo_code: str | None) -> list[dict[str, Any]]:
+def _load_combo_resources(
+    conn, kb_version_id: int, dekid: int,
+    combo_dezmid: int | None, combo_code: str | None,
+) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         dezmid = combo_dezmid or 0
         if not dezmid and combo_code:
@@ -2168,10 +2230,10 @@ def _load_combo_resources(conn, dekid: int, combo_dezmid: int | None, combo_code
                 """
                 SELECT id
                 FROM tdek_tdezm
-                WHERE dekid=%s AND zmbh=%s
+                WHERE kb_version_id=%s AND dekid=%s AND zmbh=%s
                 LIMIT 1
                 """,
-                (dekid, combo_code),
+                (kb_version_id, dekid, combo_code),
             )
             row = cur.fetchone()
             dezmid = int(row[0]) if row else 0
@@ -2181,10 +2243,10 @@ def _load_combo_resources(conn, dekid: int, combo_dezmid: int | None, combo_code
             """
             SELECT zmbh, zmmc, dw, gcl, lx
             FROM tdek_tzmgc
-            WHERE dekid=%s AND dezmid=%s
+            WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
             ORDER BY lx NULLS LAST, source_rowid
             """,
-            (dekid, dezmid),
+            (kb_version_id, dekid, dezmid),
         )
         return [
             {
@@ -2198,7 +2260,7 @@ def _load_combo_resources(conn, dekid: int, combo_dezmid: int | None, combo_code
         ]
 
 
-def _hydrate_conversion_combo_resources(conn, conversion_check: Any) -> Any:
+def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_id: int) -> Any:
     if not isinstance(conversion_check, dict):
         return conversion_check
     for item in conversion_check.get("items", []):
@@ -2219,6 +2281,7 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any) -> Any:
                 combo_dezmid = 0
             rule["combo_resources"] = _load_combo_resources(
                 conn,
+                kb_version_id,
                 dekid,
                 combo_dezmid,
                 str(rule.get("combo_code") or ""),
@@ -2226,16 +2289,39 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any) -> Any:
     return conversion_check
 
 
-def _load_coefficient_rules(conn, dekid: int, dezmid: int) -> list[dict[str, Any]]:
+def _hydrate_conversion_for_run(conn, run_id: int, conversion_check: Any) -> Any:
+    with conn.cursor() as cur:
+        cur.execute("SELECT kb_version_id FROM pricing_task_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return conversion_check
+    return _hydrate_conversion_combo_resources(conn, conversion_check, int(row[0]))
+
+
+def _hydrate_conversion_for_batch_run(conn, item_run_id: int, conversion_check: Any) -> Any:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT kb_version_id FROM pricing_task_batch_item_runs WHERE id=%s",
+            (item_run_id,),
+        )
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return conversion_check
+    return _hydrate_conversion_combo_resources(conn, conversion_check, int(row[0]))
+
+
+def _load_coefficient_rules(
+    conn, kb_version_id: int, dekid: int, dezmid: int
+) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT tsxx, hssm, COALESCE(groupno, 0)
             FROM tdek_tznhs
-            WHERE dekid=%s AND dezmid=%s
+            WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
             ORDER BY groupno NULLS LAST, source_rowid
             """,
-            (dekid, dezmid),
+            (kb_version_id, dekid, dezmid),
         )
         return [
             {
@@ -2272,18 +2358,26 @@ def _coefficient_context(conn, run_id: int) -> tuple[dict[str, Any], list[dict[s
     with conn.cursor() as cur:
         cur.execute("SELECT conversion_check FROM pricing_task_runs WHERE id=%s", (run_id,))
         row = cur.fetchone()
-    conversion_check = _hydrate_conversion_combo_resources(conn, row[0] if row else None) or {}
-    return boq_item, _coefficient_items_from_context(conn, confirmed_items, conversion_check)
+    kb_version_id = int(boq_item["kb_version_id"])
+    conversion_check = _hydrate_conversion_combo_resources(
+        conn, row[0] if row else None, kb_version_id
+    ) or {}
+    return boq_item, _coefficient_items_from_context(
+        conn, confirmed_items, conversion_check, kb_version_id
+    )
 
 
 def _coefficient_items_from_context(
     conn,
     confirmed_items: list[dict[str, Any]],
     conversion_check: dict[str, Any] | None,
+    kb_version_id: int,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in confirmed_items:
-        coefficient_rules = _load_coefficient_rules(conn, int(item["dekid"]), int(item["dezmid"]))
+        coefficient_rules = _load_coefficient_rules(
+            conn, kb_version_id, int(item["dekid"]), int(item["dezmid"])
+        )
         items.append(
             {
                 "quota_key": f"base:{item['dekid']}:{item['dezmid']}",
@@ -2297,7 +2391,9 @@ def _coefficient_items_from_context(
             }
         )
 
-    conversion_data = _hydrate_conversion_combo_resources(conn, conversion_check or {}) or {}
+    conversion_data = _hydrate_conversion_combo_resources(
+        conn, conversion_check or {}, kb_version_id
+    ) or {}
     for base_item in conversion_data.get("items", []) if isinstance(conversion_data, dict) else []:
         if not isinstance(base_item, dict):
             continue
@@ -2308,7 +2404,9 @@ def _coefficient_items_from_context(
             combo_dezmid = int(rule.get("combo_dezmid") or 0)
             if not dekid or not combo_dezmid:
                 continue
-            coefficient_rules = _load_coefficient_rules(conn, dekid, combo_dezmid)
+            coefficient_rules = _load_coefficient_rules(
+                conn, kb_version_id, dekid, combo_dezmid
+            )
             items.append(
                 {
                     "quota_key": f"combo:{dekid}:{combo_dezmid}:{rule.get('combo_code') or ''}",
@@ -2417,15 +2515,15 @@ def _normalize_coefficient_check(raw: dict[str, Any], items: list[dict[str, Any]
     return {"items": normalized_items, "issues": [str(v) for v in raw.get("issues", []) if v]}
 
 
-def _create_run(conn, task_id: int | None, boq_item: dict[str, Any]) -> int:
+def _create_run(conn, task_id: int | None, boq_item: dict[str, Any], kb_version_id: int) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO pricing_task_runs(task_id, boq_item_id, boq_project_id, status)
-            VALUES (%s, %s, %s, 'running')
+            INSERT INTO pricing_task_runs(task_id, boq_item_id, boq_project_id, kb_version_id, status)
+            VALUES (%s, %s, %s, %s, 'running')
             RETURNING id
             """,
-            (task_id, boq_item["id"], boq_item["project_id"]),
+            (task_id, boq_item["id"], boq_item["project_id"], kb_version_id),
         )
         run_id = cur.fetchone()[0]
     conn.commit()
@@ -2619,6 +2717,7 @@ def _stream_pricing_item(
     manual_project_id: int | None,
     task_id: int | None,
     run_id: int | None,
+    kb_version_id: int,
     *,
     persist_run: bool = True,
     update_item_description: bool = True,
@@ -2628,7 +2727,9 @@ def _stream_pricing_item(
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
-    code_check = exec_check_item_code(conn, boq_item["item_code"], boq_item["item_name"])
+    code_check = exec_check_item_code(
+        conn, boq_item["item_code"], boq_item["item_name"], kb_version_id
+    )
     yield ("code_check", code_check)
     yield ("judgment", {"is_consistent": code_check["is_consistent"], "reasoning": f"标准清单名称：{code_check['standard_name'] or '未找到'}"})
     if persist_run and run_id is not None:
@@ -2682,7 +2783,9 @@ def _stream_pricing_item(
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
-    candidates_data = exec_fetch_quota_candidates(conn, boq_item["item_code"], quota_library_ids)
+    candidates_data = exec_fetch_quota_candidates(
+        conn, boq_item["item_code"], kb_version_id, quota_library_ids
+    )
     yield ("quota_candidates", candidates_data)
     if persist_run and run_id is not None:
         _update_run(conn, run_id, quota_candidates=candidates_data)
@@ -2773,6 +2876,7 @@ def _row_to_task(row) -> dict[str, Any]:
         "created_at": row[9],
         "latest_run_count": row[10],
         "accuracy_report": row[11] if len(row) > 11 else None,
+        "kb_version_id": int(row[12]) if len(row) > 12 and row[12] is not None else None,
     }
 
 
@@ -2794,6 +2898,7 @@ def _row_to_batch(row) -> dict[str, Any]:
         "created_at": row[12],
         "started_at": row[13],
         "finished_at": row[14],
+        "kb_version_id": int(row[15]) if len(row) > 15 and row[15] is not None else None,
     }
 
 
@@ -2811,12 +2916,12 @@ def list_pricing_tasks():
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
-                       , t.accuracy_report
+                       , t.accuracy_report, t.kb_version_id
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
-                LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
+                LEFT JOIN tlibs l ON l.kb_version_id=t.kb_version_id AND l.id=lib_id.value::bigint
                 WHERE t.status <> 'deleted'
                 GROUP BY t.id, p.project_name, mp.project_name
                 ORDER BY t.created_at DESC
@@ -2835,6 +2940,10 @@ def create_pricing_task(body: PricingTaskCreate):
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
+            try:
+                kb_version_id = resolve_version_id(conn, body.kb_version_id)
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             cur.execute("SELECT project_name FROM boq_projects WHERE id=%s", (body.boq_project_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="BOQ project not found")
@@ -2844,8 +2953,8 @@ def create_pricing_task(body: PricingTaskCreate):
                     raise HTTPException(status_code=404, detail="manual project not found")
             cur.execute(
                 """
-                INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id)
-                VALUES (%s, %s, %s::jsonb, %s, %s)
+                INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s)
                 ON CONFLICT (legacy_local_id) DO UPDATE SET updated_at=NOW()
                 RETURNING id
                 """,
@@ -2855,11 +2964,12 @@ def create_pricing_task(body: PricingTaskCreate):
                     json.dumps(body.quota_library_ids or []),
                     body.manual_project_id,
                     body.legacy_local_id,
+                    kb_version_id,
                 ),
             )
             task_id = cur.fetchone()[0]
         conn.commit()
-        return {"id": task_id}
+        return {"id": task_id, "kb_version_id": kb_version_id}
     finally:
         conn.close()
 
@@ -2873,15 +2983,19 @@ def import_local_tasks(body: PricingTaskImportRequest):
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
+            try:
+                kb_version_id = resolve_version_id(conn, None)
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             for item in body.tasks:
                 cur.execute(
                     """
-                    INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id)
-                    VALUES (%s, %s, '[]'::jsonb, %s, %s)
+                    INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id)
+                    VALUES (%s, %s, '[]'::jsonb, %s, %s, %s)
                     ON CONFLICT (legacy_local_id) DO UPDATE SET updated_at=NOW()
                     RETURNING id
                     """,
-                    (item.name, item.project_id, item.manual_project_id, item.id),
+                    (item.name, item.project_id, item.manual_project_id, item.id, kb_version_id),
                 )
                 imported.append({"legacy_local_id": item.id, "id": cur.fetchone()[0]})
         conn.commit()
@@ -2904,12 +3018,12 @@ def get_pricing_task(task_id: int):
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
-                       , t.accuracy_report
+                       , t.accuracy_report, t.kb_version_id
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
-                LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
+                LEFT JOIN tlibs l ON l.kb_version_id=t.kb_version_id AND l.id=lib_id.value::bigint
                 WHERE t.id=%s AND t.status <> 'deleted'
                 GROUP BY t.id, p.project_name, mp.project_name
                 """,
@@ -2930,12 +3044,12 @@ def _batch_select_sql() -> str:
                b.quota_library_ids,
                COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                b.status, b.selected_count, b.completed_count, b.failed_count,
-               b.created_at, b.started_at, b.finished_at
+               b.created_at, b.started_at, b.finished_at, b.kb_version_id
         FROM pricing_task_batches b
         JOIN boq_projects p ON p.id = b.boq_project_id
         LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
         LEFT JOIN LATERAL jsonb_array_elements_text(b.quota_library_ids) lib_id(value) ON TRUE
-        LEFT JOIN tlibs l ON l.id = lib_id.value::bigint
+        LEFT JOIN tlibs l ON l.kb_version_id=b.kb_version_id AND l.id=lib_id.value::bigint
     """
 
 
@@ -2971,6 +3085,10 @@ def create_pricing_task_batch(body: PricingTaskBatchCreate):
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
+            try:
+                kb_version_id = resolve_version_id(conn, body.kb_version_id)
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             cur.execute("SELECT id FROM boq_projects WHERE id=%s", (body.boq_project_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="BOQ project not found")
@@ -2980,15 +3098,15 @@ def create_pricing_task_batch(body: PricingTaskBatchCreate):
                     raise HTTPException(status_code=404, detail="manual project not found")
             cur.execute(
                 """
-                INSERT INTO pricing_task_batches(name, boq_project_id, quota_library_ids, manual_project_id)
-                VALUES (%s, %s, %s::jsonb, %s)
+                INSERT INTO pricing_task_batches(name, boq_project_id, quota_library_ids, manual_project_id, kb_version_id)
+                VALUES (%s, %s, %s::jsonb, %s, %s)
                 RETURNING id
                 """,
-                (name, body.boq_project_id, json.dumps(body.quota_library_ids or []), body.manual_project_id),
+                (name, body.boq_project_id, json.dumps(body.quota_library_ids or []), body.manual_project_id, kb_version_id),
             )
             batch_id = cur.fetchone()[0]
         conn.commit()
-        return {"id": batch_id}
+        return {"id": batch_id, "kb_version_id": kb_version_id}
     finally:
         conn.close()
 
@@ -3068,7 +3186,7 @@ def get_pricing_task_batch_items(batch_id: int):
                 SELECT boq_item_id, id, status, code_check, feature_check, work_procedures,
                        quota_candidates, quota_match, evaluation, conversion_check,
                        coefficient_check, step_timings, error_message, created_at, finished_at,
-                       reasoning_text, confirmed_results
+                       reasoning_text, confirmed_results, kb_version_id
                 FROM pricing_task_batch_item_runs
                 WHERE batch_id=%s
                 ORDER BY created_at DESC, id DESC
@@ -3094,7 +3212,7 @@ def get_pricing_task_batch_items(batch_id: int):
                             "quota_candidates": r[6],
                             "quota_match": r[7],
                             "evaluation": r[8],
-                            "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
+                            "conversion_check": _hydrate_conversion_for_batch_run(conn, int(r[1]), r[9]),
                             "coefficient_check": r[10],
                             "step_timings": r[11],
                             "error_message": r[12],
@@ -3102,6 +3220,7 @@ def get_pricing_task_batch_items(batch_id: int):
                             "finished_at": r[14],
                             "reasoning_text": r[15],
                             "confirmed_results": r[16] or [],
+                            "kb_version_id": int(r[17]) if r[17] is not None else None,
                         },
                     }
                 )
@@ -3114,7 +3233,7 @@ def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[st
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, status
+            SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, status, kb_version_id
             FROM pricing_task_batches
             WHERE id=%s AND status <> 'deleted'
             """,
@@ -3142,6 +3261,7 @@ def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[st
             "quota_library_ids": batch_row[3] or [],
             "manual_project_id": batch_row[4],
             "status": batch_row[5],
+            "kb_version_id": int(batch_row[6]),
         },
         {
             "id": item_row[0],
@@ -3155,19 +3275,22 @@ def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[st
     )
 
 
-def _create_or_reset_batch_item_run(conn, batch_id: int, boq_item: dict[str, Any]) -> int:
+def _create_or_reset_batch_item_run(
+    conn, batch_id: int, boq_item: dict[str, Any], kb_version_id: int
+) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO pricing_task_batch_item_runs(
-                batch_id, boq_item_id, boq_project_id, status, started_at,
+                batch_id, boq_item_id, boq_project_id, kb_version_id, status, started_at,
                 reasoning_text, code_check, feature_check, work_procedures,
                 quota_candidates, quota_match, evaluation, confirmed_results,
                 conversion_check, coefficient_check, step_timings, error_message, finished_at
             )
-            VALUES (%s, %s, %s, 'running', NOW(), '', NULL, NULL, NULL, NULL, NULL, NULL, '[]'::jsonb, NULL, NULL, '{}'::jsonb, NULL, NULL)
+            VALUES (%s, %s, %s, %s, 'running', NOW(), '', NULL, NULL, NULL, NULL, NULL, '[]'::jsonb, NULL, NULL, '{}'::jsonb, NULL, NULL)
             ON CONFLICT (batch_id, boq_item_id) DO UPDATE SET
                 status='running',
+                kb_version_id=EXCLUDED.kb_version_id,
                 started_at=NOW(),
                 finished_at=NULL,
                 reasoning_text='',
@@ -3184,7 +3307,7 @@ def _create_or_reset_batch_item_run(conn, batch_id: int, boq_item: dict[str, Any
                 error_message=NULL
             RETURNING id
             """,
-            (batch_id, boq_item["id"], boq_item["project_id"]),
+            (batch_id, boq_item["id"], boq_item["project_id"], kb_version_id),
         )
         item_run_id = cur.fetchone()[0]
         cur.execute(
@@ -3240,7 +3363,7 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
             """
             SELECT r.id, r.batch_id, r.status, r.quota_match, r.confirmed_results,
                    r.conversion_check, i.id, i.item_code, i.item_name, i.item_description,
-                   i.unit, i.quantity, i.project_id
+                   i.unit, i.quantity, i.project_id, r.kb_version_id
             FROM pricing_task_batch_item_runs r
             JOIN boq_items i ON i.id = r.boq_item_id
             WHERE r.id=%s
@@ -3258,6 +3381,7 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
         "quota_match": row[3] or {},
         "confirmed_results": row[4] or [],
         "conversion_check": row[5],
+        "kb_version_id": int(row[13]),
     }
     boq_item = {
         "run_id": row[0],
@@ -3271,7 +3395,7 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
         "project_id": row[12],
     }
     matches = batch_run["quota_match"].get("matches", []) if isinstance(batch_run["quota_match"], dict) else []
-    confirmed_items = _confirmed_items_from_matches(conn, matches)
+    confirmed_items = _confirmed_items_from_matches(conn, matches, int(row[13]))
     return batch_id, batch_run, boq_item, {"items": confirmed_items}
 
 
@@ -3285,8 +3409,13 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
         try:
             _ensure_schema(conn)
             batch, boq_item = _load_batch_and_item(conn, batch_id, boq_item_id)
-            item_run_id = _create_or_reset_batch_item_run(conn, batch_id, boq_item)
-            yield _sse({"type": "run_started", "run_id": item_run_id})
+            item_run_id = _create_or_reset_batch_item_run(
+                conn, batch_id, boq_item, batch["kb_version_id"]
+            )
+            yield _sse({
+                "type": "run_started", "run_id": item_run_id,
+                "kb_version_id": batch["kb_version_id"],
+            })
             yield _sse({"type": "item_info", "item": boq_item})
             fields: dict[str, Any] = {}
             reasoning_text_parts: list[str] = []
@@ -3298,6 +3427,7 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
                 batch["manual_project_id"],
                 None,
                 None,
+                batch["kb_version_id"],
                 persist_run=False,
                 update_item_description=False,
             ):
@@ -3325,7 +3455,9 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
                     yield _sse({"type": event_type, **data} if event_type != "evaluation" else {"type": "evaluation", "evaluation": data})
             quota_match = fields.get("quota_match") or {}
             matches = quota_match.get("matches", []) if isinstance(quota_match, dict) else []
-            confirmed_results = _confirmed_results_from_matches(conn, matches)
+            confirmed_results = _confirmed_results_from_matches(
+                conn, matches, batch["kb_version_id"]
+            )
             final_status = "no_match" if not matches else "completed"
             if had_error:
                 final_status = "failed"
@@ -3364,7 +3496,8 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 """
                 SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
                        quota_match, evaluation, conversion_check, coefficient_check,
-                       step_timings, error_message, created_at, finished_at, reasoning_text
+                       step_timings, error_message, created_at, finished_at, reasoning_text,
+                       kb_version_id
                 FROM pricing_task_runs
                 WHERE task_id=%s AND boq_item_id=%s
                 ORDER BY created_at DESC
@@ -3383,7 +3516,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "quota_candidates": r[5],
                 "quota_match": r[6],
                 "evaluation": r[7],
-                "conversion_check": _hydrate_conversion_combo_resources(conn, r[8]),
+                "conversion_check": _hydrate_conversion_for_run(conn, int(r[0]), r[8]),
                 "coefficient_check": r[9],
                 "step_timings": r[10],
                 "error_message": r[11],
@@ -3391,6 +3524,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "finished_at": r[13],
                 "reasoning_text": r[14],
                 "confirmed_results": confirmed_results.get(int(r[0]), []),
+                "kb_version_id": int(r[15]) if r[15] is not None else None,
             }
             for r in rows
         ]
@@ -3414,7 +3548,8 @@ def list_latest_task_runs(task_id: int):
                 SELECT DISTINCT ON (boq_item_id)
                        boq_item_id, id, status, code_check, feature_check, work_procedures,
                        quota_candidates, quota_match, evaluation, conversion_check, coefficient_check,
-                       step_timings, error_message, created_at, finished_at, reasoning_text
+                       step_timings, error_message, created_at, finished_at, reasoning_text,
+                       kb_version_id
                 FROM pricing_task_runs
                 WHERE task_id=%s
                 ORDER BY boq_item_id, created_at DESC, id DESC
@@ -3435,7 +3570,7 @@ def list_latest_task_runs(task_id: int):
                     "quota_candidates": r[6],
                     "quota_match": r[7],
                     "evaluation": r[8],
-                    "conversion_check": _hydrate_conversion_combo_resources(conn, r[9]),
+                    "conversion_check": _hydrate_conversion_for_run(conn, int(r[1]), r[9]),
                     "coefficient_check": r[10],
                     "step_timings": r[11],
                     "error_message": r[12],
@@ -3443,6 +3578,7 @@ def list_latest_task_runs(task_id: int):
                     "finished_at": r[14],
                     "reasoning_text": r[15],
                     "confirmed_results": confirmed_results.get(int(r[1]), []),
+                    "kb_version_id": int(r[16]) if r[16] is not None else None,
                 },
             }
             for r in rows
@@ -3461,13 +3597,17 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
         try:
             _ensure_schema(conn)
             with conn.cursor() as cur:
-                cur.execute("SELECT id, name, boq_project_id, quota_library_ids, manual_project_id FROM pricing_tasks WHERE id=%s", (task_id,))
+                cur.execute(
+                    "SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, kb_version_id FROM pricing_tasks WHERE id=%s",
+                    (task_id,),
+                )
                 task = cur.fetchone()
                 if not task:
                     yield _sse({"type": "error", "error": "task not found"})
                     return
                 quota_library_ids = task[3] or []
                 manual_project_id = task[4]
+                kb_version_id = int(task[5])
                 cur.execute(
                     """
                     SELECT id, item_code, item_name, item_description, unit, quantity, project_id
@@ -3488,12 +3628,18 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
                 "quantity": float(row[5]) if row[5] is not None else None,
                 "project_id": row[6],
             }
-            run_id = _create_run(conn, task_id, boq_item)
-            yield _sse({"type": "run_started", "run_id": run_id})
+            run_id = _create_run(conn, task_id, boq_item, kb_version_id)
+            yield _sse({
+                "type": "run_started", "run_id": run_id,
+                "kb_version_id": kb_version_id,
+            })
             yield _sse({"type": "item_info", "item": boq_item})
             had_error = False
             reasoning_text_parts: list[str] = []
-            for event_type, data in _stream_pricing_item(conn, boq_item, quota_library_ids, manual_project_id, task_id, run_id):
+            for event_type, data in _stream_pricing_item(
+                conn, boq_item, quota_library_ids, manual_project_id,
+                task_id, run_id, kb_version_id
+            ):
                 if event_type == "reasoning_token":
                     reasoning_text_parts.append(data)
                     yield _sse({"type": "reasoning_token", "token": data})
@@ -3591,7 +3737,7 @@ def generate_pricing_task_accuracy_report(task_id: int):
                     "boq_item_id": row[1],
                     "quota_match": quota_match,
                     "evaluation": evaluation,
-                    "conversion_check": _hydrate_conversion_combo_resources(conn, row[4]) if isinstance(row[4], dict) else row[4],
+                    "conversion_check": _hydrate_conversion_for_run(conn, int(row[0]), row[4]) if isinstance(row[4], dict) else row[4],
                     "coefficient_check": row[5] if isinstance(row[5], dict) else row[5],
                     "item_code": row[6],
                     "item_name": row[7],
@@ -3990,8 +4136,13 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
         try:
             _ensure_schema(conn)
             batch_id, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
-            conversion_check = _hydrate_conversion_combo_resources(conn, batch_run.get("conversion_check") or {}) or {}
-            items = _coefficient_items_from_context(conn, context["items"], conversion_check)
+            kb_version_id = int(batch_run["kb_version_id"])
+            conversion_check = _hydrate_conversion_combo_resources(
+                conn, batch_run.get("conversion_check") or {}, kb_version_id
+            ) or {}
+            items = _coefficient_items_from_context(
+                conn, context["items"], conversion_check, kb_version_id
+            )
             step_timings = _load_batch_step_timings(conn, item_run_id)
             step_started_at = datetime.now()
             step_started_perf = perf_counter()
@@ -4097,22 +4248,23 @@ def confirm_pricing_task_run(run_id: int, body: ConfirmRunRequest):
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM pricing_task_runs WHERE id=%s", (run_id,))
-            if not cur.fetchone():
+            cur.execute(
+                "SELECT task_id, boq_item_id, boq_project_id, kb_version_id FROM pricing_task_runs WHERE id=%s",
+                (run_id,),
+            )
+            run_row = cur.fetchone()
+            if not run_row:
                 raise HTTPException(status_code=404, detail="run not found")
             if body.results is not None:
                 cur.execute("DELETE FROM pricing_task_results WHERE run_id=%s", (run_id,))
-                cur.execute(
-                    "SELECT task_id, boq_item_id, boq_project_id FROM pricing_task_runs WHERE id=%s",
-                    (run_id,),
-                )
-                task_id, boq_item_id, project_id = cur.fetchone()
+                task_id, boq_item_id, project_id, kb_version_id = run_row
                 for m in body.results:
                     cur.execute(
                         """
-                        SELECT zmbh, zmmc FROM tdek_tdezm WHERE dekid=%s AND id=%s
+                        SELECT zmbh, zmmc FROM tdek_tdezm
+                        WHERE kb_version_id=%s AND dekid=%s AND id=%s
                         """,
-                        (m["dekid"], m["dezmid"]),
+                        (kb_version_id, m["dekid"], m["dezmid"]),
                     )
                     qrow = cur.fetchone()
                     if not qrow:
@@ -4263,11 +4415,22 @@ def pricing_task_match_item_stream(req: dict[str, Any]):
                 "quantity": float(row[5]) if row[5] is not None else None,
                 "project_id": row[6],
             }
-            run_id = _create_run(conn, None, boq_item)
-            yield _sse({"type": "run_started", "run_id": run_id})
+            try:
+                kb_version_id = resolve_version_id(conn, req.get("kb_version_id"))
+            except ValueError as exc:
+                yield _sse({"type": "error", "error": str(exc)})
+                return
+            run_id = _create_run(conn, None, boq_item, kb_version_id)
+            yield _sse({
+                "type": "run_started", "run_id": run_id,
+                "kb_version_id": kb_version_id,
+            })
             yield _sse({"type": "item_info", "item": boq_item})
             reasoning_text_parts: list[str] = []
-            for event_type, data in _stream_pricing_item(conn, boq_item, req.get("quota_library_ids") or [], req.get("manual_project_id"), None, run_id):
+            for event_type, data in _stream_pricing_item(
+                conn, boq_item, req.get("quota_library_ids") or [],
+                req.get("manual_project_id"), None, run_id, kb_version_id
+            ):
                 if event_type == "reasoning_token":
                     reasoning_text_parts.append(data)
                     yield _sse({"type": "reasoning_token", "token": data})
