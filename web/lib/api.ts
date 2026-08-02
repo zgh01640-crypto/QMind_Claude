@@ -1,4 +1,4 @@
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8005'
+const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 export interface Period {
   id: number
@@ -431,7 +431,7 @@ export async function streamMatchBoqProject(
   run_name: string,
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
-  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const API = process.env.NEXT_PUBLIC_API_URL || ''
   const res = await fetch(`${API}/api/boq/match-project-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -583,7 +583,7 @@ export async function streamMatchBoqProjectParallel(
   concurrency: number,
   onEvent: (e: ParallelStreamEvent) => void,
 ): Promise<void> {
-  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const API = process.env.NEXT_PUBLIC_API_URL || ''
   const res = await fetch(`${API}/api/boq/match-project-parallel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1173,6 +1173,64 @@ export interface PricingKbImportIssue {
   source_record_id: number | null
   context_json: Record<string, unknown>
   created_at: string
+}
+
+export interface PricingKbSourceTableInspection {
+  name: string
+  known: boolean
+  row_count: number
+  column_count: number
+  columns: { name: string; type: string; not_null: boolean; pk: boolean }[]
+  schema_signature: string
+  dependencies: string[]
+}
+
+export interface PricingKbUploadResult {
+  id: number
+  duplicate: boolean
+  inspection: { quick_check: string; schema_signature: string; tables: PricingKbSourceTableInspection[] }
+}
+
+export interface PricingKbImportProfile {
+  profile_id: string
+  name: string
+  description: string | null
+  selected_tables: string[]
+  required_tables: string[]
+  is_system: boolean
+}
+
+export interface PricingKbImportJob {
+  id: number
+  upload_id: number
+  profile_id: string | null
+  parent_version_id: number | null
+  version_id: number | null
+  config: { selected_tables: string[]; unknown_tables: Record<string, string> }
+  status: string
+  current_table: string | null
+  completed_tables: number
+  total_tables: number
+  processed_rows: number
+  progress: Record<string, unknown>
+  error_message: string | null
+  attempts: number
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface PricingKbVersion {
+  id: number
+  source_file: string
+  source_file_sha256: string
+  status: string
+  table_counts: Record<string, unknown>
+  validation_report: Record<string, unknown>
+  imported_at: string
+  published_at: string | null
+  published_by: string | null
+  is_active: boolean
 }
 
 export interface PricingKbList<T> {
@@ -2224,6 +2282,59 @@ export function fetchPricingKbImportIssues(params: {
   return req<PricingKbList<PricingKbImportIssue>>(`/api/pricing-kb/import-issues?${query}`)
 }
 
+const adminHeaders = (token: string, json = false): HeadersInit => ({
+  'X-Admin-Token': token,
+  ...(json ? { 'Content-Type': 'application/json' } : {}),
+})
+
+export async function uploadPricingKb(file: File, token: string) {
+  const body = new FormData()
+  body.append('file', file)
+  return req<PricingKbUploadResult>('/api/pricing-kb/uploads', {
+    method: 'POST', headers: adminHeaders(token), body,
+  })
+}
+
+export const fetchPricingKbImportProfiles = () =>
+  req<PricingKbImportProfile[]>('/api/pricing-kb/import-profiles')
+
+export const savePricingKbImportProfile = (profile: {
+  profile_id: string
+  name: string
+  description?: string
+  selected_tables: string[]
+  required_tables: string[]
+}, token: string) => req<{ profile_id: string }>('/api/pricing-kb/import-profiles', {
+  method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify(profile),
+})
+
+export function createPricingKbImportJob(input: {
+  upload_id: number
+  profile_id: string | null
+  selected_tables: string[]
+  unknown_tables: Record<string, string>
+}, token: string) {
+  return req<{ id: number; status: string }>('/api/pricing-kb/import-jobs', {
+    method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify(input),
+  })
+}
+
+export const fetchPricingKbImportJob = (id: number, token: string) =>
+  req<PricingKbImportJob>(`/api/pricing-kb/import-jobs/${id}`, { headers: adminHeaders(token) })
+
+export const cancelPricingKbImportJob = (id: number, token: string) =>
+  req<{ id: number; status: string }>(`/api/pricing-kb/import-jobs/${id}/cancel`, {
+    method: 'POST', headers: adminHeaders(token),
+  })
+
+export const fetchPricingKbVersions = () =>
+  req<PricingKbVersion[]>('/api/pricing-kb/versions')
+
+export const publishPricingKbVersion = (id: number, token: string) =>
+  req<PricingKbVersion>(`/api/pricing-kb/versions/${id}/publish`, {
+    method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify({ published_by: 'web-admin' }),
+  })
+
 // ── 调试批次 ──────────────────────────────────────────────────────────────────
 
 export interface DebugBatch {
@@ -2333,7 +2444,7 @@ export async function streamDebugMatch(
   batch_id?: number,
   item_description_override?: string | null,
 ): Promise<void> {
-  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const API = process.env.NEXT_PUBLIC_API_URL || ''
   const res = await fetch(`${API}/api/boq/match-item-debug`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2373,7 +2484,7 @@ export async function streamBS2024MatchItem(
   manual_project_id: number | null,
   onEvent: (e: BS2024MatchEvent) => void,
 ): Promise<void> {
-  const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const API = process.env.NEXT_PUBLIC_API_URL || ''
   const res = await fetch(`${API}/api/bs2024-match/match-item-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

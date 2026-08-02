@@ -1,6 +1,7 @@
-services:
+﻿services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: qmind
       POSTGRES_USER: qmind
@@ -9,6 +10,40 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qmind -d qmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://qmind:qmind@db:5432/qmind
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      PRICING_KB_ADMIN_TOKEN: ${PRICING_KB_ADMIN_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8005:8005"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8005
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "3001:3001"
 
 volumes:
   pgdata:

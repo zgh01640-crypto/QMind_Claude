@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_task
+from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
 
 app = FastAPI(title="深圳信息价管理系统", version="1.0.0")
 
@@ -34,4 +34,5 @@ app.include_router(bs2024_match.router, prefix="/api", tags=["bs2024-match"])
 app.include_router(prompt_templates.router, prefix="/api", tags=["prompt-templates"])
 app.include_router(standard_reference_prices.router, prefix="/api", tags=["standard-reference-prices"])
 app.include_router(pricing_kb.router, prefix="/api", tags=["pricing-kb"])
+app.include_router(pricing_kb_admin.router, prefix="/api", tags=["pricing-kb-admin"])
 app.include_router(pricing_task.router, prefix="/api", tags=["pricing-task"])

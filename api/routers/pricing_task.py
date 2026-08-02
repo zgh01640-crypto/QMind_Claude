@@ -12,7 +12,7 @@ import re
 import sys
 from io import BytesIO
 from datetime import datetime
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
 
@@ -568,18 +568,43 @@ def _client(thinking: bool = True) -> OpenAI:
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
     base_url = "https://api.deepseek.com" if thinking else "https://api.deepseek.com/beta"
-    return OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=1)
 
 
 def _model() -> str:
     return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+
+_MODEL_CALL_ATTEMPTS = 3
+_MODEL_RETRY_DELAYS = (1.5, 4.0)
+
+
+def _wait_before_model_retry(attempt: int, stage: str, exc: Exception) -> None:
+    if attempt >= _MODEL_CALL_ATTEMPTS - 1:
+        return
+    delay = _MODEL_RETRY_DELAYS[min(attempt, len(_MODEL_RETRY_DELAYS) - 1)]
+    print(
+        f"[pricing-task] {stage} retrying in {delay:.1f}s after attempt={attempt + 1}: {exc}",
+        file=sys.stderr,
+        flush=True,
+    )
+    sleep(delay)
+
+
+def _user_facing_model_error(exc: Exception) -> str:
+    message = str(exc).strip() or type(exc).__name__
+    lowered = f"{type(exc).__name__} {message}".lower()
+    if "connection" in lowered:
+        return "模型服务连接失败，已自动重试 3 次，请稍后重新执行。"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "模型服务响应超时，已自动重试 3 次，请稍后重新执行。"
+    return message
 
 
 def exec_check_item_code(conn, item_code: str, item_name: str, kb_version_id: int) -> dict[str, Any]:
     base_code = _base_code(item_code)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT zmmc FROM tqdk_tqdzm WHERE kb_version_id=%s AND zmbh=%s LIMIT 5",
+            "SELECT zmmc FROM tqdk_tqdzm WHERE kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM') AND zmbh=%s LIMIT 5",
             (kb_version_id, base_code),
         )
         rows = cur.fetchall()
@@ -695,7 +720,7 @@ def exec_fetch_quota_candidates(
     quota_library_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     base_code = _base_code(item_code)
-    params: list[Any] = [kb_version_id, base_code]
+    params: list[Any] = [kb_version_id] * 5 + [base_code]
     library_filter = ""
     if quota_library_ids:
         library_filter = "AND q.dekid = ANY(%s)"
@@ -705,11 +730,16 @@ def exec_fetch_quota_candidates(
             f"""
             SELECT DISTINCT q.id, q.dekid, l.mc, q.zmbh, q.zmmc, q.dw, q.gznr, c.zjmc
             FROM tqdk_tqdzm zm
-            JOIN tqdk_tqdzy cand ON cand.kb_version_id=zm.kb_version_id AND cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
-            JOIN tdek_tdezm q ON q.kb_version_id=cand.kb_version_id AND q.dekid=cand.dekid AND q.id=cand.dezmid
-            JOIN tlibs l ON l.kb_version_id=q.kb_version_id AND l.id=q.dekid
-            LEFT JOIN tdek_tzjmc c ON c.kb_version_id=q.kb_version_id AND c.dekid=q.dekid AND c.id=q.zjh
-            WHERE zm.kb_version_id=%s AND zm.zmbh=%s
+            JOIN tqdk_tqdzy cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+            JOIN tdek_tdezm q ON q.dekid=cand.dekid AND q.id=cand.dezmid
+            JOIN tlibs l ON l.id=q.dekid
+            LEFT JOIN tdek_tzjmc c ON c.dekid=q.dekid AND c.id=q.zjh
+            WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
+              AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY')
+              AND q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM')
+              AND l.kb_version_id=pricing_kb_data_version(%s,'TLibs')
+              AND (c.kb_version_id IS NULL OR c.kb_version_id=pricing_kb_data_version(%s,'TDEK_TZJMC'))
+              AND zm.zmbh=%s
               {library_filter}
             ORDER BY q.dekid, q.zmbh NULLS LAST, q.id
             LIMIT 80
@@ -779,9 +809,34 @@ def _collect_stream_tool_args(stream, reasoning_parts: list[str]) -> str:
     return args
 
 
+def _required_tool_choice(tool: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(tool.get("function", {}).get("name") or "").strip()
+    if not tool_name:
+        raise ValueError("tool function name is required")
+    return {"type": "function", "function": {"name": tool_name}}
+
+
+def _run_tool_fallback(
+    messages: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int
+) -> dict[str, Any]:
+    response = _client(thinking=False).chat.completions.create(
+        model=_model(),
+        messages=messages,
+        tools=[tool],
+        tool_choice=_required_tool_choice(tool),
+        extra_body={"thinking": {"type": "disabled"}},
+        max_tokens=max_tokens,
+        stream=False,
+    )
+    message = response.choices[0].message
+    if not message.tool_calls:
+        raise ValueError("model returned no tool call")
+    return _parse_json_object(message.tool_calls[0].function.arguments)
+
+
 def _run_stream_tool(messages: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int, reasoning_parts: list[str]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         try:
             stream = _client(thinking=True).chat.completions.create(
                 model=_model(),
@@ -793,16 +848,17 @@ def _run_stream_tool(messages: list[dict[str, Any]], tool: dict[str, Any], max_t
                 stream=True,
             )
             raw = _collect_stream_tool_args(stream, reasoning_parts)
-            return json.loads(raw)
+            return _parse_json_object(raw)
         except Exception as exc:  # keep the current stage retry-local
             last_error = exc
             print(f"[pricing-task] stream tool error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+            _wait_before_model_retry(attempt, "stream tool", exc)
     raise last_error or RuntimeError("stream tool failed")
 
 
 def _stream_tool_call(messages: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int) -> Iterable[tuple[str, Any]]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         raw = ""
         try:
             stream = _client(thinking=True).chat.completions.create(
@@ -829,17 +885,34 @@ def _stream_tool_call(messages: list[dict[str, Any]], tool: dict[str, Any], max_
                     for tc in delta.tool_calls:
                         if tc.function and tc.function.arguments:
                             raw += tc.function.arguments
-            yield ("tool_result", json.loads(raw))
+            try:
+                tool_result = _parse_json_object(raw)
+            except ValueError as exc:
+                last_error = exc
+                print(
+                    f"[pricing-task] stream returned invalid tool arguments; using fallback: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
+            yield ("tool_result", tool_result)
             return
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] stream tool error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
-    raise last_error or RuntimeError("stream tool failed")
+            _wait_before_model_retry(attempt, "stream tool call", exc)
+    try:
+        print("[pricing-task] stream tool exhausted; using non-stream fallback", file=sys.stderr, flush=True)
+        yield ("tool_result", _run_tool_fallback(messages, tool, max_tokens))
+        return
+    except Exception as fallback_error:
+        print(f"[pricing-task] tool fallback error: {fallback_error}", file=sys.stderr, flush=True)
+        raise fallback_error from last_error
 
 
 def _stream_text_completion(messages: list[dict[str, Any]], max_tokens: int) -> Iterable[tuple[str, Any]]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         parts: list[str] = []
         try:
             stream = _client(thinking=True).chat.completions.create(
@@ -867,12 +940,13 @@ def _stream_text_completion(messages: list[dict[str, Any]], max_tokens: int) -> 
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] stream text error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+            _wait_before_model_retry(attempt, "stream text", exc)
     raise last_error or RuntimeError("stream text failed")
 
 
 def _run_submit_match(messages: list[dict[str, Any]]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         try:
             resp = _client(thinking=False).chat.completions.create(
                 model=_model(),
@@ -893,12 +967,13 @@ def _run_submit_match(messages: list[dict[str, Any]]) -> dict[str, Any]:
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] submit match error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+            _wait_before_model_retry(attempt, "submit match", exc)
     raise last_error or RuntimeError("submit match failed")
 
 
 def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         try:
             resp = _client(thinking=False).chat.completions.create(
                 model=_model(),
@@ -919,6 +994,7 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] submit conversion check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+            _wait_before_model_retry(attempt, "submit conversion check", exc)
     try:
         json_messages = [
             *messages,
@@ -946,7 +1022,7 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
 
 def _run_submit_coefficient_check(messages: list[dict[str, Any]]) -> dict[str, Any]:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
         try:
             resp = _client(thinking=False).chat.completions.create(
                 model=_model(),
@@ -967,6 +1043,7 @@ def _run_submit_coefficient_check(messages: list[dict[str, Any]]) -> dict[str, A
         except Exception as exc:
             last_error = exc
             print(f"[pricing-task] submit coefficient check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
+            _wait_before_model_retry(attempt, "submit coefficient check", exc)
     try:
         json_messages = [
             *messages,
@@ -1699,8 +1776,8 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
             SELECT r.dekid, r.dezmid, r.subitem_code, r.subitem_name, r.qty_factor,
                    r.confidence, r.match_reason, q.dw, q.gznr, l.mc
             FROM pricing_task_results r
-            LEFT JOIN tdek_tdezm q ON q.kb_version_id=%s AND q.dekid=r.dekid AND q.id=r.dezmid
-            LEFT JOIN tlibs l ON l.kb_version_id=%s AND l.id=r.dekid
+            LEFT JOIN tdek_tdezm q ON q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM') AND q.dekid=r.dekid AND q.id=r.dezmid
+            LEFT JOIN tlibs l ON l.kb_version_id=pricing_kb_data_version(%s,'TLibs') AND l.id=r.dekid
             WHERE r.run_id = %s AND r.status = 'confirmed'
             ORDER BY r.id
             """,
@@ -1718,7 +1795,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                        combo.rgf, combo.clf, combo.jxf
                 FROM tdek_tzhhs h
                 LEFT JOIN tdek_tdezm combo ON combo.kb_version_id=h.kb_version_id AND combo.dekid=h.dekid AND combo.zmbh=h.zmbh
-                WHERE h.kb_version_id=%s AND h.dekid=%s AND h.dezmid=%s
+                WHERE h.kb_version_id=pricing_kb_data_version(%s,'TDEK_TZHHS') AND h.dekid=%s AND h.dezmid=%s
                 ORDER BY h.source_rowid
                 """,
                 (run_row[6], dekid, dezmid),
@@ -1732,7 +1809,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                         """
                         SELECT zmbh, zmmc, dw, gcl, lx
                         FROM tdek_tzmgc
-                        WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
+                        WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                         ORDER BY lx NULLS LAST, source_rowid
                         """,
                         (run_row[6], dekid, combo_dezmid),
@@ -1768,7 +1845,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 """
                 SELECT zmbh, zmmc, dw, gcl, lx
                 FROM tdek_tzmgc
-                WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
+                WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
                 """,
                 (run_row[6], dekid, dezmid),
@@ -1820,7 +1897,7 @@ def _confirmed_items_from_matches(
                 SELECT q.zmbh, q.zmmc, q.dw, q.gznr, l.mc
                 FROM tdek_tdezm q
                 LEFT JOIN tlibs l ON l.kb_version_id=q.kb_version_id AND l.id=q.dekid
-                WHERE q.kb_version_id=%s AND q.dekid=%s AND q.id=%s
+                WHERE q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM') AND q.dekid=%s AND q.id=%s
                 """,
                 (kb_version_id, dekid, dezmid),
             )
@@ -1834,7 +1911,7 @@ def _confirmed_items_from_matches(
                        combo.rgf, combo.clf, combo.jxf
                 FROM tdek_tzhhs h
                 LEFT JOIN tdek_tdezm combo ON combo.kb_version_id=h.kb_version_id AND combo.dekid=h.dekid AND combo.zmbh=h.zmbh
-                WHERE h.kb_version_id=%s AND h.dekid=%s AND h.dezmid=%s
+                WHERE h.kb_version_id=pricing_kb_data_version(%s,'TDEK_TZHHS') AND h.dekid=%s AND h.dezmid=%s
                 ORDER BY h.source_rowid
                 """,
                 (kb_version_id, dekid, dezmid),
@@ -1864,7 +1941,7 @@ def _confirmed_items_from_matches(
                 """
                 SELECT zmbh, zmmc, dw, gcl, lx
                 FROM tdek_tzmgc
-                WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
+                WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
                 """,
                 (kb_version_id, dekid, dezmid),
@@ -2230,7 +2307,7 @@ def _load_combo_resources(
                 """
                 SELECT id
                 FROM tdek_tdezm
-                WHERE kb_version_id=%s AND dekid=%s AND zmbh=%s
+                WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM') AND dekid=%s AND zmbh=%s
                 LIMIT 1
                 """,
                 (kb_version_id, dekid, combo_code),
@@ -2243,7 +2320,7 @@ def _load_combo_resources(
             """
             SELECT zmbh, zmmc, dw, gcl, lx
             FROM tdek_tzmgc
-            WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
+            WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
             ORDER BY lx NULLS LAST, source_rowid
             """,
             (kb_version_id, dekid, dezmid),
@@ -2318,7 +2395,7 @@ def _load_coefficient_rules(
             """
             SELECT tsxx, hssm, COALESCE(groupno, 0)
             FROM tdek_tznhs
-            WHERE kb_version_id=%s AND dekid=%s AND dezmid=%s
+            WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZNHS') AND dekid=%s AND dezmid=%s
             ORDER BY groupno NULLS LAST, source_rowid
             """,
             (kb_version_id, dekid, dezmid),
@@ -2921,7 +2998,7 @@ def list_pricing_tasks():
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
-                LEFT JOIN tlibs l ON l.kb_version_id=t.kb_version_id AND l.id=lib_id.value::bigint
+                LEFT JOIN tlibs l ON l.kb_version_id=pricing_kb_data_version(t.kb_version_id,'TLibs') AND l.id=lib_id.value::bigint
                 WHERE t.status <> 'deleted'
                 GROUP BY t.id, p.project_name, mp.project_name
                 ORDER BY t.created_at DESC
@@ -3023,7 +3100,7 @@ def get_pricing_task(task_id: int):
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
-                LEFT JOIN tlibs l ON l.kb_version_id=t.kb_version_id AND l.id=lib_id.value::bigint
+                LEFT JOIN tlibs l ON l.kb_version_id=pricing_kb_data_version(t.kb_version_id,'TLibs') AND l.id=lib_id.value::bigint
                 WHERE t.id=%s AND t.status <> 'deleted'
                 GROUP BY t.id, p.project_name, mp.project_name
                 """,
@@ -3049,7 +3126,7 @@ def _batch_select_sql() -> str:
         JOIN boq_projects p ON p.id = b.boq_project_id
         LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
         LEFT JOIN LATERAL jsonb_array_elements_text(b.quota_library_ids) lib_id(value) ON TRUE
-        LEFT JOIN tlibs l ON l.kb_version_id=b.kb_version_id AND l.id=lib_id.value::bigint
+        LEFT JOIN tlibs l ON l.kb_version_id=pricing_kb_data_version(b.kb_version_id,'TLibs') AND l.id=lib_id.value::bigint
     """
 
 
@@ -3481,7 +3558,15 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
         finally:
             conn.close()
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/pricing-tasks/{task_id}/items/{boq_item_id}/runs")
@@ -3655,14 +3740,23 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
                 _update_run(conn, run_id, status="completed", reasoning_text="".join(reasoning_text_parts), finished_at=datetime.now())
                 yield _sse({"type": "done", "run_id": run_id})
         except Exception as exc:
+            friendly_error = _user_facing_model_error(exc)
             if run_id:
-                _update_run(conn, run_id, status="failed", error_message=str(exc), finished_at=datetime.now())
+                _update_run(conn, run_id, status="failed", error_message=friendly_error, finished_at=datetime.now())
             print(f"[pricing-task] SSE error: {exc}", file=sys.stderr, flush=True)
-            yield _sse({"type": "error", "error": str(exc)})
+            yield _sse({"type": "error", "error": friendly_error})
         finally:
             conn.close()
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/pricing-tasks/{task_id}/accuracy-report")
@@ -4262,7 +4356,7 @@ def confirm_pricing_task_run(run_id: int, body: ConfirmRunRequest):
                     cur.execute(
                         """
                         SELECT zmbh, zmmc FROM tdek_tdezm
-                        WHERE kb_version_id=%s AND dekid=%s AND id=%s
+                        WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM') AND dekid=%s AND id=%s
                         """,
                         (kb_version_id, m["dekid"], m["dezmid"]),
                     )

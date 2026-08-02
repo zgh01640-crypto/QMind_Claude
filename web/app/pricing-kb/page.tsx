@@ -17,6 +17,7 @@ import {
   PricingKbQuotaItem,
   PricingKbSummary,
 } from '@/lib/api'
+import ImportManager from '@/components/pricing-kb/ImportManager'
 
 const PAGE_SIZE = 50
 const COST_LABELS = [
@@ -626,6 +627,7 @@ export default function PricingKbPage() {
 
           {tab === 'imports' && (
             <div className="space-y-4">
+              <ImportManager onRefresh={loadIssues} />
               <div className="border border-gray-200 bg-white">
                 <div className="border-b border-gray-200 px-4 py-2.5 text-sm font-semibold text-gray-900">最近导入批次</div>
                 <div className="overflow-x-auto">

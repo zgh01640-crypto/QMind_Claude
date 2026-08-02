@@ -8,6 +8,10 @@ const oldLinks = [
   { href: '/building-standard-2024', label: '建筑消耗量标准2024' },
   { href: '/pricing-kb', label: '组价知识库' },
   { href: '/boq', label: '工程管理' },
+  { href: '/prompt-templates', label: '提示词模板' },
+  { href: '/manual-boq', label: '工程管理（人工）' },
+  { href: '/boq/debug', label: '套定额调试' },
+  { href: '/compare', label: '定额比较' },
 ]
 
 const links = [
@@ -17,10 +21,6 @@ const links = [
   { href: '/pricing-task/batch', label: '批量组价' },
   { href: '/pricing-task/demo', label: '组价演示' },
   { href: '/new-boq', label: '新工程管理' },
-  { href: '/prompt-templates', label: '提示词模板' },
-  { href: '/manual-boq', label: '工程管理（人工）' },
-  { href: '/boq/debug', label: '套定额调试' },
-  { href: '/compare', label: '定额比较' },
 ]
 
 function isActive(pathname: string, href: string) {

@@ -2,11 +2,12 @@
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from db.connection import get_connection as _raw_get_connection
 from db.pricing_kb_versions import apply_version_schema, version_to_dict
+from api.services.pricing_kb_import_admin import require_admin
 
 
 router = APIRouter()
@@ -39,7 +40,8 @@ VERSION_SELECT = """
     SELECT v.id, v.source_file, v.source_file_sha256, v.status,
            v.schema_signature, v.table_counts, v.validation_report,
            v.error_message, v.imported_at, v.validated_at, v.published_at,
-           v.published_by, (a.kb_version_id IS NOT NULL) AS is_active
+           v.published_by, (a.kb_version_id IS NOT NULL) AS is_active,
+           v.parent_version_id, v.manifest_sha256
     FROM pricing_kb_versions v
     LEFT JOIN pricing_kb_active_version a ON a.kb_version_id=v.id
 """
@@ -69,7 +71,15 @@ def get_pricing_kb_version(version_id: int):
             row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="knowledge-base version not found")
-        return version_to_dict(row)
+        version = version_to_dict(row)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT source_table,data_version_id,upload_id,source_file_sha256,
+                schema_signature,storage_kind,is_inherited,row_count,validation_json
+                FROM pricing_kb_version_tables WHERE version_id=%s ORDER BY source_table""", (version_id,))
+            version["tables"] = [{"source_table": r[0], "data_version_id": r[1], "upload_id": r[2],
+                "source_file_sha256": r[3], "schema_signature": r[4], "storage_kind": r[5],
+                "is_inherited": r[6], "row_count": r[7], "validation": r[8] or {}} for r in cur.fetchall()]
+        return version
     finally:
         conn.close()
 
@@ -86,7 +96,7 @@ def get_pricing_kb_version_validation(version_id: int):
     }
 
 
-@router.post("/pricing-kb/versions/{version_id}/publish")
+@router.post("/pricing-kb/versions/{version_id}/publish", dependencies=[Depends(require_admin)])
 def publish_pricing_kb_version(version_id: int, body: PublishVersionRequest):
     conn = _kb_connection()
     publisher = (body.published_by or "api").strip() or "api"

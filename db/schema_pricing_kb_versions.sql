@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS pricing_kb_versions (
     id                  BIGSERIAL PRIMARY KEY,
     source_file         TEXT NOT NULL,
-    source_file_sha256  VARCHAR(64) NOT NULL UNIQUE,
+    source_file_sha256  VARCHAR(64) NOT NULL,
     status              VARCHAR(16) NOT NULL DEFAULT 'importing'
                         CHECK (status IN ('importing', 'validated', 'active', 'retired', 'failed')),
     schema_signature    VARCHAR(64),
@@ -42,10 +42,14 @@ INSERT INTO pricing_kb_versions (
 SELECT DISTINCT ON (source_file_sha256)
        source_file, source_file_sha256, 'validated',
        COALESCE(finished_at, created_at), COALESCE(finished_at, created_at)
-FROM pricing_kb_import_runs
-WHERE status = 'done'
+FROM pricing_kb_import_runs run
+WHERE run.status = 'done'
+  AND NOT EXISTS (
+      SELECT 1 FROM pricing_kb_versions version
+      WHERE version.source_file_sha256=run.source_file_sha256
+  )
 ORDER BY source_file_sha256, COALESCE(finished_at, created_at) DESC
-ON CONFLICT (source_file_sha256) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Every imported source row belongs to exactly one immutable version.
 ALTER TABLE tlibs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
@@ -73,7 +77,11 @@ FROM (
     UNION SELECT source_file_sha256 FROM tqdk_tqdzy
 ) sources
 WHERE source_file_sha256 IS NOT NULL
-ON CONFLICT (source_file_sha256) DO NOTHING;
+  AND NOT EXISTS (
+      SELECT 1 FROM pricing_kb_versions version
+      WHERE version.source_file_sha256=sources.source_file_sha256
+  )
+ON CONFLICT DO NOTHING;
 
 UPDATE tlibs t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;

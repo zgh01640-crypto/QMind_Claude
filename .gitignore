@@ -3,8 +3,14 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.pytest_cache/
+pytest-cache-files-*/
 venv/
+.pytest_cache/
+pytest-cache-files-*/
 env/
+.pytest_cache/
+pytest-cache-files-*/
 
 # 环境变量（含密钥，不提交）
 .env
@@ -19,12 +25,18 @@ web/.env.local
 *.log
 *.tmp
 /tmp/
+.data/
 
 # 大文件（Excel/PDF 源数据）
 mydoc/*.xlsx
 mydoc/*.pdf
 mydoc/*.swz
 mydoc/*.docx
+mydoc/*.db
+mydoc/**/*.db
+mydoc/**/*.exe
+mydoc/**/*.dll
+mydoc/**/*.ini
 
 # IDE
 .vscode/

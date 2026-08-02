@@ -82,6 +82,7 @@ interface ItemResult {
   coefficientPreview?: PricingTaskCoefficientCheck['items']
   coefficientCheck?: PricingTaskCoefficientCheck
   coefficientChecking?: boolean
+  autoConfirming?: boolean
   coefficientError?: string
   confirmedResults?: PricingTaskRun['confirmed_results']
   stepTimings?: Record<string, PricingTaskStepTiming>
@@ -134,6 +135,38 @@ function statusClassName(status?: string) {
 function matchCountLabel(result?: ItemResult) {
   if (!result?.quotaMatch) return ''
   return `${result.quotaMatch.matches.length} 条定额`
+}
+
+function quotaHitBadge(result?: ItemResult) {
+  if (!result?.quotaMatch) return null
+  const evaluation = result.evaluation
+  if (!evaluation || evaluation.manual_count === 0) {
+    return {
+      label: '待对比',
+      title: '尚无人工定额对比结果',
+      className: 'border-slate-200 bg-slate-100 text-slate-600',
+    }
+  }
+  const title = `命中 ${evaluation.hit_count} / 遗漏 ${evaluation.missed_count} / 额外 ${evaluation.extra_count}`
+  if (evaluation.missed_count === 0 && evaluation.extra_count === 0) {
+    return {
+      label: '完全命中',
+      title,
+      className: 'border-emerald-200 bg-emerald-100 text-emerald-700',
+    }
+  }
+  if (evaluation.hit_count > 0) {
+    return {
+      label: '部分命中',
+      title,
+      className: 'border-amber-200 bg-amber-100 text-amber-700',
+    }
+  }
+  return {
+    label: '未命中',
+    title,
+    className: 'border-rose-200 bg-rose-100 text-rose-700',
+  }
 }
 
 function stepBadgeClass(tone: 'success' | 'warning' | 'error' | 'pending') {
@@ -1072,7 +1105,12 @@ export default function PricingTaskDetailPage() {
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
   const selectedItem = selectedItemId ? items.find(item => item.id === selectedItemId) : undefined
-  const isRunning = currentResult?.phase === 'reasoning'
+  const isRunning = Boolean(
+    currentResult?.phase === 'reasoning'
+      || currentResult?.autoConfirming
+      || currentResult?.conversionChecking
+      || currentResult?.coefficientChecking,
+  )
 
   useEffect(() => {
     if (!Number.isFinite(taskId)) return
@@ -1199,14 +1237,41 @@ export default function PricingTaskDetailPage() {
     }
   }
 
+  async function autoConfirmAndContinue(runId: number, itemId: number, matches: QuotaMatch[]) {
+    updateResult(itemId, s => ({
+      ...s,
+      autoConfirming: true,
+      status: 'running',
+      reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【自动确认】已完成套定额，正在确认全部匹配定额并继续后续换算。\n`,
+    }))
+    try {
+      await confirmPricingTaskRun(runId, matches)
+      updateResult(itemId, s => ({ ...s, autoConfirming: false, phase: 'done', status: 'confirmed' }))
+      await runConversionCheck(runId, itemId)
+      await runCoefficientCheck(runId, itemId)
+    } catch (err) {
+      updateResult(itemId, s => ({
+        ...s,
+        autoConfirming: false,
+        phase: 'error',
+        status: 'failed',
+        error: `自动确认定额失败：${err instanceof Error ? err.message : '未知错误'}`,
+      }))
+    }
+  }
+
   async function handleMatch(itemId: number) {
     if (!task || isRunning) return
     setSelectedItemId(itemId)
     setItemResults(m => new Map(m).set(itemId, { phase: 'reasoning', reasoning: '', status: 'running', stepTimings: {} }))
+    let streamRunId: number | null = null
+    let matchedResults: QuotaMatch[] = []
+    let streamCompleted = false
 
     try {
       await streamPricingTaskRunItem(task.id, itemId, (evt: PricingTaskEvent) => {
         if (evt.type === 'run_started') {
+          streamRunId = evt.run_id
           updateResult(itemId, s => ({ ...s, runId: evt.run_id, status: 'running' }))
         } else if (evt.type === 'reasoning_token') {
           updateResult(itemId, s => ({ ...s, reasoning: s.reasoning + evt.token }))
@@ -1249,6 +1314,7 @@ export default function PricingTaskDetailPage() {
             quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total },
           }))
         } else if (evt.type === 'quota_match') {
+          matchedResults = evt.matches
           updateResult(itemId, s => ({
             ...s,
             quotaMatch: { matches: evt.matches, issues: evt.issues },
@@ -1261,11 +1327,16 @@ export default function PricingTaskDetailPage() {
             stepTimings: { ...(s.stepTimings ?? {}), [String(evt.step_no)]: evt },
           }))
         } else if (evt.type === 'done') {
-          updateResult(itemId, s => ({ ...s, phase: 'done', status: 'completed', runId: evt.run_id ?? s.runId }))
+          streamRunId = evt.run_id ?? streamRunId
+          streamCompleted = true
+          updateResult(itemId, s => ({ ...s, phase: 'done', status: matchedResults.length > 0 ? 'running' : 'completed', runId: streamRunId ?? s.runId }))
         } else if (evt.type === 'error') {
           updateResult(itemId, s => ({ ...s, phase: 'error', status: 'failed', error: evt.error }))
         }
       })
+      if (streamCompleted && streamRunId && matchedResults.length > 0) {
+        await autoConfirmAndContinue(streamRunId, itemId, matchedResults)
+      }
     } catch (err) {
       updateResult(itemId, s => ({
         ...s,
@@ -1406,23 +1477,6 @@ export default function PricingTaskDetailPage() {
     }
   }
 
-  async function handleConfirm() {
-    if (!selectedItemId || !currentResult?.runId) return
-    const itemId = selectedItemId
-    const runId = currentResult.runId
-    setActionBusy(true)
-    try {
-      await confirmPricingTaskRun(runId, currentResult.quotaMatch?.matches)
-      updateResult(itemId, s => ({ ...s, status: 'confirmed' }))
-    } finally {
-      setActionBusy(false)
-    }
-    void (async () => {
-      await runConversionCheck(runId, itemId)
-      await runCoefficientCheck(runId, itemId)
-    })()
-  }
-
   async function handleReject() {
     if (!selectedItemId || !currentResult?.runId) return
     setActionBusy(true)
@@ -1443,8 +1497,7 @@ export default function PricingTaskDetailPage() {
   }
 
   const libraryNames = task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'
-  const canConfirm = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'confirmed'
-  const canReject = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'rejected'
+  const canReject = currentResult?.phase === 'done' && currentResult.runId && currentResult.status !== 'rejected' && !currentResult.autoConfirming && !currentResult.conversionChecking && !currentResult.coefficientChecking
   const currentActiveStepNo = activeStepNo(currentResult)
   const currentActiveStep = currentActiveStepNo == null
     ? undefined
@@ -1566,6 +1619,7 @@ export default function PricingTaskDetailPage() {
                     const result = itemResults.get(item.id)
                     const selected = selectedItemId === item.id
                     const activeStep = activeStepNo(result)
+                    const quotaHit = quotaHitBadge(result)
                     return (
                       <div
                         key={item.id}
@@ -1585,9 +1639,12 @@ export default function PricingTaskDetailPage() {
                                 <div className="font-mono text-xs text-gray-600">{item.item_code}</div>
                                 <div className="text-sm font-medium text-gray-900 truncate">{item.item_name}</div>
                               </div>
-                              {result?.quotaMatch && (
-                                <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusClassName(result.status)}`}>
-                                  已套
+                              {quotaHit && (
+                                <span
+                                  title={quotaHit.title}
+                                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${quotaHit.className}`}
+                                >
+                                  {quotaHit.label}
                                 </span>
                               )}
                             </div>
@@ -2020,13 +2077,12 @@ export default function PricingTaskDetailPage() {
                   <section className="px-4 py-4 bg-white">
                     <div className="text-xs text-gray-500 mb-3">当前状态：{statusLabel(currentResult.status)}</div>
                     <div className="flex gap-2">
-                      <button
-                        onClick={handleConfirm}
-                        disabled={!canConfirm || actionBusy}
-                        className="flex-1 px-3 py-2 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
-                      >
-                        确认定额并组合换算
-                      </button>
+                      <div className="flex-1 rounded border border-emerald-200 bg-emerald-50 px-3 py-2">
+                        <div className="text-xs font-semibold text-emerald-800">自动确认已启用</div>
+                        <div className="mt-0.5 text-[11px] leading-4 text-emerald-700">
+                          {currentResult.autoConfirming ? '正在自动确认全部匹配定额...' : currentResult.status === 'confirmed' ? '已自动确认全部定额，并连续执行后续换算。' : currentResult.phase === 'reasoning' || currentResult.quotaMatch?.matches.length ? '套定额完成后将自动确认并继续后续换算。' : '未匹配到可自动确认的定额，后续换算未执行。'}
+                        </div>
+                      </div>
                       <button
                         onClick={handleReject}
                         disabled={!canReject || actionBusy}

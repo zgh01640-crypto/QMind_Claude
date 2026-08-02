@@ -169,7 +169,9 @@ def begin_version(pg, source: Path, source_hash: str, inspection: dict[str, Any]
     with pg.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('pricing_kb_import'))")
         cur.execute(
-            "SELECT id, status FROM pricing_kb_versions WHERE source_file_sha256=%s FOR UPDATE",
+            """SELECT id, status FROM pricing_kb_versions
+               WHERE source_file_sha256=%s AND manifest_sha256 IS NULL
+               ORDER BY id LIMIT 1 FOR UPDATE""",
             (source_hash,),
         )
         row = cur.fetchone()
@@ -290,7 +292,7 @@ def import_source_table(
     insert_sql = f"""
         INSERT INTO {pg_table} ({", ".join(all_columns)})
         VALUES %s
-        ON CONFLICT (source_file_sha256, source_rowid) DO NOTHING
+        ON CONFLICT (kb_version_id, source_rowid) DO NOTHING
     """
 
     total = 0

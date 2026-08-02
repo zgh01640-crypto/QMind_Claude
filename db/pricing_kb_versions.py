@@ -6,6 +6,7 @@ from typing import Any
 
 
 SCHEMA_PATH = Path(__file__).with_name("schema_pricing_kb_versions.sql")
+ADMIN_SCHEMA_PATH = Path(__file__).with_name("schema_pricing_kb_import_admin.sql")
 _SCHEMA_LOCK = Lock()
 _SCHEMA_APPLIED = False
 
@@ -19,6 +20,7 @@ def apply_version_schema(conn) -> None:
             return
         with conn.cursor() as cur:
             cur.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+            cur.execute(ADMIN_SCHEMA_PATH.read_text(encoding="utf-8"))
         conn.commit()
         _SCHEMA_APPLIED = True
 
@@ -66,4 +68,6 @@ def version_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "published_at": row[10],
         "published_by": row[11],
         "is_active": bool(row[12]),
+        "parent_version_id": int(row[13]) if len(row) > 13 and row[13] is not None else None,
+        "manifest_sha256": row[14] if len(row) > 14 else None,
     }
