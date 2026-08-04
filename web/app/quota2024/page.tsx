@@ -197,10 +197,11 @@ export default function Quota2024Page() {
   // 加载章
   useEffect(() => {
     if (!selectedStandard) return
+    const standardId = selectedStandard.id
     async function load() {
       setLoading(true)
       try {
-        const data = await fetchQuota2024Chapters(selectedStandard.id)
+        const data = await fetchQuota2024Chapters(standardId)
         setChapters(data)
         if (data.length > 0) {
           setSelectedChapter(data[0])
@@ -215,10 +216,11 @@ export default function Quota2024Page() {
   // 加载节
   useEffect(() => {
     if (!selectedChapter) return
+    const chapterId = selectedChapter.id
     async function load() {
       setLoading(true)
       try {
-        const detail = await fetchQuota2024ChapterSections(selectedChapter.id)
+        const detail = await fetchQuota2024ChapterSections(chapterId)
         setSections(detail.sections)
         setActiveTab('intro')
         setGroups([])

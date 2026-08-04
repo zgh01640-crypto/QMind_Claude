@@ -12,6 +12,7 @@ import re
 import sys
 from io import BytesIO
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from time import perf_counter, sleep
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
@@ -282,6 +283,16 @@ class RunRequest(BaseModel):
 
 class ConfirmRunRequest(BaseModel):
     results: Optional[list[dict[str, Any]]] = None
+
+
+class ManualComparisonAiQuota(BaseModel):
+    dekid: int
+    dezmid: int
+
+
+class ManualComparisonUpdateRequest(BaseModel):
+    retained_manual_quota_ids: list[int] = Field(default_factory=list)
+    accepted_ai_quotas: list[ManualComparisonAiQuota] = Field(default_factory=list)
 
 
 class ConversionConfirmRequest(BaseModel):
@@ -1103,6 +1114,21 @@ def _normalize_matches(raw_match: dict[str, Any], candidates: list[dict[str, Any
     return {"matches": normalized, "issues": raw_match.get("issues", [])}
 
 
+def _manual_quota_payload(row: Any) -> dict[str, Any]:
+    quota_code = str(row[2] or "").strip()
+    return {
+        "id": int(row[0]),
+        "boq_item_id": int(row[1]),
+        "quota_code": quota_code,
+        "quota_name": row[3],
+        "quota_unit": row[4],
+        "quantity": float(row[5]) if row[5] is not None else None,
+        "qty_factor": float(row[6]) if row[6] is not None else None,
+        "quota_item_id": int(row[7]) if row[7] is not None else None,
+        "is_formula": any(symbol in quota_code for symbol in ("+", "*", "/")),
+    }
+
+
 def _manual_quotas(conn, manual_project_id: int | None, item_code: str | None) -> list[dict[str, Any]]:
     if not manual_project_id or not item_code:
         return []
@@ -1110,7 +1136,8 @@ def _manual_quotas(conn, manual_project_id: int | None, item_code: str | None) -
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT q.quota_code, q.quota_name, q.quota_unit, q.quantity, q.qty_factor
+            SELECT q.id, q.boq_item_id, q.quota_code, q.quota_name, q.quota_unit,
+                   q.quantity, q.qty_factor, q.quota_item_id
             FROM manual_boq_items i
             JOIN manual_boq_quotas q ON q.boq_item_id = i.id
             WHERE i.project_id = %s
@@ -1120,16 +1147,30 @@ def _manual_quotas(conn, manual_project_id: int | None, item_code: str | None) -
             (manual_project_id, full_code),
         )
         rows = cur.fetchall()
-    return [
-        {
-            "quota_code": r[0],
-            "quota_name": r[1],
-            "quota_unit": r[2],
-            "quantity": float(r[3]) if r[3] is not None else None,
-            "qty_factor": float(r[4]) if r[4] is not None else None,
-        }
-        for r in rows
-    ]
+    return [_manual_quota_payload(row) for row in rows]
+
+
+def _manual_quotas_by_code(conn, manual_project_id: int | None) -> dict[str, list[dict[str, Any]]]:
+    if not manual_project_id:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT replace(trim(COALESCE(i.item_code, '')), ' ', '') AS item_code,
+                   q.id, q.boq_item_id, q.quota_code, q.quota_name, q.quota_unit,
+                   q.quantity, q.qty_factor, q.quota_item_id
+            FROM manual_boq_items i
+            JOIN manual_boq_quotas q ON q.boq_item_id = i.id
+            WHERE i.project_id = %s
+            ORDER BY i.id, q.id
+            """,
+            (manual_project_id,),
+        )
+        rows = cur.fetchall()
+    result: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        result.setdefault(str(row[0] or ""), []).append(_manual_quota_payload(row[1:]))
+    return result
 
 
 def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1146,9 +1187,15 @@ def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]
         "hit_codes": hit_codes,
         "missed_codes": missed_codes,
         "extra_codes": extra_codes,
+        "consistent_codes": hit_codes,
+        "manual_only_codes": missed_codes,
+        "ai_only_codes": extra_codes,
         "hit_count": len(hit_codes),
         "missed_count": len(missed_codes),
         "extra_count": len(extra_codes),
+        "consistent_count": len(hit_codes),
+        "manual_only_count": len(missed_codes),
+        "ai_only_count": len(extra_codes),
         "manual_count": len(manual_codes),
         "ai_count": len(ai_codes),
     }
@@ -1225,9 +1272,9 @@ def _generate_accuracy_report(
         ],
         "人工对比工程定额": evaluation.get("manual_quotas", []),
         "对比统计": {
-            "命中": evaluation.get("hit_codes", []),
-            "遗漏": evaluation.get("missed_codes", []),
-            "额外": evaluation.get("extra_codes", []),
+            "双方一致": evaluation.get("hit_codes", []),
+            "仅人工": evaluation.get("missed_codes", []),
+            "仅AI": evaluation.get("extra_codes", []),
             "hit_count": evaluation.get("hit_count", 0),
             "missed_count": evaluation.get("missed_count", 0),
             "extra_count": evaluation.get("extra_count", 0),
@@ -1241,8 +1288,9 @@ def _generate_accuracy_report(
         {
             "role": "system",
             "content": (
-                "你是资深造价复核专家。请对智能组价结果与人工对比工程套定额结果做准确性分析。"
-                "只基于输入数据，不编造不存在的定额。重点判断命中、遗漏、额外定额的业务原因，"
+                "你是资深造价复核专家。请对智能组价结果与当前人工对比基准做一致性分析。"
+                "人工对比结果是可修正的复核基准，不得把差异直接认定为AI错误。只基于输入数据，"
+                "重点判断双方一致、仅人工、仅AI定额的业务原因，不编造不存在的定额。"
                 "说明智能组价结果是否可采纳、哪些地方需要人工复核。请输出合法 JSON。"
             ),
         },
@@ -1322,9 +1370,9 @@ def _generate_task_accuracy_report(task: dict[str, Any], items: list[dict[str, A
                     for match in (quota_match.get("matches", []) if isinstance(quota_match, dict) else [])
                 ],
                 "人工定额": evaluation.get("manual_quotas", []) if isinstance(evaluation, dict) else [],
-                "命中": evaluation.get("hit_codes", []) if isinstance(evaluation, dict) else [],
-                "遗漏": evaluation.get("missed_codes", []) if isinstance(evaluation, dict) else [],
-                "额外": evaluation.get("extra_codes", []) if isinstance(evaluation, dict) else [],
+                "双方一致": evaluation.get("hit_codes", []) if isinstance(evaluation, dict) else [],
+                "仅人工": evaluation.get("missed_codes", []) if isinstance(evaluation, dict) else [],
+                "仅AI": evaluation.get("extra_codes", []) if isinstance(evaluation, dict) else [],
                 "组合换算": item.get("conversion_check") or {},
                 "系数换算": item.get("coefficient_check") or {},
             }
@@ -1338,9 +1386,9 @@ def _generate_task_accuracy_report(task: dict[str, Any], items: list[dict[str, A
         {
             "role": "system",
             "content": (
-                "你是资深造价复核专家。请对一个组价任务下全部清单的智能组价结果与人工对比工程结果做整体准确性分析。"
-                "只基于输入数据，不编造定额。重点分析整体命中率、遗漏定额原因、额外定额原因、风险清单类型，"
-                "并给出哪些结果可采纳、哪些需要人工复核。请输出合法 JSON。"
+                "你是资深造价复核专家。请对一个组价任务下全部清单的智能组价结果与当前人工对比基准做整体一致性分析。"
+                "人工对比结果是可修正的复核基准，不是真值。只基于输入数据，重点分析整体一致率、"
+                "仅人工和仅AI定额的业务原因、风险清单类型，并给出可采纳范围与复核建议。请输出合法 JSON。"
             ),
         },
         {
@@ -1397,7 +1445,7 @@ def _build_item_consistency_report(quota_match: dict[str, Any], evaluation: dict
                 "confidence": item.get("confidence") or "",
                 "match_reason": item.get("match_reason") or "",
                 "in_manual": hit,
-                "analysis": "AI定额在人工套定额中命中。" if hit else "AI定额未在人工套定额中命中，属于额外定额，需复核是否多套或编码口径不一致。",
+                "analysis": "AI定额与当前人工基准一致。" if hit else "该定额仅存在于AI结果，需复核AI结果或修正人工基准。",
             }
         )
 
@@ -1413,7 +1461,7 @@ def _build_item_consistency_report(quota_match: dict[str, Any], evaluation: dict
                 "quantity": item.get("quantity"),
                 "qty_factor": item.get("qty_factor"),
                 "in_ai": hit,
-                "analysis": "人工定额已被AI套定额覆盖。" if hit else "人工定额未被AI命中，属于遗漏定额，需复核项目特征、工作内容或候选定额召回。",
+                "analysis": "人工定额与AI结果一致。" if hit else "该定额仅存在于人工基准，需复核人工结果或AI召回与匹配。",
             }
         )
 
@@ -1431,10 +1479,10 @@ def _build_item_consistency_report(quota_match: dict[str, Any], evaluation: dict
         summary = "AI套定额与人工套定额一致。"
     elif hit_count > 0:
         status = "部分一致"
-        summary = "AI套定额与人工套定额部分一致，存在遗漏或额外定额。"
+        summary = "AI结果与当前人工基准部分一致，存在仅人工或仅AI定额。"
     else:
         status = "不一致"
-        summary = "AI套定额与人工套定额未形成有效命中。"
+        summary = "AI结果与当前人工基准未形成一致定额。"
 
     return {
         "status": status,
@@ -1507,7 +1555,10 @@ def _build_pricing_task_detail_report(conn, task: dict[str, Any], rows: list[Any
         feature_check = feature_check if isinstance(feature_check, dict) else {}
         quota_candidates = quota_candidates if isinstance(quota_candidates, dict) else {}
         quota_match = quota_match if isinstance(quota_match, dict) else {}
-        evaluation = evaluation if isinstance(evaluation, dict) else {}
+        evaluation = _evaluate(
+            quota_match.get("matches", []),
+            _manual_quotas(conn, task.get("manual_project_id"), item_code),
+        )
         conversion_check = _hydrate_conversion_for_run(conn, run_id, conversion_check) if isinstance(conversion_check, dict) else conversion_check
         coefficient_check = coefficient_check if isinstance(coefficient_check, dict) else {}
         step_timings = step_timings if isinstance(step_timings, dict) else {}
@@ -1595,10 +1646,10 @@ def _append_report_summary_sheet(wb, report: dict[str, Any]) -> None:
         ("无人工对比清单数", metrics.get("no_manual_item_count")),
         ("AI定额数", metrics.get("ai_count")),
         ("人工定额数", metrics.get("manual_count")),
-        ("命中定额数", metrics.get("hit_count")),
-        ("遗漏定额数", metrics.get("missed_count")),
-        ("额外定额数", metrics.get("extra_count")),
-        ("命中率", metrics.get("hit_rate")),
+        ("双方一致定额数", metrics.get("hit_count")),
+        ("仅人工定额数", metrics.get("missed_count")),
+        ("仅AI定额数", metrics.get("extra_count")),
+        ("对比一致率", metrics.get("hit_rate")),
     ]
     ws.append(["指标", "值"])
     for row in rows:
@@ -1623,9 +1674,9 @@ def _append_report_item_sheet(wb, report: dict[str, Any]) -> None:
             "人工定额名称",
             "一致性状态",
             "一致性分析",
-            "命中编码",
-            "遗漏编码",
-            "额外编码",
+            "双方一致编码",
+            "仅人工编码",
+            "仅AI编码",
         ]
     )
     for index, item in enumerate(report.get("items") or [], start=1):
@@ -3625,49 +3676,64 @@ def list_latest_task_runs(task_id: int):
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM pricing_tasks WHERE id=%s AND status <> 'deleted'", (task_id,))
-            if not cur.fetchone():
+            cur.execute(
+                "SELECT manual_project_id FROM pricing_tasks WHERE id=%s AND status <> 'deleted'",
+                (task_id,),
+            )
+            task_row = cur.fetchone()
+            if not task_row:
                 raise HTTPException(status_code=404, detail="task not found")
+            manual_project_id = task_row[0]
             cur.execute(
                 """
-                SELECT DISTINCT ON (boq_item_id)
-                       boq_item_id, id, status, code_check, feature_check, work_procedures,
-                       quota_candidates, quota_match, evaluation, conversion_check, coefficient_check,
-                       step_timings, error_message, created_at, finished_at, reasoning_text,
-                       kb_version_id
-                FROM pricing_task_runs
-                WHERE task_id=%s
-                ORDER BY boq_item_id, created_at DESC, id DESC
+                SELECT DISTINCT ON (r.boq_item_id)
+                       r.boq_item_id, r.id, r.status, r.code_check, r.feature_check, r.work_procedures,
+                       r.quota_candidates, r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
+                       r.step_timings, r.error_message, r.created_at, r.finished_at, r.reasoning_text,
+                       r.kb_version_id, i.item_code
+                FROM pricing_task_runs r
+                JOIN boq_items i ON i.id = r.boq_item_id
+                WHERE r.task_id=%s
+                ORDER BY r.boq_item_id, r.created_at DESC, r.id DESC
                 """,
                 (task_id,),
             )
             rows = cur.fetchall()
-        confirmed_results = _load_confirmed_results(conn, [int(r[1]) for r in rows])
-        return [
-            {
-                "boq_item_id": r[0],
-                "run": {
-                    "id": r[1],
-                    "status": r[2],
-                    "code_check": r[3],
-                    "feature_check": r[4],
-                    "work_procedures": r[5],
-                    "quota_candidates": r[6],
-                    "quota_match": r[7],
-                    "evaluation": r[8],
-                    "conversion_check": _hydrate_conversion_for_run(conn, int(r[1]), r[9]),
-                    "coefficient_check": r[10],
-                    "step_timings": r[11],
-                    "error_message": r[12],
-                    "created_at": r[13],
-                    "finished_at": r[14],
-                    "reasoning_text": r[15],
-                    "confirmed_results": confirmed_results.get(int(r[1]), []),
-                    "kb_version_id": int(r[16]) if r[16] is not None else None,
-                },
-            }
-            for r in rows
-        ]
+        confirmed_results = _load_confirmed_results(conn, [int(row[1]) for row in rows])
+        manual_by_code = _manual_quotas_by_code(conn, manual_project_id)
+        result = []
+        for row in rows:
+            quota_match = row[7] if isinstance(row[7], dict) else {}
+            item_code = str(row[17] or "").strip().replace(" ", "")
+            current_evaluation = _evaluate(
+                quota_match.get("matches", []),
+                manual_by_code.get(item_code, []),
+            )
+            result.append(
+                {
+                    "boq_item_id": row[0],
+                    "run": {
+                        "id": row[1],
+                        "status": row[2],
+                        "code_check": row[3],
+                        "feature_check": row[4],
+                        "work_procedures": row[5],
+                        "quota_candidates": row[6],
+                        "quota_match": quota_match,
+                        "evaluation": current_evaluation,
+                        "conversion_check": _hydrate_conversion_for_run(conn, int(row[1]), row[9]),
+                        "coefficient_check": row[10],
+                        "step_timings": row[11],
+                        "error_message": row[12],
+                        "created_at": row[13],
+                        "finished_at": row[14],
+                        "reasoning_text": row[15],
+                        "confirmed_results": confirmed_results.get(int(row[1]), []),
+                        "kb_version_id": int(row[16]) if row[16] is not None else None,
+                    },
+                }
+            )
+        return result
     finally:
         conn.close()
 
@@ -3815,7 +3881,10 @@ def generate_pricing_task_accuracy_report(task_id: int):
         }
         for row in rows:
             quota_match = row[2] if isinstance(row[2], dict) else {}
-            evaluation = row[3] if isinstance(row[3], dict) else {}
+            evaluation = _evaluate(
+                quota_match.get("matches", []),
+                _manual_quotas(conn, task_row[4], row[6]),
+            )
             if "manual_quotas" in evaluation:
                 metrics["evaluated_item_count"] += 1
                 metrics["hit_count"] += int(evaluation.get("hit_count") or 0)
@@ -4332,6 +4401,142 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.put("/pricing-task-runs/{run_id}/manual-comparison")
+def update_pricing_task_manual_comparison(run_id: int, body: ManualComparisonUpdateRequest):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.task_id, r.boq_item_id, r.quota_match,
+                       t.manual_project_id, i.item_code
+                FROM pricing_task_runs r
+                JOIN pricing_tasks t ON t.id = r.task_id
+                JOIN boq_items i ON i.id = r.boq_item_id
+                WHERE r.id=%s AND t.status <> 'deleted'
+                """,
+                (run_id,),
+            )
+            run_row = cur.fetchone()
+            if not run_row:
+                raise HTTPException(status_code=404, detail="run not found")
+            task_id, _, quota_match, manual_project_id, item_code = run_row
+            if not manual_project_id:
+                raise HTTPException(status_code=400, detail="task has no manual comparison project")
+            quota_match = quota_match if isinstance(quota_match, dict) else {}
+            matches = quota_match.get("matches", [])
+            ai_by_key = {
+                (int(item.get("dekid")), int(item.get("dezmid"))): item
+                for item in matches
+                if item.get("dekid") is not None and item.get("dezmid") is not None
+            }
+
+            normalized_code = str(item_code or "").strip().replace(" ", "")
+            cur.execute(
+                """
+                SELECT id, quantity
+                FROM manual_boq_items
+                WHERE project_id=%s
+                  AND replace(trim(COALESCE(item_code, '')), ' ', '')=%s
+                ORDER BY id
+                FOR UPDATE
+                """,
+                (manual_project_id, normalized_code),
+            )
+            manual_items = cur.fetchall()
+            if not manual_items:
+                raise HTTPException(status_code=404, detail="manual comparison item not found")
+            if len(manual_items) > 1:
+                raise HTTPException(status_code=409, detail="duplicate item codes in manual comparison project")
+            manual_item_id, manual_quantity = manual_items[0]
+
+            current_manual = _manual_quotas(conn, manual_project_id, item_code)
+            current_by_id = {int(item["id"]): item for item in current_manual}
+            retained_ids = {int(value) for value in body.retained_manual_quota_ids}
+            unknown_manual_ids = retained_ids - set(current_by_id)
+            if unknown_manual_ids:
+                raise HTTPException(status_code=400, detail="manual quota does not belong to this item")
+
+            requested_ai_keys = {(item.dekid, item.dezmid) for item in body.accepted_ai_quotas}
+            unknown_ai_keys = requested_ai_keys - set(ai_by_key)
+            if unknown_ai_keys:
+                raise HTTPException(status_code=400, detail="AI quota does not belong to this run")
+
+            ai_codes = [str(item.get("zmbh") or "").strip() for item in matches]
+            locked_manual_ids = {
+                int(item["id"])
+                for item in current_manual
+                if any(ai_code and ai_code in str(item.get("quota_code") or "") for ai_code in ai_codes)
+            }
+            if not locked_manual_ids.issubset(retained_ids):
+                raise HTTPException(status_code=400, detail="consistent manual quotas must be retained")
+
+            final_codes = {
+                str(current_by_id[item_id].get("quota_code") or "").strip()
+                for item_id in retained_ids
+            }
+            for key in requested_ai_keys:
+                code = str(ai_by_key[key].get("zmbh") or "").strip()
+                if code:
+                    final_codes.add(code)
+            if not final_codes:
+                raise HTTPException(status_code=400, detail="at least one final quota is required")
+
+            if retained_ids:
+                cur.execute(
+                    "DELETE FROM manual_boq_quotas WHERE boq_item_id=%s AND NOT (id = ANY(%s))",
+                    (manual_item_id, list(retained_ids)),
+                )
+            else:
+                cur.execute("DELETE FROM manual_boq_quotas WHERE boq_item_id=%s", (manual_item_id,))
+
+            retained_codes = [
+                str(current_by_id[item_id].get("quota_code") or "").strip()
+                for item_id in retained_ids
+            ]
+            for key in requested_ai_keys:
+                item = ai_by_key[key]
+                quota_code = str(item.get("zmbh") or "").strip()
+                if not quota_code or any(quota_code in manual_code for manual_code in retained_codes):
+                    continue
+                try:
+                    qty_factor = Decimal(str(item.get("qty_factor", 1) or 1))
+                except (InvalidOperation, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail="invalid AI quota factor") from exc
+                if qty_factor <= 0:
+                    raise HTTPException(status_code=400, detail="AI quota factor must be positive")
+                quantity = Decimal(manual_quantity) * qty_factor if manual_quantity is not None else None
+                cur.execute(
+                    """
+                    INSERT INTO manual_boq_quotas(
+                        boq_item_id, quota_code, quota_name, quota_unit,
+                        quantity, unit_price, total_price, qty_factor, quota_item_id
+                    )
+                    VALUES (%s,%s,%s,%s,%s,NULL,NULL,%s,NULL)
+                    """,
+                    (manual_item_id, quota_code, item.get("zmmc"), item.get("dw"), quantity, qty_factor),
+                )
+                retained_codes.append(quota_code)
+
+            cur.execute(
+                "UPDATE pricing_tasks SET accuracy_report=NULL, updated_at=NOW() WHERE manual_project_id=%s",
+                (manual_project_id,),
+            )
+        conn.commit()
+        refreshed_manual = _manual_quotas(conn, manual_project_id, item_code)
+        return {
+            "ok": True,
+            "evaluation": _evaluate(matches, refreshed_manual),
+            "manual_quotas": refreshed_manual,
+            "invalidated_task_id": task_id,
+        }
+    finally:
+        conn.close()
 
 
 @router.post("/pricing-task-runs/{run_id}/confirm")

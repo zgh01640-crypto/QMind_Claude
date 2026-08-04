@@ -1,9 +1,15 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+interface ApiTestData {
+  apiUrl: string
+  status?: number
+  standards?: unknown[]
+}
+
 
 export default function ApiTest() {
-  const [data, setData] = useState<any>(null)
+  const [data, setData] = useState<ApiTestData | null>(null)
   const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
@@ -12,7 +18,7 @@ export default function ApiTest() {
       try {
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
         console.log('API URL:', apiUrl)
-        setData(prev => ({ ...prev, apiUrl }))
+        setData(prev => ({ ...(prev ?? {}), apiUrl }))
 
         const res = await fetch(`${apiUrl}/api/quota2024/standards`)
         const json = await res.json()

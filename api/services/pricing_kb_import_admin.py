@@ -184,7 +184,8 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
         existing = cur.fetchone()
         if existing and existing[1] in {"validated", "active", "retired"}:
             cur.execute(
-                "UPDATE pricing_kb_import_jobs SET version_id=%s,status='validated',finished_at=NOW(),updated_at=NOW() WHERE id=%s",
+                """UPDATE pricing_kb_import_jobs SET version_id=%s,status='validated',current_table=NULL,
+                   completed_tables=total_tables,processed_rows=0,finished_at=NOW(),updated_at=NOW() WHERE id=%s""",
                 (existing[0], job_id),
             )
             conn.commit()

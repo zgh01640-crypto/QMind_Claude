@@ -1,4 +1,4 @@
-const API = process.env.NEXT_PUBLIC_API_URL || ''
+﻿const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 export interface Period {
   id: number
@@ -1431,6 +1431,24 @@ export interface PricingTaskEvaluation {
   extra_count: number
   manual_count: number
   ai_count: number
+  consistent_codes?: string[]
+  manual_only_codes?: string[]
+  ai_only_codes?: string[]
+  consistent_count?: number
+  manual_only_count?: number
+  ai_only_count?: number
+}
+
+export interface PricingTaskManualComparisonInput {
+  retained_manual_quota_ids: number[]
+  accepted_ai_quotas: Array<{ dekid: number; dezmid: number }>
+}
+
+export interface PricingTaskManualComparisonResult {
+  ok: boolean
+  evaluation: PricingTaskEvaluation
+  manual_quotas: DebugManualQuota[]
+  invalidated_task_id: number
 }
 
 export interface PricingTaskAccuracyReport {
@@ -1777,6 +1795,17 @@ export async function confirmPricingTaskRun(runId: number, results?: QuotaMatch[
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ results: results ?? null }),
+  })
+}
+
+export async function updatePricingTaskManualComparison(
+  runId: number,
+  input: PricingTaskManualComparisonInput,
+) {
+  return req<PricingTaskManualComparisonResult>(`/api/pricing-task-runs/${runId}/manual-comparison`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
   })
 }
 
@@ -2401,6 +2430,8 @@ export async function deleteDebugBatch(id: number): Promise<void> {
 // ── 单条调试套定额 ────────────────────────────────────────────────────────────
 
 export interface DebugManualQuota {
+  id?: number
+  boq_item_id?: number
   quota_code: string
   quota_name: string | null
   quota_unit: string | null

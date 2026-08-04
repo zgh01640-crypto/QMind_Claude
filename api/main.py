@@ -1,3 +1,9 @@
+from contextlib import asynccontextmanager
+import logging
+import os
+import socket
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -6,7 +12,47 @@ load_dotenv()
 
 from api.routers import periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
 
-app = FastAPI(title="深圳信息价管理系统", version="1.0.0")
+from api.services.pricing_kb_import_admin import run_next_job
+
+logger = logging.getLogger(__name__)
+
+
+def _pricing_kb_worker_loop(stop_event: threading.Event) -> None:
+    worker_id = f"api:{socket.gethostname()}:{os.getpid()}"
+    while not stop_event.is_set():
+        try:
+            job_id = run_next_job(worker_id)
+        except Exception:
+            logger.exception("pricing knowledge import job failed")
+            stop_event.wait(2)
+            continue
+        if job_id is None:
+            stop_event.wait(2)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop_event = threading.Event()
+    worker_thread: threading.Thread | None = None
+    disabled_values = {"0", "false", "no"}
+    worker_enabled = os.getenv("PRICING_KB_EMBEDDED_WORKER", "1").strip().lower() not in disabled_values
+    if worker_enabled:
+        worker_thread = threading.Thread(
+            target=_pricing_kb_worker_loop,
+            args=(stop_event,),
+            name="pricing-kb-import-worker",
+            daemon=True,
+        )
+        worker_thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        if worker_thread:
+            worker_thread.join(timeout=5)
+
+
+app = FastAPI(title="深圳信息价管理系统", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

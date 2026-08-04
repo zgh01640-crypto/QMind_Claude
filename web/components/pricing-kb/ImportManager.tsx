@@ -22,10 +22,12 @@ const terminal = new Set(['validated', 'failed', 'cancelled'])
 
 function Badge({ value }: { value: string }) {
   const tone = value === 'active' || value === 'validated'
-    ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
-    : value === 'failed' ? 'border-rose-400/30 bg-rose-400/10 text-rose-300'
-      : 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-  return <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[.18em] ${tone}`}>{value}</span>
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : value === 'running' ? 'border-blue-200 bg-blue-50 text-blue-700'
+      : value === 'failed' ? 'border-red-200 bg-red-50 text-red-700'
+        : value === 'queued' ? 'border-amber-200 bg-amber-50 text-amber-700'
+          : 'border-gray-200 bg-gray-50 text-gray-600'
+  return <span className={`inline-flex rounded border px-2 py-0.5 text-xs font-medium ${tone}`}>{value}</span>
 }
 
 export default function ImportManager({ onRefresh }: { onRefresh?: () => void }) {
@@ -152,87 +154,173 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   }
 
   const progress = job?.total_tables ? Math.round(job.completed_tables / job.total_tables * 100) : 0
+  const jobStage = job?.current_table || (job?.status === 'validated' ? 'COMPLETED'
+    : job?.status === 'failed' ? 'FAILED'
+      : job?.status === 'cancelled' ? 'CANCELLED'
+        : job?.status === 'running' ? 'PREPARING' : 'WAITING')
 
   return (
-    <section className="overflow-hidden border border-slate-800 bg-[#07131b] text-slate-100 shadow-[0_20px_60px_rgba(15,23,42,.16)]">
-      <div className="relative overflow-hidden border-b border-cyan-400/15 px-5 py-5">
-        <div className="absolute inset-0 opacity-20 [background-image:linear-gradient(rgba(34,211,238,.12)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.12)_1px,transparent_1px)] [background-size:24px_24px]" />
-        <div className="relative flex flex-wrap items-start justify-between gap-4">
+    <section className="overflow-hidden border border-gray-200 bg-white">
+      <div className="border-b border-gray-200 px-5 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="font-mono text-[10px] uppercase tracking-[.35em] text-cyan-300">Knowledge Intake Console</div>
-            <h2 className="mt-2 font-serif text-2xl font-semibold text-white">知识库导入控制台</h2>
-            <p className="mt-1 text-xs text-slate-400">扫描、编排、校验、发布。未知表只进入隔离原始区。</p>
+            <h2 className="text-lg font-semibold text-gray-900">知识库导入控制台</h2>
+            <p className="mt-1 text-sm text-gray-500">上传、扫描、校验并发布知识库版本，未知表将进入隔离原始区。</p>
           </div>
           <label className="w-full max-w-xs">
-            <span className="text-[10px] uppercase tracking-widest text-slate-500">管理员令牌 / Session only</span>
-            <input type="password" value={token} onChange={event => saveToken(event.target.value)} placeholder="PRICING_KB_ADMIN_TOKEN"
-              className="mt-1 w-full border border-slate-700 bg-slate-950/70 px-3 py-2 font-mono text-xs text-cyan-100 outline-none focus:border-cyan-500" />
+            <span className="mb-1 block text-xs font-medium text-gray-600">管理员令牌</span>
+            <input
+              type="password"
+              value={token}
+              onChange={event => saveToken(event.target.value)}
+              placeholder="PRICING_KB_ADMIN_TOKEN"
+              className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            />
           </label>
         </div>
       </div>
 
-      {error && <div className="border-b border-rose-400/20 bg-rose-500/10 px-5 py-3 text-xs text-rose-200">{error}</div>}
+      {error && <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">{error}</div>}
 
-      <div className="grid lg:grid-cols-[1.25fr_.75fr]">
-        <div className="border-b border-slate-800 p-5 lg:border-b-0 lg:border-r">
-          <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto]">
-            <select value={profileId} onChange={event => applyProfile(event.target.value)} className="border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-500">
+      <div className="grid lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,.65fr)]">
+        <div className="border-b border-gray-200 p-5 lg:border-b-0 lg:border-r">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+            <select
+              value={profileId}
+              onChange={event => applyProfile(event.target.value)}
+              className="min-w-0 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
               {profiles.map(profile => <option key={profile.profile_id} value={profile.profile_id}>{profile.name}</option>)}
             </select>
-            <label className="cursor-pointer border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-center text-xs font-semibold uppercase tracking-widest text-cyan-200 hover:bg-cyan-400/20">
-              {busy ? '处理中' : '上传 .DB'}
+            <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white transition hover:bg-blue-700">
+              {busy ? '处理中...' : '上传 .DB'}
               <input type="file" accept=".db" disabled={busy} className="hidden" onChange={event => event.target.files?.[0] && handleUpload(event.target.files[0])} />
             </label>
-            <button onClick={saveProfile} disabled={!selected.size} className="border border-slate-700 px-3 py-2 text-[10px] uppercase tracking-widest text-slate-400 hover:border-slate-500 disabled:opacity-30">保存模板</button>
+            <button
+              type="button"
+              onClick={saveProfile}
+              disabled={!selected.size}
+              className="rounded border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              保存模板
+            </button>
           </div>
-          <p className="mt-2 text-xs text-slate-500">{currentProfile?.description || '选择一个导入模板'}</p>
+          <p className="mt-2 text-xs text-gray-500">{currentProfile?.description || '选择一个导入模板'}</p>
 
-          <div className="mt-5 border border-slate-800">
-            <div className="grid grid-cols-[minmax(0,1fr)_80px_76px] border-b border-slate-800 bg-slate-900/70 px-3 py-2 text-[10px] uppercase tracking-widest text-slate-500">
-              <span>源表 / 处理策略</span><span className="text-right">行数</span><span className="text-right">选择</span>
+          <div className="mt-5 overflow-hidden rounded border border-gray-200">
+            <div className="grid grid-cols-[minmax(0,1fr)_90px_72px] border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-xs font-medium text-gray-600">
+              <span>来源表 / 处理策略</span>
+              <span className="text-right">行数</span>
+              <span className="text-right">启用</span>
             </div>
             <div className="max-h-[360px] overflow-y-auto">
-              {!tables.length && <div className="px-4 py-12 text-center text-xs text-slate-600">上传 SQLite `.DB` 后显示结构扫描结果</div>}
+              {!tables.length && <div className="px-4 py-12 text-center text-sm text-gray-400">上传 SQLite `.DB` 后显示结构扫描结果</div>}
               {tables.map(table => {
                 const checked = table.known ? selected.has(table.name) : raw.has(table.name)
                 const locked = table.known && currentProfile?.required_tables.includes(table.name)
-                return <button key={table.name} onClick={() => toggleTable(table)} className="grid w-full grid-cols-[minmax(0,1fr)_80px_76px] items-center border-b border-slate-800/80 px-3 py-2.5 text-left hover:bg-slate-800/40">
-                  <span className="min-w-0"><span className="font-mono text-xs text-slate-200">{table.name}</span>
-                    <span className={`ml-2 text-[9px] font-semibold uppercase tracking-widest ${table.known ? 'text-cyan-400' : 'text-amber-300'}`}>{locked ? 'required' : table.known ? 'typed' : 'raw'}</span>
-                    {!!table.dependencies.length && <span className="mt-0.5 block truncate text-[10px] text-slate-600">依赖 {table.dependencies.join(' · ')}</span>}
-                  </span>
-                  <span className="text-right font-mono text-xs text-slate-500">{table.row_count.toLocaleString()}</span>
-                  <span className="flex justify-end"><span className={`h-4 w-8 border p-0.5 ${checked ? 'border-cyan-400 bg-cyan-400/20' : 'border-slate-600'}`}><span className={`block h-full w-3 bg-cyan-300 transition ${checked ? 'translate-x-3' : ''}`} /></span></span>
-                </button>
+                return (
+                  <button
+                    key={table.name}
+                    type="button"
+                    onClick={() => toggleTable(table)}
+                    className="grid w-full grid-cols-[minmax(0,1fr)_90px_72px] items-center border-b border-gray-100 px-3 py-2.5 text-left transition last:border-b-0 hover:bg-blue-50/50"
+                  >
+                    <span className="min-w-0">
+                      <span className="font-mono text-xs font-medium text-gray-900">{table.name}</span>
+                      <span className={`ml-2 text-[10px] font-semibold ${table.known ? 'text-blue-600' : 'text-amber-600'}`}>
+                        {locked ? '必需' : table.known ? '结构化' : '原始表'}
+                      </span>
+                      {!!table.dependencies.length && <span className="mt-0.5 block truncate text-xs text-gray-400">依赖 {table.dependencies.join(' · ')}</span>}
+                    </span>
+                    <span className="text-right text-xs tabular-nums text-gray-500">{table.row_count.toLocaleString()}</span>
+                    <span className="flex justify-end">
+                      <span className={`h-5 w-9 rounded-full border p-0.5 transition ${checked ? 'border-blue-600 bg-blue-600' : 'border-gray-300 bg-gray-100'}`}>
+                        <span className={`block h-3.5 w-3.5 rounded-full transition ${checked ? 'translate-x-4 bg-white' : 'bg-gray-400'}`} />
+                      </span>
+                    </span>
+                  </button>
+                )
               })}
             </div>
           </div>
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="font-mono text-[10px] text-slate-500">TYPED {selected.size} / RAW {raw.size} / SHA {upload ? upload.inspection.schema_signature.slice(0, 12) : '—'}</div>
-            <button disabled={!upload || busy || (!selected.size && !raw.size)} onClick={queueImport} className="bg-cyan-300 px-5 py-2 text-xs font-bold uppercase tracking-widest text-slate-950 disabled:cursor-not-allowed disabled:opacity-30">进入后台队列</button>
+            <div className="text-xs text-gray-500">
+              已选结构化表 <span className="font-medium text-gray-800">{selected.size}</span>
+              <span className="mx-2 text-gray-300">|</span>
+              原始表 <span className="font-medium text-gray-800">{raw.size}</span>
+              <span className="mx-2 text-gray-300">|</span>
+              <span className="font-mono">SHA {upload ? upload.inspection.schema_signature.slice(0, 12) : '—'}</span>
+            </div>
+            <button
+              type="button"
+              disabled={!upload || busy || (!selected.size && !raw.size)}
+              onClick={queueImport}
+              className="rounded bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              开始导入
+            </button>
           </div>
 
-          {job && <div className="mt-5 border border-slate-700 bg-slate-900/60 p-4">
-            <div className="flex items-center justify-between"><div className="font-mono text-xs">JOB #{job.id} · {job.current_table || 'WAITING'}</div><Badge value={job.status} /></div>
-            <div className="mt-3 h-1.5 overflow-hidden bg-slate-800"><div className="h-full bg-gradient-to-r from-cyan-400 to-emerald-300 transition-all" style={{ width: `${progress}%` }} /></div>
-            <div className="mt-2 flex justify-between font-mono text-[10px] text-slate-500"><span>{job.completed_tables}/{job.total_tables} TABLES</span><span>{job.processed_rows.toLocaleString()} ROWS · {progress}%</span></div>
-            {!terminal.has(job.status) && <button onClick={() => cancelPricingKbImportJob(job.id, token).then(() => fetchPricingKbImportJob(job.id, token).then(setJob))} className="mt-3 text-[10px] uppercase tracking-widest text-rose-300">取消任务</button>}
-            {job.error_message && <div className="mt-3 text-xs text-rose-300">{job.error_message}</div>}
-          </div>}
+          {job && (
+            <div className="mt-5 rounded border border-gray-200 bg-gray-50 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-gray-900">导入任务 #{job.id}</div>
+                  <div className="mt-0.5 font-mono text-xs text-gray-500">{jobStage}</div>
+                </div>
+                <Badge value={job.status} />
+              </div>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-200">
+                <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${progress}%` }} />
+              </div>
+              <div className="mt-2 flex justify-between text-xs text-gray-500">
+                <span>{job.completed_tables}/{job.total_tables} 张表</span>
+                <span>{job.processed_rows.toLocaleString()} 行 · {progress}%</span>
+              </div>
+              {!terminal.has(job.status) && (
+                <button type="button" onClick={() => cancelPricingKbImportJob(job.id, token).then(() => fetchPricingKbImportJob(job.id, token).then(setJob))} className="mt-3 text-xs font-medium text-red-600 hover:text-red-700">
+                  取消任务
+                </button>
+              )}
+              {job.error_message && <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{job.error_message}</div>}
+            </div>
+          )}
         </div>
 
-        <aside className="p-5">
-          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-[.2em] text-slate-300">版本轨道</h3><button onClick={reloadVersions} className="font-mono text-[10px] text-cyan-400">REFRESH</button></div>
-          <div className="mt-4 space-y-2">
-            {versions.slice(0, 10).map(version => <div key={version.id} className={`border p-3 ${version.is_active ? 'border-emerald-400/40 bg-emerald-400/5' : 'border-slate-800 bg-slate-900/40'}`}>
-              <div className="flex items-center justify-between gap-2"><span className="font-mono text-sm font-semibold">V{version.id.toString().padStart(3, '0')}</span><Badge value={version.status} /></div>
-              <div className="mt-2 truncate font-mono text-[10px] text-slate-600">{version.source_file_sha256.slice(0, 20)}</div>
-              <div className="mt-2 text-[10px] text-slate-500">{new Date(version.imported_at).toLocaleString('zh-CN')}</div>
-              {!version.is_active && ['validated', 'retired'].includes(version.status) && <button disabled={busy || !token} onClick={() => publish(version)} className="mt-3 w-full border border-emerald-400/30 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-emerald-300 hover:bg-emerald-400/10 disabled:opacity-30">{version.status === 'retired' ? '重新激活' : '发布版本'}</button>}
-            </div>)}
+        <aside className="bg-gray-50/60 p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">知识库版本</h3>
+              <p className="mt-0.5 text-xs text-gray-500">校验后发布，组价任务才会使用新版本。</p>
+            </div>
+            <button type="button" onClick={reloadVersions} className="text-xs font-medium text-blue-600 hover:text-blue-700">刷新</button>
           </div>
-          <div className="mt-5 border-l-2 border-amber-300/50 pl-3 text-[10px] leading-relaxed text-slate-500">Worker 需单独运行：<code className="text-amber-200">python pricing_kb_import_worker.py</code></div>
+          <div className="mt-4 space-y-2">
+            {versions.slice(0, 10).map(version => (
+              <div key={version.id} className={`rounded border p-3 ${version.is_active ? 'border-emerald-200 bg-emerald-50/70' : 'border-gray-200 bg-white'}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm font-semibold text-gray-900">V{version.id.toString().padStart(3, '0')}</span>
+                  <Badge value={version.status} />
+                </div>
+                <div className="mt-2 truncate font-mono text-xs text-gray-400">{version.source_file_sha256.slice(0, 20)}</div>
+                <div className="mt-1 text-xs text-gray-500">{new Date(version.imported_at).toLocaleString('zh-CN')}</div>
+                {!version.is_active && ['validated', 'retired'].includes(version.status) && (
+                  <button
+                    type="button"
+                    disabled={busy || !token}
+                    onClick={() => publish(version)}
+                    className="mt-3 w-full rounded border border-blue-200 bg-blue-50 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {version.status === 'retired' ? '重新激活' : '发布版本'}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-5 border-l-2 border-blue-200 pl-3 text-xs leading-relaxed text-gray-500">
+            导入任务由后台 Worker 自动执行，排队后通常会在数秒内开始。
+          </div>
         </aside>
       </div>
     </section>

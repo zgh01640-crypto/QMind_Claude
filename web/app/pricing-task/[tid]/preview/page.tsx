@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
@@ -27,6 +27,7 @@ import {
   streamPricingTaskRunItem,
   updateBoqItemDescription,
 } from '@/lib/api'
+import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
 
 interface CodeCheck {
   item_code: string
@@ -87,6 +88,10 @@ interface ItemResult {
 }
 
 function runToResult(run: PricingTaskRun): ItemResult {
+  const quotaMatch = run.quota_match as ItemResult['quotaMatch']
+  const normalizedQuotaMatch = quotaMatch && Array.isArray(quotaMatch.matches)
+    ? { matches: quotaMatch.matches, issues: Array.isArray(quotaMatch.issues) ? quotaMatch.issues : [] }
+    : undefined
   return {
     phase: run.status === 'failed' ? 'error' : 'done',
     reasoning: run.reasoning_text || '',
@@ -101,7 +106,7 @@ function runToResult(run: PricingTaskRun): ItemResult {
       : undefined,
     featureCheck: run.feature_check as ItemResult['featureCheck'],
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
-    quotaMatch: run.quota_match as ItemResult['quotaMatch'],
+    quotaMatch: normalizedQuotaMatch,
     evaluation: run.evaluation ?? undefined,
     conversionCheck: run.conversion_check ?? undefined,
     coefficientCheck: run.coefficient_check ?? undefined,
@@ -144,23 +149,23 @@ function quotaHitBadge(result?: ItemResult) {
       className: 'border-slate-600 bg-slate-800 text-slate-300',
     }
   }
-  const title = `命中 ${evaluation.hit_count} / 遗漏 ${evaluation.missed_count} / 额外 ${evaluation.extra_count}`
+  const title = `双方一致 ${evaluation.hit_count} / 仅人工 ${evaluation.missed_count} / 仅AI ${evaluation.extra_count}`
   if (evaluation.missed_count === 0 && evaluation.extra_count === 0) {
     return {
-      label: '完全命中',
+      label: '完全一致',
       title,
       className: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
     }
   }
   if (evaluation.hit_count > 0) {
     return {
-      label: '部分命中',
+      label: '部分一致',
       title,
       className: 'border-amber-400/30 bg-amber-400/10 text-amber-200',
     }
   }
   return {
-    label: '未命中',
+    label: '不一致',
     title,
     className: 'border-rose-400/30 bg-rose-400/10 text-rose-200',
   }
@@ -867,13 +872,13 @@ function AccuracyReportPanel({
         <div className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className={`text-sm font-semibold ${heading}`}>智能组价全集准确性分析报告</div>
+              <div className={`text-sm font-semibold ${heading}`}>智能组价对比一致性分析报告</div>
               <p className={`mt-1 max-w-4xl text-xs leading-5 ${muted}`}>{report.summary}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className={`rounded-full border px-2.5 py-1 font-semibold ${chip}`}>等级：{report.accuracy_level}</span>
               {report.accuracy_rate != null && (
-                <span className={`rounded-full border px-2.5 py-1 font-semibold ${chip}`}>命中率 {formatPercent(report.accuracy_rate)}</span>
+                <span className={`rounded-full border px-2.5 py-1 font-semibold ${chip}`}>对比一致率 {formatPercent(report.accuracy_rate)}</span>
               )}
             </div>
           </div>
@@ -884,9 +889,9 @@ function AccuracyReportPanel({
                 ['已评估', `${metrics.evaluated_item_count ?? 0}/${metrics.total_items ?? 0}`],
                 ['人工定额', metrics.manual_count],
                 ['AI 定额', metrics.ai_count],
-                ['命中', metrics.hit_count],
-                ['遗漏', metrics.missed_count],
-                ['额外', metrics.extra_count],
+                ['双方一致', metrics.hit_count],
+                ['仅人工', metrics.missed_count],
+                ['仅AI', metrics.extra_count],
                 ['完全一致', metrics.exact_item_count ?? 0],
                 ['生成时间', report.generated_at ? new Date(report.generated_at).toLocaleString() : '-'],
               ].map(([label, value]) => (
@@ -907,8 +912,8 @@ function AccuracyReportPanel({
 
           <div className="grid gap-3 text-xs leading-5 lg:grid-cols-3">
             {report.matched_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>一致项分析：</span>{report.matched_analysis}</div>}
-            {report.missed_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>遗漏分析：</span>{report.missed_analysis}</div>}
-            {report.extra_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>额外分析：</span>{report.extra_analysis}</div>}
+            {report.missed_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>仅人工差异：</span>{report.missed_analysis}</div>}
+            {report.extra_analysis && <div className={`rounded-md border p-3 ${section}`}><span className={`font-semibold ${heading}`}>仅AI差异：</span>{report.extra_analysis}</div>}
           </div>
 
           {report.conclusion && (
@@ -942,6 +947,7 @@ export default function PricingTaskDetailPage() {
   const [accuracyReportGenerating, setAccuracyReportGenerating] = useState(false)
   const [accuracyReportError, setAccuracyReportError] = useState('')
   const [showAccuracyReportModal, setShowAccuracyReportModal] = useState(false)
+  const [showManualComparisonModal, setShowManualComparisonModal] = useState(false)
   const reasoningRef = useRef<HTMLDivElement>(null)
 
   const currentResult = selectedItemId ? itemResults.get(selectedItemId) : undefined
@@ -1007,6 +1013,12 @@ export default function PricingTaskDetailPage() {
       const prev = m.get(itemId) ?? { phase: 'reasoning', reasoning: '' }
       return new Map(m).set(itemId, updater(prev))
     })
+  }
+
+  function handleManualComparisonUpdated(evaluation: PricingTaskEvaluation) {
+    if (selectedItemId == null) return
+    updateResult(selectedItemId, current => ({ ...current, evaluation }))
+    setTask(current => current ? { ...current, accuracy_report: null } : current)
   }
 
   function openFeatureEditor(item: BoqItem) {
@@ -1372,7 +1384,7 @@ export default function PricingTaskDetailPage() {
           <div className="w-full lg:w-auto lg:flex-none">
             <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-white px-2.5 py-2 shadow-sm shadow-gray-100/70 lg:justify-end">
               <div className="mr-1 min-w-24 rounded bg-gray-50 px-2.5 py-1.5">
-                <div className="text-[11px] text-gray-500">命中率</div>
+                <div className="text-[11px] text-gray-500">对比一致率</div>
                 <div className="mt-0.5 text-xs font-semibold leading-none text-gray-900">{formatPercent(quotaHitStats.hitRate)}</div>
               </div>
               <div className="flex items-center gap-3 text-xs text-gray-500">
@@ -1383,13 +1395,13 @@ export default function PricingTaskDetailPage() {
                   人工 <span className="font-medium text-gray-800">{quotaHitStats.manualCount}</span>
                 </span>
                 <span>
-                  命中 <span className="font-medium text-gray-800">{quotaHitStats.hitCount}</span>
+                  双方一致 <span className="font-medium text-gray-800">{quotaHitStats.hitCount}</span>
                 </span>
                 <span>
-                  遗漏 <span className="font-medium text-amber-700">{quotaHitStats.missedCount}</span>
+                  仅人工 <span className="font-medium text-amber-700">{quotaHitStats.missedCount}</span>
                 </span>
                 <span>
-                  额外 <span className="font-medium text-rose-700">{quotaHitStats.extraCount}</span>
+                  仅AI <span className="font-medium text-rose-700">{quotaHitStats.extraCount}</span>
                 </span>
                 <span>
                   一致 <span className="font-medium text-gray-800">{quotaHitStats.exactItemCount}</span>
@@ -1406,7 +1418,7 @@ export default function PricingTaskDetailPage() {
                 disabled={accuracyReportGenerating || quotaHitStats.evaluatedItemCount === 0 || quotaHitStats.manualCount === 0}
                 className="rounded border border-cyan-300/20 bg-cyan-400/10 px-3 py-1.5 text-xs font-medium text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {accuracyReportGenerating ? '生成中...' : task.accuracy_report ? '查看准确性报告' : '生成准确性报告'}
+                {accuracyReportGenerating ? '生成中...' : task.accuracy_report ? '查看对比分析报告' : '生成准确性报告'}
               </button>
             </div>
           </div>
@@ -1768,14 +1780,24 @@ export default function PricingTaskDetailPage() {
 
                   {currentResult.evaluation && (
                     <section className="px-4 py-4 border-b bg-purple-50 border-purple-200">
-                      <h4 className="font-semibold text-sm text-purple-900 mb-2">5. 人工对比评估<StepDuration result={currentResult} stepNo={5} /></h4>
+                      <h4 className="font-semibold text-sm text-purple-900 mb-2">5. 人工对比一致性<StepDuration result={currentResult} stepNo={5} /></h4>
                       <div className="grid grid-cols-3 gap-2 text-xs mb-2">
-                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.hit_count}</div><div className="text-gray-500">命中</div></div>
-                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.missed_count}</div><div className="text-gray-500">遗漏</div></div>
-                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.extra_count}</div><div className="text-gray-500">额外</div></div>
+                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.hit_count}</div><div className="text-gray-500">双方一致</div></div>
+                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.missed_count}</div><div className="text-gray-500">仅人工</div></div>
+                        <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.extra_count}</div><div className="text-gray-500">仅AI</div></div>
                       </div>
                       {currentResult.evaluation.missed_codes.length > 0 && (
-                        <p className="text-xs text-purple-700">遗漏：{currentResult.evaluation.missed_codes.join('、')}</p>
+                        <p className="text-xs text-purple-700">仅人工：{currentResult.evaluation.missed_codes.join('、')}</p>
+                      )}
+                      {task.manual_project_id && currentResult.runId && currentResult.quotaMatch
+                        && (currentResult.evaluation.missed_count > 0 || currentResult.evaluation.extra_count > 0) && (
+                        <button
+                          type="button"
+                          onClick={() => setShowManualComparisonModal(true)}
+                          className="mt-3 rounded border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-medium text-cyan-200 hover:border-cyan-300/50 hover:bg-cyan-400/20"
+                        >
+                          复核差异并修正人工工程
+                        </button>
                       )}
                       <div className="mt-3">
                         <div className="text-xs font-semibold text-purple-900 mb-2">
@@ -1796,7 +1818,7 @@ export default function PricingTaskDetailPage() {
                                   <div className="flex items-center gap-2 mb-1">
                                     <span className="font-mono font-semibold text-purple-800">{manualCode || '-'}</span>
                                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${isHit ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                                      {isHit ? '命中' : '未命中'}
+                                      {isHit ? '双方一致' : '仅人工'}
                                     </span>
                                   </div>
                                   <div className="font-medium text-gray-900 break-words">{q.quota_name || '-'}</div>
@@ -1920,13 +1942,25 @@ export default function PricingTaskDetailPage() {
         </div>
         <SelectedItemResultPanel item={selectedItem} result={currentResult} />
       </div>
+      {showManualComparisonModal && selectedItem && currentResult?.runId && currentResult.evaluation && currentResult.quotaMatch && (
+        <ManualComparisonReviewModal
+          open
+          runId={currentResult.runId}
+          item={selectedItem}
+          evaluation={currentResult.evaluation}
+          matches={currentResult.quotaMatch.matches}
+          dark
+          onClose={() => setShowManualComparisonModal(false)}
+          onUpdated={handleManualComparisonUpdated}
+        />
+      )}
       {showAccuracyReportModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6">
           <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-cyan-300/15 bg-slate-950 shadow-[0_28px_90px_rgba(8,47,73,0.45)]">
             <div className="flex items-center justify-between gap-3 border-b border-cyan-300/15 px-5 py-4">
               <div>
-                <div className="text-base font-semibold text-slate-100">智能组价全集准确性分析报告</div>
-                <div className="mt-0.5 text-xs text-slate-400">基于当前任务下所有清单最新组价结果与人工对比工程生成。</div>
+                <div className="text-base font-semibold text-slate-100">智能组价对比一致性分析报告</div>
+                <div className="mt-0.5 text-xs text-slate-400">基于当前任务最新组价结果与已复核人工基准生成。</div>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1949,7 +1983,7 @@ export default function PricingTaskDetailPage() {
             <div className="overflow-y-auto p-5">
               {accuracyReportGenerating && !task.accuracy_report ? (
                 <div className="rounded-lg border border-cyan-300/15 bg-slate-900/70 px-4 py-10 text-center text-sm text-slate-400">
-                  正在生成任务全集准确性分析报告...
+                  正在生成任务全集对比一致性分析报告...
                 </div>
               ) : (
                 <AccuracyReportPanel report={task.accuracy_report} error={accuracyReportError} dark />

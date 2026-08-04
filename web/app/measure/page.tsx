@@ -174,7 +174,7 @@ export default function MeasurePage() {
     const secById = new Map(sections.map(s => [s.id, s]))
     const appendixIds = new Set<number>()
     const sectionIds = new Set<number>()
-    for (const sid of hitSecIds) {
+    for (const sid of Array.from(hitSecIds)) {
       const sec = secById.get(sid)
       if (!sec) continue
       if (sec.level === 2 && sec.parent_id) {

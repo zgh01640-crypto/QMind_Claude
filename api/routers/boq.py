@@ -4,7 +4,7 @@ import threading
 import time
 import queue
 
-from fastapi import APIRouter, Query, HTTPException, UploadFile, File as FastAPIFile
+from fastapi import APIRouter, Query, HTTPException, UploadFile, File as FastAPIFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -32,7 +32,7 @@ def get_prompt_template():
 # ── 上传 BOQ ──────────────────────────────────────────────────────────────────
 
 @router.post("/boq/upload", response_model=BoqProject)
-def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project_name: Optional[str] = None):
+def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project_name: Optional[str] = Form(None)):
     """上传 .xlsx 文件，解析并入库，返回 BoqProject。"""
     from importer.boq_parser import parse_boq_workbook
     from importer import boq_loader
@@ -64,7 +64,12 @@ def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project
             os.unlink(tmp_path)
 
         # 使用用户提供的项目名称，或使用文件中解析的名称
-        final_project_name = project_name if project_name else project_info["project_name"]
+        final_project_name = (
+            (project_name or "").strip()
+            or (project_info.get("project_name") or "").strip()
+            or os.path.splitext(filename)[0].strip()
+            or "未命名工程"
+        )
 
         project_id = boq_loader.insert_project(
             conn,

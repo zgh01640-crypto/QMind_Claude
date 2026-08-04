@@ -3,7 +3,9 @@ import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Keep browser requests on the same origin by default so they use the
+// Next.js /api proxy configured by API_PROXY_TARGET.
+const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 interface MatchRun {
   id: number

@@ -28,7 +28,7 @@ interface StreamPanelState {
   done: boolean
 }
 
-function StreamPanel({ state, onScrollRef }: { state: StreamPanelState; onScrollRef: React.RefObject<HTMLDivElement | null> }) {
+function StreamPanel({ state, onScrollRef }: { state: StreamPanelState; onScrollRef: React.RefObject<HTMLDivElement> }) {
   const confColor = (c: string) =>
     c === 'high' ? 'text-green-700 bg-green-100' :
     c === 'medium' ? 'text-yellow-700 bg-yellow-100' :
@@ -322,7 +322,7 @@ export default function BoqDetailPage() {
                 if (allSelected) {
                   setSelectedStdIds(prev => prev.filter(id => !regionIds.includes(id)))
                 } else {
-                  setSelectedStdIds(prev => [...new Set([...prev, ...regionIds])])
+                  setSelectedStdIds(prev => Array.from(new Set([...prev, ...regionIds])))
                 }
               }
               return (

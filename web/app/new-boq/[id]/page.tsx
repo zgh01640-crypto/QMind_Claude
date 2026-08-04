@@ -4,7 +4,9 @@ import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { fetchBoqProjects, fetchAllBoqItems, BoqProject, BoqItem } from '@/lib/api'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Keep browser requests on the same origin by default so they use the
+// Next.js /api proxy configured by API_PROXY_TARGET.
+const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 
