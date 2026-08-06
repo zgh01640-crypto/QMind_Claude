@@ -1,14 +1,21 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Form
 import tempfile
 import os
 import shutil
 import subprocess
 import sys
+import re
+
+from pydantic import BaseModel
 
 from db.connection import get_connection
 from api import schemas
 
 router = APIRouter()
+
+
+class ManualBoqProjectRename(BaseModel):
+    project_name: str
 
 
 @router.get("/manual-boq/projects", response_model=list[schemas.ManualBoqProject])
@@ -34,6 +41,7 @@ async def upload_project(
     file: UploadFile = File(...),
     force: bool = Query(False),
     tag: str = Query(None),
+    project_name: str | None = Form(None),
 ):
     if not file.filename.endswith('.xlsx'):
         raise HTTPException(400, "仅支持 .xlsx 文件")
@@ -47,20 +55,29 @@ async def upload_project(
         cmd = [sys.executable, 'import_manual_boq.py', tmp.name, '--original-name', file.filename]
         if force:
             cmd.append('--force')
+        else:
+            cmd.append('--allow-duplicate')
         if tag:
             cmd.extend(['--tag', tag])
+        if project_name and project_name.strip():
+            cmd.extend(['--project-name', project_name.strip()])
         result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         if result.returncode != 0:
             raise HTTPException(500, result.stderr or "导入失败")
 
-        # 返回最新插入的记录
+        # 导入脚本返回本次插入的准确 ID，避免并发上传时取到其他工程。
+        match = re.search(r'PROJECT_ID=(\d+)', result.stdout or '')
+        if not match:
+            raise HTTPException(500, '导入完成但未返回工程 ID')
+        project_id = int(match.group(1))
+
         conn = get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, project_name, bid_section, source_file, tag, imported_at, item_count
-                    FROM manual_boq_projects ORDER BY imported_at DESC LIMIT 1
-                """)
+                    FROM manual_boq_projects WHERE id = %s
+                """, (project_id,))
                 r = cur.fetchone()
             if not r:
                 raise HTTPException(500, "导入后未找到记录")
@@ -164,6 +181,35 @@ def get_project(project_id: int):
             project=project,
             sections=sections_out,
             items=items_out,
+        )
+    finally:
+        conn.close()
+
+
+@router.patch("/manual-boq/projects/{project_id}", response_model=schemas.ManualBoqProject)
+def rename_project(project_id: int, body: ManualBoqProjectRename):
+    project_name = body.project_name.strip()
+    if not project_name:
+        raise HTTPException(400, "工程名称不能为空")
+    if len(project_name) > 500:
+        raise HTTPException(400, "工程名称不能超过 500 个字符")
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE manual_boq_projects
+                SET project_name = %s
+                WHERE id = %s
+                RETURNING id, project_name, bid_section, source_file, tag, imported_at, item_count
+            """, (project_name, project_id))
+            r = cur.fetchone()
+            if not r:
+                raise HTTPException(404, "工程不存在")
+        conn.commit()
+        return schemas.ManualBoqProject(
+            id=r[0], project_name=r[1], bid_section=r[2],
+            source_file=r[3], tag=r[4], imported_at=r[5], item_count=r[6]
         )
     finally:
         conn.close()

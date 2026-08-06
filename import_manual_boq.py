@@ -138,17 +138,20 @@ def _lookup_quota_item_id(conn, code: str) -> int | None:
     return row[0] if row else None
 
 
-def import_to_db(conn, data: dict, source_file: str, tag: str | None, force: bool):
-    project_name = data['project_name']
+def import_to_db(
+    conn, data: dict, source_file: str, tag: str | None, force: bool,
+    project_name_override: str | None = None, allow_duplicate: bool = False,
+) -> int:
+    project_name = (project_name_override or "").strip() or data["project_name"]
 
     # 如已存在同文件名工程则删除（force）或跳过
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM manual_boq_projects WHERE source_file = %s", (source_file,))
         existing = cur.fetchone()
-    if existing:
+    if existing and not allow_duplicate:
         if not force:
             print(f'[跳过] 工程 "{project_name}" 已存在（id={existing[0]}）。使用 --force 强制重新导入。')
-            return
+            return existing[0]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM manual_boq_projects WHERE id = %s", (existing[0],))
         conn.commit()
@@ -228,6 +231,7 @@ def import_to_db(conn, data: dict, source_file: str, tag: str | None, force: boo
             n_quotas += 1
     conn.commit()
     print(f'  {n_quotas} 条定额子目，其中 {n_linked} 条成功链接到定额库')
+    return project_id
 
 
 def main():
@@ -236,6 +240,8 @@ def main():
     parser.add_argument('--original-name', default=None, help='原始文件名（API上传时使用）')
     parser.add_argument('--tag', default=None, help='工程标签')
     parser.add_argument('--force', action='store_true', help='若已存在则强制覆盖')
+    parser.add_argument('--project-name', default=None, help='覆盖 Excel 中解析的工程名称')
+    parser.add_argument('--allow-duplicate', action='store_true', help='允许同一源文件重复导入为新工程')
     args = parser.parse_args()
 
     if not os.path.isfile(args.excel_path):
@@ -251,7 +257,12 @@ def main():
     conn = get_connection()
     try:
         print('写入数据库 ...')
-        import_to_db(conn, data, source_file, args.tag, args.force)
+        project_id = import_to_db(
+            conn, data, source_file, args.tag, args.force,
+            project_name_override=args.project_name,
+            allow_duplicate=args.allow_duplicate,
+        )
+        print(f'PROJECT_ID={project_id}')
         print('导入完成。')
     except Exception as e:
         conn.rollback()

@@ -23,12 +23,14 @@ import {
   fetchPricingTaskLatestRuns,
   fetchPricingTask,
   fetchPricingTaskItemRuns,
+  fetchPricingTaskManualComparisonHistory,
   generatePricingTaskAccuracyReport,
   rejectPricingTaskRun,
   streamPricingTaskCoefficientCheck,
   streamPricingTaskConversionCheck,
   streamPricingTaskRunItem,
   updateBoqItemDescription,
+  updatePricingTaskManualComparison,
 } from '@/lib/api'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
 
@@ -1533,6 +1535,9 @@ export default function PricingTaskDetailPage() {
               <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
                 {task.name}
               </div>
+              <span className="shrink-0 rounded border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700">
+                {'\u77e5\u8bc6\u5e93\u7248\u672c\uff1a'}{task.kb_version_id ?? '-'}
+              </span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
               <span className="min-w-0 max-w-full truncate" title={task.project_name}>
@@ -2123,11 +2128,13 @@ export default function PricingTaskDetailPage() {
       </div>
       {showManualComparisonModal && selectedItem && currentResult?.runId && currentResult.evaluation && currentResult.quotaMatch && (
         <ManualComparisonReviewModal
+          key={currentResult.runId}
           open
-          runId={currentResult.runId}
           item={selectedItem}
           evaluation={currentResult.evaluation}
           matches={currentResult.quotaMatch.matches}
+          submitReview={input => updatePricingTaskManualComparison(currentResult.runId!, input)}
+          loadHistory={() => fetchPricingTaskManualComparisonHistory(currentResult.runId!)}
           onClose={() => setShowManualComparisonModal(false)}
           onUpdated={handleManualComparisonUpdated}
         />

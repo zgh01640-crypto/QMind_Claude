@@ -126,7 +126,12 @@ export default function PricingTaskPage() {
               <div key={task.id} className="bg-white rounded-lg shadow p-6 hover:shadow-lg transition-shadow">
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-lg text-gray-900 mb-2">{task.name}</h3>
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <h3 className="text-lg font-semibold text-gray-900">{task.name}</h3>
+                      <span className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700">
+                        {'\u77e5\u8bc6\u5e93\u7248\u672c\uff1a'}{task.kb_version_id ?? '-'}
+                      </span>
+                    </div>
                     <div className="text-sm text-gray-600 space-y-1">
                       <p>工程：{task.project_name}</p>
                       <p>

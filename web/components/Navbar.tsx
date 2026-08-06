@@ -12,14 +12,15 @@ const oldLinks = [
   { href: '/manual-boq', label: '工程管理（人工）' },
   { href: '/boq/debug', label: '套定额调试' },
   { href: '/compare', label: '定额比较' },
+  { href: '/pricing-task/batch', label: '批量组价' },
+  { href: '/pricing-task/demo', label: '组价演示' },
 ]
 
 const links = [
   { href: '/boq-standard-management', label: '国标清单管理' },
   { href: '/quota-management', label: '定额管理' },
   { href: '/pricing-task', label: '单条组价' },
-  { href: '/pricing-task/batch', label: '批量组价' },
-  { href: '/pricing-task/demo', label: '组价演示' },
+  { href: '/pricing-task/new-batch', label: '新批量组价' },
   { href: '/new-boq', label: '新工程管理' },
 ]
 
@@ -30,6 +31,7 @@ function isActive(pathname: string, href: string) {
   if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
   if (href === '/pricing-task') return /^\/pricing-task(\/\d+)?$/.test(pathname)
   if (href === '/pricing-task/batch') return pathname.startsWith('/pricing-task/batch')
+  if (href === '/pricing-task/new-batch') return pathname.startsWith('/pricing-task/new-batch')
   if (href === '/pricing-task/demo') return pathname.startsWith('/pricing-task/demo')
   if (href === '/quota-management') return pathname.startsWith('/quota-management') || pathname.startsWith('/quota-input-prompts')
   return pathname.startsWith(href + '/')

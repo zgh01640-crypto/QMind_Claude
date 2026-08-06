@@ -702,13 +702,21 @@ export const fetchManualBoqProjects = () =>
 export const fetchManualBoqProject = (id: number) =>
   req<ManualBoqProjectDetail>(`/api/manual-boq/projects/${id}`)
 
-export const uploadManualBoqFile = (file: File, force = false, tag?: string): Promise<ManualBoqProject> => {
+export const uploadManualBoqFile = (file: File, projectName: string, tag?: string): Promise<ManualBoqProject> => {
   const form = new FormData()
   form.append('file', file)
-  const q = new URLSearchParams({ force: String(force) })
+  form.append('project_name', projectName.trim())
+  const q = new URLSearchParams({ force: 'false' })
   if (tag) q.set('tag', tag)
   return req<ManualBoqProject>(`/api/manual-boq/upload?${q}`, { method: 'POST', body: form })
 }
+
+export const renameManualBoqProject = (id: number, projectName: string) =>
+  req<ManualBoqProject>(`/api/manual-boq/projects/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_name: projectName.trim() }),
+  })
 
 export const deleteManualBoqProject = (id: number) =>
   req<{ ok: boolean }>(`/api/manual-boq/projects/${id}`, { method: 'DELETE' })
@@ -1365,6 +1373,7 @@ export interface PricingTask {
   accuracy_report: PricingTaskAccuracyReport | null
   created_at: string
   latest_run_count: number
+  kb_version_id?: number | null
 }
 
 export interface PricingTaskBatch {
@@ -1384,6 +1393,7 @@ export interface PricingTaskBatch {
   created_at: string
   started_at: string | null
   finished_at: string | null
+  kb_version_id?: number | null
 }
 
 export interface PricingTaskRun {
@@ -1444,11 +1454,28 @@ export interface PricingTaskManualComparisonInput {
   accepted_ai_quotas: Array<{ dekid: number; dezmid: number }>
 }
 
+export interface PricingTaskManualComparisonReview {
+  id: number
+  source_type: 'single' | 'batch'
+  source_run_id: number
+  manual_project_id: number
+  manual_item_id: number
+  before_manual_quotas: DebugManualQuota[]
+  after_manual_quotas: DebugManualQuota[]
+  before_evaluation: PricingTaskEvaluation
+  after_evaluation: PricingTaskEvaluation
+  retained_manual_quota_ids: number[]
+  accepted_ai_quotas: Array<{ dekid: number; dezmid: number }>
+  operator_name: string
+  created_at: string
+}
+
 export interface PricingTaskManualComparisonResult {
   ok: boolean
   evaluation: PricingTaskEvaluation
   manual_quotas: DebugManualQuota[]
-  invalidated_task_id: number
+  review: PricingTaskManualComparisonReview
+  invalidated_task_id: number | null
 }
 
 export interface PricingTaskAccuracyReport {
@@ -1736,6 +1763,8 @@ export const fetchPricingTask = (id: number) => req<PricingTask>(`/api/pricing-t
 
 export const fetchPricingTaskBatches = () => req<PricingTaskBatch[]>('/api/pricing-task-batches')
 
+export const fetchNewPricingTaskBatches = () => req<PricingTaskBatch[]>('/api/pricing-task-new-batches')
+
 export const fetchPricingTaskBatch = (id: number) => req<PricingTaskBatch>(`/api/pricing-task-batches/${id}`)
 
 export const fetchPricingTaskBatchDetail = (id: number) =>
@@ -1754,12 +1783,29 @@ export async function createPricingTaskBatch(body: {
   })
 }
 
+export async function createNewPricingTaskBatch(body: {
+  name: string
+  boq_project_id: number
+  quota_library_ids: number[]
+  manual_project_id: number
+}): Promise<{ id: number }> {
+  return req<{ id: number }>('/api/pricing-task-new-batches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
 export async function deletePricingTaskBatch(id: number) {
   const res = await fetch(`${API}/api/pricing-task-batches/${id}`, { method: 'DELETE' })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `请求失败 ${res.status}`)
   }
+}
+
+export async function deleteNewPricingTaskBatch(id: number) {
+  return deletePricingTaskBatch(id)
 }
 
 export async function createPricingTask(body: {
@@ -1809,6 +1855,23 @@ export async function updatePricingTaskManualComparison(
   })
 }
 
+export const fetchPricingTaskManualComparisonHistory = (runId: number) =>
+  req<PricingTaskManualComparisonReview[]>(`/api/pricing-task-runs/${runId}/manual-comparison-history`)
+
+export async function updatePricingTaskBatchManualComparison(
+  itemRunId: number,
+  input: PricingTaskManualComparisonInput,
+) {
+  return req<PricingTaskManualComparisonResult>(`/api/pricing-task-batch-item-runs/${itemRunId}/manual-comparison`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export const fetchPricingTaskBatchManualComparisonHistory = (itemRunId: number) =>
+  req<PricingTaskManualComparisonReview[]>(`/api/pricing-task-batch-item-runs/${itemRunId}/manual-comparison-history`)
+
 export async function rejectPricingTaskRun(runId: number) {
   return req<{ ok: boolean }>(`/api/pricing-task-runs/${runId}/reject`, { method: 'POST' })
 }
@@ -1823,6 +1886,15 @@ export async function fetchPricingTaskDetailReport(taskId: number) {
 
 export async function exportPricingTaskDetailReportExcel(taskId: number) {
   const response = await fetch(`${API}/api/pricing-tasks/${taskId}/detail-report/export`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.detail || `请求失败 ${response.status}`)
+  }
+  return response.blob()
+}
+
+export async function exportNewPricingTaskBatchDetailReportExcel(batchId: number) {
+  const response = await fetch(`${API}/api/pricing-task-new-batches/${batchId}/detail-report/export`)
   if (!response.ok) {
     const err = await response.json().catch(() => ({}))
     throw new Error(err.detail || `请求失败 ${response.status}`)
