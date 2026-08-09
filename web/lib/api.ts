@@ -1394,6 +1394,7 @@ export interface PricingTaskBatch {
   started_at: string | null
   finished_at: string | null
   kb_version_id?: number | null
+  consistency_rate: number | null
 }
 
 export interface PricingTaskRun {

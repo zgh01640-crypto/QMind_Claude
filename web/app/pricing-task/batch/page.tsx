@@ -122,6 +122,7 @@ export default function PricingTaskBatchListPage() {
                   <th className="px-4 py-3 text-left font-medium">定额库</th>
                   <th className="px-4 py-3 text-left font-medium">对比工程</th>
                   <th className="px-4 py-3 text-left font-medium">进度</th>
+                  <th className="px-4 py-3 text-left font-medium">组价一致率</th>
                   <th className="px-4 py-3 text-left font-medium">创建时间</th>
                   <th className="px-4 py-3 text-right font-medium">操作</th>
                 </tr>
@@ -140,6 +141,23 @@ export default function PricingTaskBatchListPage() {
                     <td className="px-4 py-3 text-gray-600">
                       {batch.completed_count}/{batch.selected_count}
                       {batch.failed_count > 0 ? `，失败 ${batch.failed_count}` : ''}
+                    </td>
+                    <td className="px-4 py-3">
+                      {!batch.manual_project_id ? (
+                        <span className="text-xs text-gray-400">未配置</span>
+                      ) : batch.consistency_rate == null ? (
+                        <span className="text-xs text-gray-400">待计算</span>
+                      ) : (
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold tabular-nums ${
+                          batch.consistency_rate >= 0.9
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : batch.consistency_rate >= 0.6
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'bg-rose-50 text-rose-700'
+                        }`}>
+                          {(batch.consistency_rate * 100).toFixed(1)}%
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500">{new Date(batch.created_at).toLocaleString()}</td>
                     <td className="px-4 py-3 text-right">

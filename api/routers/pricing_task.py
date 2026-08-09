@@ -3227,6 +3227,7 @@ def _row_to_batch(row) -> dict[str, Any]:
         "started_at": row[13],
         "finished_at": row[14],
         "kb_version_id": int(row[15]) if len(row) > 15 and row[15] is not None else None,
+        "consistency_rate": float(row[16]) if len(row) > 16 and row[16] is not None else None,
     }
 
 
@@ -3372,7 +3373,16 @@ def _batch_select_sql() -> str:
                b.quota_library_ids,
                COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                b.status, b.selected_count, b.completed_count, b.failed_count,
-               b.created_at, b.started_at, b.finished_at, b.kb_version_id
+               b.created_at, b.started_at, b.finished_at, b.kb_version_id,
+               (
+                   SELECT ROUND(
+                       SUM(COALESCE((r.evaluation->>'hit_count')::numeric, 0))
+                       / NULLIF(SUM(COALESCE((r.evaluation->>'manual_count')::numeric, 0)), 0),
+                       4
+                   )
+                   FROM pricing_task_batch_item_runs r
+                   WHERE r.batch_id=b.id AND r.evaluation IS NOT NULL
+               ) AS consistency_rate
         FROM pricing_task_batches b
         JOIN boq_projects p ON p.id = b.boq_project_id
         LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
