@@ -1,4 +1,4 @@
-﻿'use client'
+'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
@@ -41,29 +41,52 @@ interface CodeCheck {
 }
 
 interface FeatureDefaultFill {
+  candidate_id: string
   feature_name: string
+  target_feature_name: string
   original_value: string
   default_value: string
+  source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
   source_code: string
+  source_rowid?: number
   reason: string
+  confidence: 'high' | 'medium' | 'low'
+}
+
+interface FeatureSchemaItem {
+  feature_name: string
+  native_default_value?: string
+  source: 'TQDK_TQDXMTZ'
+  source_rowid?: number
+}
+
+interface FeatureDefaultCandidate {
+  candidate_id: string
+  source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+  priority: number
+  source_code: string
+  feature_name: string
+  target_feature_name: string
+  feature_value: string
+  default_value: string
+  source_rowid?: number
+  blocked_by_native_default?: boolean
 }
 
 interface FeatureCheck {
   is_complete: boolean
   missing_features: string[]
   analysis: string
+  original_description?: string
   normalized_description?: string
+  effective_description?: string
   default_fills?: FeatureDefaultFill[]
   description_updated?: boolean
-  default_candidates?: Array<{
-    source_code: string
-    feature_name: string
-    feature_value: string
-    default_value: string
-    source_rowid?: number
-  }>
+  schema_kb_version_id?: number
+  feature_schema?: FeatureSchemaItem[]
+  default_candidates?: FeatureDefaultCandidate[]
+  unresolved_features?: string[]
 }
-
 interface ItemResult {
   phase: 'reasoning' | 'done' | 'error'
   reasoning: string
@@ -1154,15 +1177,17 @@ export default function PricingTaskDetailPage() {
               is_complete: evt.is_complete,
               missing_features: evt.missing_features,
               analysis: evt.analysis,
+              original_description: evt.original_description,
               normalized_description: evt.normalized_description,
+              effective_description: evt.effective_description ?? evt.normalized_description,
               default_fills: evt.default_fills ?? [],
-              description_updated: evt.description_updated,
+              description_updated: false,
+              schema_kb_version_id: evt.schema_kb_version_id,
+              feature_schema: evt.feature_schema ?? [],
               default_candidates: evt.default_candidates ?? [],
+              unresolved_features: evt.unresolved_features ?? [],
             },
           }))
-          if (evt.description_updated && evt.normalized_description) {
-            setItems(prev => prev.map(item => item.id === itemId ? { ...item, item_description: evt.normalized_description || item.item_description } : item))
-          }
         } else if (evt.type === 'quota_candidates') {
           updateResult(itemId, s => ({
             ...s,
@@ -1662,21 +1687,40 @@ export default function PricingTaskDetailPage() {
                           {currentResult.featureCheck.missing_features.map((f, i) => <li key={i}>{f}</li>)}
                         </ul>
                       )}
+                      {(currentResult.featureCheck.feature_schema?.length ?? 0) > 0 && (
+                        <details className="group mb-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-slate-700 [&::-webkit-details-marker]:hidden">
+                            <span className="font-medium">标准项目特征结构（{currentResult.featureCheck.feature_schema?.length ?? 0}）</span>
+                            <span className="text-slate-500 group-open:hidden">展开</span>
+                            <span className="hidden text-slate-500 group-open:inline">收起</span>
+                          </summary>
+                          <div className="mt-2 space-y-1.5">
+                            {currentResult.featureCheck.feature_schema?.map((feature, i) => (
+                              <div key={`${feature.feature_name}-${i}`} className="flex flex-wrap gap-x-2 gap-y-1 rounded bg-white px-2 py-1 text-slate-600">
+                                <span className="font-medium text-slate-800">{feature.feature_name}</span>
+                                <span>{feature.native_default_value ? `原生默认值：${feature.native_default_value}` : '未配置原生默认值'}</span>
+                                <span className="text-slate-400">TQDK_TQDXMTZ</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                       {(currentResult.featureCheck.default_candidates?.length ?? 0) > 0 && (
                         <details className="group mb-2 rounded border border-gray-200 bg-white px-3 py-2 text-xs">
                           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-gray-700 [&::-webkit-details-marker]:hidden">
-                            <span className="font-medium">
-                              综合考虑默认值候选（{currentResult.featureCheck.default_candidates?.length ?? 0}）
-                            </span>
+                            <span className="font-medium">综合考虑默认值候选（{currentResult.featureCheck.default_candidates?.length ?? 0}）</span>
                             <span className="text-gray-500 group-open:hidden">展开</span>
                             <span className="hidden text-gray-500 group-open:inline">收起</span>
                           </summary>
                           <div className="mt-2 space-y-1.5">
-                            {currentResult.featureCheck.default_candidates?.map((candidate, i) => (
-                              <div key={`${candidate.feature_name}-${candidate.default_value}-${i}`} className="flex flex-wrap gap-x-2 gap-y-1 rounded bg-gray-50 px-2 py-1 text-gray-600">
+                            {currentResult.featureCheck.default_candidates?.map(candidate => (
+                              <div key={candidate.candidate_id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded bg-gray-50 px-2 py-1 text-gray-600">
                                 <span className="font-medium text-gray-800">{candidate.feature_name}</span>
                                 <span>{candidate.feature_value || '综合考虑'} → {candidate.default_value}</span>
-                                <span className="text-gray-400">来源：{candidate.source_code}</span>
+                                <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${candidate.source === 'TQDK_TQDXMTZ' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>
+                                  {candidate.source === 'TQDK_TQDXMTZ' ? '原生默认值' : '补充默认值'}
+                                </span>
+                                {candidate.blocked_by_native_default && <span className="text-amber-700">同名特征已有原生默认值，不参与补全</span>}
                               </div>
                             ))}
                           </div>
@@ -1684,24 +1728,25 @@ export default function PricingTaskDetailPage() {
                       )}
                       {(currentResult.featureCheck.default_fills?.length ?? 0) > 0 && (
                         <div className="mb-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
-                          <div className="mb-1 font-semibold">
-                            已按综合考虑默认值补全{currentResult.featureCheck.description_updated ? '并回写清单' : ''}
-                          </div>
+                          <div className="mb-1 font-semibold">已生成本次组价有效特征，原始清单未修改</div>
                           <div className="space-y-1">
-                            {currentResult.featureCheck.default_fills?.map((fill, i) => (
-                              <div key={`${fill.feature_name}-${i}`} className="flex flex-wrap gap-x-2 gap-y-1">
-                                <span className="font-medium">{fill.feature_name}</span>
+                            {currentResult.featureCheck.default_fills?.map(fill => (
+                              <div key={fill.candidate_id} className="flex flex-wrap gap-x-2 gap-y-1">
+                                <span className="font-medium">{fill.target_feature_name}</span>
                                 <span>{fill.original_value || '综合考虑'} → {fill.default_value}</span>
-                                <span className="text-blue-600">来源：{fill.source_code}</span>
+                                <span className="text-blue-600">来源：{fill.source === 'TQDK_TQDXMTZ' ? 'TQDK_TQDXMTZ' : 'tqdk_tzhkl'}</span>
                               </div>
                             ))}
                           </div>
-                          {currentResult.featureCheck.normalized_description && (
+                          {currentResult.featureCheck.effective_description && (
                             <div className="mt-2 whitespace-pre-wrap rounded bg-white/70 px-2 py-1 text-blue-800">
-                              {currentResult.featureCheck.normalized_description}
+                              {currentResult.featureCheck.effective_description}
                             </div>
                           )}
                         </div>
+                      )}
+                      {(currentResult.featureCheck.unresolved_features?.length ?? 0) > 0 && (
+                        <div className="mb-2 text-xs text-amber-800">未补全特征：{currentResult.featureCheck.unresolved_features?.join('、')}</div>
                       )}
                       <p className="text-xs text-gray-600">{currentResult.featureCheck.analysis}</p>
                     </section>

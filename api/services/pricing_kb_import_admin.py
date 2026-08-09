@@ -28,6 +28,7 @@ DEPENDENCIES = {
     "TQDK_TZJMC": {"TLibs"},
     "TDEK_TZJMC": {"TLibs"},
     "TQDK_TQDZM": {"TLibs"},
+    "TQDK_TQDXMTZ": {"TLibs", "TQDK_TQDZM"},
     "TDEK_TDEZM": {"TLibs"},
 }
 

@@ -33,12 +33,37 @@ interface FeatureCheck {
   is_complete: boolean
   missing_features: string[]
   analysis: string
+  original_description?: string
   normalized_description?: string
-  default_fills?: Array<{ feature_name: string; original_value: string; default_value: string; source_code: string; reason: string }>
-  default_candidates?: Array<{ source_code: string; feature_name: string; feature_value: string; default_value: string; source_rowid?: number }>
+  effective_description?: string
+  schema_kb_version_id?: number
+  feature_schema?: Array<{ feature_name: string; native_default_value?: string; source: 'TQDK_TQDXMTZ'; source_rowid?: number }>
+  default_fills?: Array<{
+    candidate_id: string
+    feature_name: string
+    target_feature_name: string
+    original_value: string
+    default_value: string
+    source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+    source_code: string
+    reason: string
+    confidence: 'high' | 'medium' | 'low'
+  }>
+  default_candidates?: Array<{
+    candidate_id: string
+    source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+    priority: number
+    source_code: string
+    feature_name: string
+    target_feature_name: string
+    feature_value: string
+    default_value: string
+    source_rowid?: number
+    blocked_by_native_default?: boolean
+  }>
+  unresolved_features?: string[]
   description_updated?: boolean
 }
-
 interface ItemResult {
   phase: 'idle' | 'queued' | 'reasoning' | 'done' | 'error'
   reasoning: string
@@ -205,14 +230,18 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
         is_complete: evt.is_complete,
         missing_features: evt.missing_features,
         analysis: evt.analysis,
+        original_description: evt.original_description,
         normalized_description: evt.normalized_description,
+        effective_description: evt.effective_description ?? evt.normalized_description,
+        schema_kb_version_id: evt.schema_kb_version_id,
+        feature_schema: evt.feature_schema ?? [],
         default_fills: evt.default_fills ?? [],
         default_candidates: evt.default_candidates ?? [],
-        description_updated: evt.description_updated,
+        unresolved_features: evt.unresolved_features ?? [],
+        description_updated: false,
       },
     }
-  }
-  if (evt.type === 'quota_candidates') {
+  }  if (evt.type === 'quota_candidates') {
     return { ...prev, quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total } }
   }
   if (evt.type === 'quota_match') return { ...prev, quotaMatch: { matches: evt.matches, issues: evt.issues } }
@@ -235,15 +264,55 @@ function StepCards({ result }: { result?: ItemResult }) {
       {result.featureCheck && (
         <section className="rounded border border-orange-200 bg-orange-50 px-3 py-2 text-xs">
           <div className="font-semibold text-orange-900">2. 项目特征{result.featureCheck.is_complete ? '完整' : '不完整'}</div>
+          {(result.featureCheck.feature_schema?.length ?? 0) > 0 && (
+            <details className="mt-2 rounded border border-orange-200 bg-white/80 px-2 py-1.5">
+              <summary className="cursor-pointer font-medium text-orange-900">
+                标准特征结构 {result.featureCheck.feature_schema?.length} 个
+                {result.featureCheck.schema_kb_version_id ? ` / V${result.featureCheck.schema_kb_version_id}` : ''}
+              </summary>
+              <div className="mt-2 space-y-1 text-gray-700">
+                {result.featureCheck.feature_schema?.map((feature, index) => (
+                  <div key={`${feature.feature_name}-${index}`} className="flex flex-wrap gap-x-2 rounded bg-orange-50 px-2 py-1">
+                    <span className="font-medium">{feature.feature_name}</span>
+                    <span className="text-gray-500">{feature.native_default_value ? `默认值：${feature.native_default_value}` : '未配置原生默认值'}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+          {(result.featureCheck.default_candidates?.length ?? 0) > 0 && (
+            <details className="mt-2 rounded border border-orange-200 bg-white/80 px-2 py-1.5">
+              <summary className="cursor-pointer font-medium text-orange-900">默认值候选 {result.featureCheck.default_candidates?.length} 个</summary>
+              <div className="mt-2 space-y-1 text-gray-700">
+                {result.featureCheck.default_candidates?.map(candidate => (
+                  <div key={candidate.candidate_id} className="flex flex-wrap items-center gap-x-2 rounded bg-orange-50 px-2 py-1">
+                    <span className="font-medium">{candidate.feature_name}</span>
+                    <span>{candidate.feature_value || '综合考虑'} → {candidate.default_value}</span>
+                    <span className="text-gray-500">{candidate.source}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
           {(result.featureCheck.default_fills?.length ?? 0) > 0 && (
-            <div className="mt-2 rounded bg-white/80 px-2 py-1 text-orange-800">
-              已补全 {result.featureCheck.default_fills?.length} 个综合考虑特征
+            <div className="mt-2 rounded border border-blue-200 bg-blue-50 px-2 py-2 text-blue-900">
+              <div className="font-semibold">本次组价已补全 {result.featureCheck.default_fills?.length} 个特征，原清单未修改</div>
+              <div className="mt-1 space-y-1">
+                {result.featureCheck.default_fills?.map(fill => (
+                  <div key={fill.candidate_id}>{fill.target_feature_name}：{fill.original_value} → {fill.default_value}（{fill.source}）</div>
+                ))}
+              </div>
+              {result.featureCheck.effective_description && (
+                <div className="mt-2 whitespace-pre-wrap rounded bg-white/80 px-2 py-1 text-blue-800">{result.featureCheck.effective_description}</div>
+              )}
             </div>
+          )}
+          {(result.featureCheck.unresolved_features?.length ?? 0) > 0 && (
+            <div className="mt-2 text-amber-800">未补全：{result.featureCheck.unresolved_features?.join('、')}</div>
           )}
           <div className="mt-1 text-orange-800">{result.featureCheck.analysis}</div>
         </section>
-      )}
-      {result.quotaCandidates && (
+      )}      {result.quotaCandidates && (
         <section className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
           <div className="font-semibold text-slate-900">3. 定额候选：{result.quotaCandidates.total} 条</div>
         </section>
@@ -518,9 +587,7 @@ export default function PricingTaskBatchPage() {
       snapshot = updateResultFromEvent(snapshot, evt)
       if (evt.type === 'done') snapshot = { ...snapshot, phase: 'done', status: 'completed' }
       setItemResults(prev => new Map(prev).set(item.id, snapshot))
-      if (evt.type === 'feature_check' && evt.description_updated && evt.normalized_description) {
-        setItems(prev => prev.map(row => row.id === item.id ? { ...row, item_description: evt.normalized_description || row.item_description } : row))
-      }
+
     })
 
     if (snapshot.error) {

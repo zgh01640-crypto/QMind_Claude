@@ -78,6 +78,24 @@ CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzm_code ON tqdk_tqdzm(zmbh);
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzm_chapter ON tqdk_tqdzm(qdkid, zjh);
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzm_name ON tqdk_tqdzm USING gin (to_tsvector('simple', COALESCE(zmmc, '')));
 
+-- Standard BOQ feature definitions and their native default descriptions.
+CREATE TABLE IF NOT EXISTS tqdk_tqdxmtz (
+    qdkid               BIGINT,
+    qdzmid              BIGINT,
+    tzmc                TEXT,
+    defaulttzms         TEXT,
+    zytz                TEXT,
+    bctz                TEXT,
+    remark              TEXT,
+    source_file_sha256  VARCHAR(64) NOT NULL,
+    source_rowid        BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_file_sha256, source_rowid)
+);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdxmtz_item ON tqdk_tqdxmtz(qdkid, qdzmid);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdxmtz_feature ON tqdk_tqdxmtz USING gin (to_tsvector('simple', COALESCE(tzmc, '')));
+
 CREATE TABLE IF NOT EXISTS tdek_tdezm (
     dekid               BIGINT,
     id                  BIGINT,

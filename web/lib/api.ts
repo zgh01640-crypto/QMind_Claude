@@ -1,4 +1,4 @@
-﻿const API = process.env.NEXT_PUBLIC_API_URL || ''
+const API = process.env.NEXT_PUBLIC_API_URL || ''
 
 export interface Period {
   id: number
@@ -1731,12 +1731,43 @@ export type PricingTaskEvent =
       is_complete: boolean
       missing_features: string[]
       analysis: string
+      original_description?: string
       normalized_description?: string
-      default_fills?: Array<{ feature_name: string; original_value: string; default_value: string; source_code: string; reason: string }>
+      effective_description?: string
+      default_fills?: Array<{
+        candidate_id: string
+        feature_name: string
+        target_feature_name: string
+        original_value: string
+        default_value: string
+        source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+        source_code: string
+        source_rowid?: number
+        reason: string
+        confidence: 'high' | 'medium' | 'low'
+      }>
       description_updated?: boolean
-      default_candidates?: Array<{ source_code: string; feature_name: string; feature_value: string; default_value: string; source_rowid?: number }>
-    }
-  | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
+      schema_kb_version_id?: number
+      feature_schema?: Array<{
+        feature_name: string
+        native_default_value?: string
+        source: 'TQDK_TQDXMTZ'
+        source_rowid?: number
+      }>
+      default_candidates?: Array<{
+        candidate_id: string
+        source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+        priority: number
+        source_code: string
+        feature_name: string
+        target_feature_name: string
+        feature_value: string
+        default_value: string
+        source_rowid?: number
+        blocked_by_native_default?: boolean
+      }>
+      unresolved_features?: string[]
+    }  | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
   | { type: 'conversion_check_start'; run_id: number; total: number }

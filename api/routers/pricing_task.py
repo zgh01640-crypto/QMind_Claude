@@ -1,4 +1,4 @@
-﻿"""单条组价路由.
+"""单条组价路由.
 
 当前阶段完成“套定额闭环”：任务入库、单条运行入库、AI 结果候选校验、
 人工确认/拒绝、人工对比工程评测。不在本阶段计算综合单价。
@@ -349,29 +349,23 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
                     "description": "缺少的必要特征信息列表，若完整则为空数组",
                 },
                 "analysis": {"type": "string", "description": "简短分析说明"},
-                "normalized_description": {
-                    "type": "string",
-                    "description": "补全综合考虑后的完整项目特征文本；没有补全时返回原项目特征或空字符串",
-                },
                 "default_fills": {
                     "type": "array",
-                    "description": "按 tqdk_tzhkl 默认值完成的综合考虑项目特征补全明细",
+                    "description": "Choose only supplied dual-library default candidates; do not create a value outside the candidates.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "feature_name": {"type": "string"},
-                            "original_value": {"type": "string"},
-                            "default_value": {"type": "string"},
-                            "source_code": {"type": "string"},
+                            "candidate_id": {"type": "string"},
+                            "target_feature_name": {"type": "string"},
                             "reason": {"type": "string"},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                         },
-                        "required": ["feature_name", "original_value", "default_value", "source_code", "reason"],
+                        "required": ["candidate_id", "target_feature_name", "reason", "confidence"],
                         "additionalProperties": False,
                     },
                 },
-                "description_updated": {"type": "boolean", "description": "后端是否已将补全后的项目特征回写到清单"},
             },
-            "required": ["is_complete", "missing_features", "analysis", "normalized_description", "default_fills", "description_updated"],
+            "required": ["is_complete", "missing_features", "analysis", "default_fills"],
             "additionalProperties": False,
         },
     },
@@ -669,95 +663,229 @@ def exec_check_item_code(conn, item_code: str, item_name: str, kb_version_id: in
     }
 
 
-def _load_feature_default_candidates(conn, base_code: str) -> list[dict[str, Any]]:
+def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> dict[str, Any]:
+    """Load the versioned feature schema and the two-tier default candidates."""
+    context: dict[str, Any] = {
+        "feature_schema": [],
+        "default_candidates": [],
+        "schema_kb_version_id": kb_version_id,
+    }
     if not base_code:
-        return []
+        return context
+
     with conn.cursor() as cur:
+        cur.execute("SELECT EXISTS(SELECT 1 FROM tqdk_tqdxmtz WHERE kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDXMTZ'))", (kb_version_id,))
+        schema_available = bool(cur.fetchone()[0])
+        schema_kb_version_id = kb_version_id
+        if not schema_available:
+            cur.execute("SELECT kb_version_id FROM pricing_kb_active_version WHERE singleton=TRUE")
+            active_row = cur.fetchone()
+            if active_row:
+                schema_kb_version_id = int(active_row[0])
+        context["schema_kb_version_id"] = schema_kb_version_id
         cur.execute(
             """
-            SELECT f.zmbh, f.feature_name, f.feature_value, f.default_value, f.source_rowid
+            SELECT d.tzmc, d.defaulttzms, d.source_rowid
+            FROM tqdk_tqdzm zm
+            JOIN tqdk_tqdxmtz d
+              ON d.qdkid=zm.qdkid
+             AND d.qdzmid=zm.id
+             AND d.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDXMTZ')
+            WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
+              AND zm.zmbh=%s
+            ORDER BY d.source_rowid
+            """,
+            (schema_kb_version_id, kb_version_id, base_code),
+        )
+        schema_rows = cur.fetchall()
+        cur.execute(
+            """
+            SELECT f.zmbh, f.feature_name, f.feature_value, f.default_value,
+                   f.source_rowid, f.source_file_sha256
             FROM tqdk_tzhkl f
-            WHERE f.zmbh = %s
-              AND trim(COALESCE(f.feature_value, '')) = '综合考虑'
-              AND trim(COALESCE(f.default_value, '')) <> ''
+            WHERE f.zmbh=%s
+              AND trim(COALESCE(f.feature_value, ''))='综合考虑'
+              AND trim(COALESCE(f.default_value, ''))<>''
             ORDER BY f.source_rowid, f.feature_name
             """,
             (base_code,),
         )
-        rows = cur.fetchall()
-    candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for row in rows:
-        feature_name = str(row[1] or "").strip()
-        default_value = str(row[3] or "").strip()
-        key = (feature_name, default_value)
-        if not feature_name or not default_value or key in seen:
+        fallback_rows = cur.fetchall()
+
+    schema_seen: set[str] = set()
+    primary_features: set[str] = set()
+    candidate_seen: set[tuple[str, str, str]] = set()
+    for feature_name_raw, native_default_raw, source_rowid in schema_rows:
+        feature_name = str(feature_name_raw or "").strip()
+        native_default = str(native_default_raw or "").strip()
+        if not feature_name:
             continue
-        seen.add(key)
-        candidates.append(
+        if feature_name not in schema_seen:
+            schema_seen.add(feature_name)
+            context["feature_schema"].append(
+                {
+                    "feature_name": feature_name,
+                    "native_default_value": native_default,
+                    "source": "TQDK_TQDXMTZ",
+                    "source_rowid": source_rowid,
+                }
+            )
+        if not native_default:
+            continue
+        primary_features.add(feature_name)
+        key = ("TQDK_TQDXMTZ", feature_name, native_default)
+        if key in candidate_seen:
+            continue
+        candidate_seen.add(key)
+        context["default_candidates"].append(
             {
-                "source_code": row[0] or base_code,
+                "candidate_id": f"tqdxmtz:{source_rowid}",
+                "source": "TQDK_TQDXMTZ",
+                "priority": 1,
+                "source_code": base_code,
                 "feature_name": feature_name,
-                "feature_value": row[2] or "",
-                "default_value": default_value,
-                "source_rowid": row[4],
+                "target_feature_name": feature_name,
+                "feature_value": "综合考虑",
+                "default_value": native_default,
+                "source_rowid": source_rowid,
             }
         )
-    return candidates
+
+    for source_code, feature_name_raw, feature_value_raw, default_value_raw, source_rowid, source_hash in fallback_rows:
+        feature_name = str(feature_name_raw or "").strip()
+        default_value = str(default_value_raw or "").strip()
+        key = ("tqdk_tzhkl", feature_name, default_value)
+        if not feature_name or not default_value or key in candidate_seen:
+            continue
+        candidate_seen.add(key)
+        context["default_candidates"].append(
+            {
+                "candidate_id": f"tzhkl:{source_rowid}",
+                "source": "tqdk_tzhkl",
+                "priority": 2,
+                "source_code": str(source_code or base_code),
+                "feature_name": feature_name,
+                "target_feature_name": feature_name,
+                "feature_value": str(feature_value_raw or "综合考虑"),
+                "default_value": default_value,
+                "source_rowid": source_rowid,
+                "source_file_sha256": source_hash or "",
+                "blocked_by_native_default": feature_name in primary_features,
+            }
+        )
+    return context
+
+
+def _replace_comprehensive_feature(text: str, labels: list[str], default_value: str) -> tuple[str, bool]:
+    for label in labels:
+        normalized_label = str(label or "").strip()
+        if not normalized_label:
+            continue
+        pattern = re.compile(rf"({re.escape(normalized_label)}\s*[:：]\s*)综合考虑")
+        if pattern.search(text):
+            return pattern.sub(lambda match: f"{match.group(1)}{default_value}", text), True
+    return text, False
 
 
 def _normalize_feature_analysis_result(
     raw: dict[str, Any],
     original_description: str | None,
     base_code: str,
-    default_candidates: list[dict[str, Any]],
+    feature_context: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     original_text = (original_description or "").strip()
-    candidate_by_key = {
-        (str(item.get("feature_name") or "").strip(), str(item.get("default_value") or "").strip())
-        for item in default_candidates
+    candidates = feature_context.get("default_candidates", [])
+    candidate_by_id = {
+        str(candidate.get("candidate_id") or ""): candidate
+        for candidate in candidates
+        if str(candidate.get("candidate_id") or "")
     }
-    fills = []
+    schema_names = {
+        str(item.get("feature_name") or "").strip()
+        for item in feature_context.get("feature_schema", [])
+        if str(item.get("feature_name") or "").strip()
+    }
+    native_default_features = {
+        str(candidate.get("target_feature_name") or candidate.get("feature_name") or "").strip()
+        for candidate in candidates
+        if candidate.get("source") == "TQDK_TQDXMTZ"
+    }
+
+    fills: list[dict[str, Any]] = []
+    filled_targets: set[str] = set()
     raw_fills = raw.get("default_fills", []) if isinstance(raw, dict) and "综合考虑" in original_text else []
-    for fill in raw_fills:
-        if not isinstance(fill, dict):
+    for raw_fill in raw_fills:
+        if not isinstance(raw_fill, dict):
             continue
-        feature_name = str(fill.get("feature_name") or "").strip()
-        default_value = str(fill.get("default_value") or "").strip()
-        if not feature_name or not default_value:
+        candidate = candidate_by_id.get(str(raw_fill.get("candidate_id") or "").strip())
+        if not candidate:
             continue
-        if candidate_by_key and (feature_name, default_value) not in candidate_by_key:
+        target_feature_name = str(
+            raw_fill.get("target_feature_name")
+            or candidate.get("target_feature_name")
+            or candidate.get("feature_name")
+            or ""
+        ).strip()
+        if not target_feature_name or target_feature_name in filled_targets:
             continue
+        if schema_names and target_feature_name not in schema_names:
+            continue
+        if candidate.get("source") == "tqdk_tzhkl" and target_feature_name in native_default_features:
+            continue
+        if candidate.get("blocked_by_native_default"):
+            continue
+        filled_targets.add(target_feature_name)
         fills.append(
             {
-                "feature_name": feature_name,
-                "original_value": str(fill.get("original_value") or "综合考虑").strip() or "综合考虑",
-                "default_value": default_value,
-                "source_code": str(fill.get("source_code") or base_code).strip() or base_code,
-                "reason": str(fill.get("reason") or "").strip(),
+                "candidate_id": candidate["candidate_id"],
+                "feature_name": candidate["feature_name"],
+                "target_feature_name": target_feature_name,
+                "original_value": "综合考虑",
+                "default_value": candidate["default_value"],
+                "source": candidate["source"],
+                "source_code": candidate.get("source_code") or base_code,
+                "source_rowid": candidate.get("source_rowid"),
+                "reason": str(raw_fill.get("reason") or "").strip(),
+                "confidence": raw_fill.get("confidence") if raw_fill.get("confidence") in {"high", "medium", "low"} else "low",
             }
         )
-    normalized_description = str(raw.get("normalized_description") or "").strip() if isinstance(raw, dict) else ""
-    if fills and (not normalized_description or "综合考虑" in normalized_description):
-        normalized_description = original_text
-        for fill in fills:
-            default_value = fill["default_value"]
-            feature_name = fill["feature_name"]
-            pattern = re.compile(rf"({re.escape(feature_name)}\s*[:：]\s*)综合考虑")
-            if pattern.search(normalized_description):
-                normalized_description = pattern.sub(lambda match: f"{match.group(1)}{default_value}", normalized_description)
-    if not fills:
-        normalized_description = original_text
+
+    effective_description = original_text
+    appended_fills: list[str] = []
+    for fill in fills:
+        effective_description, replaced = _replace_comprehensive_feature(
+            effective_description,
+            [fill["target_feature_name"], fill["feature_name"]],
+            fill["default_value"],
+        )
+        if not replaced:
+            appended_fills.append(f"{fill['target_feature_name']}：{fill['default_value']}")
+    if appended_fills:
+        suffix = "\n".join(appended_fills)
+        effective_description = f"{effective_description}\n【智能补全项目特征】\n{suffix}".strip()
+
+    unresolved_features = []
+    if "综合考虑" in original_text:
+        unresolved_features = [
+            item["feature_name"]
+            for item in feature_context.get("feature_schema", [])
+            if item.get("feature_name") not in filled_targets
+            and not str(item.get("native_default_value") or "").strip()
+        ]
     return {
         "is_complete": bool(raw.get("is_complete")) if isinstance(raw, dict) else False,
         "missing_features": [str(v) for v in raw.get("missing_features", []) if str(v).strip()] if isinstance(raw, dict) else [],
         "analysis": str(raw.get("analysis") or "").strip() if isinstance(raw, dict) else "",
-        "normalized_description": normalized_description,
+        "original_description": original_text,
+        "normalized_description": effective_description,
+        "effective_description": effective_description,
         "default_fills": fills,
         "description_updated": False,
-        "default_candidates": default_candidates,
+        "feature_schema": feature_context.get("feature_schema", []),
+        "schema_kb_version_id": feature_context.get("schema_kb_version_id"),
+        "default_candidates": candidates,
+        "unresolved_features": unresolved_features,
     }
-
 
 def exec_fetch_quota_candidates(
     conn,
@@ -2918,7 +3046,6 @@ def _stream_pricing_item(
     kb_version_id: int,
     *,
     persist_run: bool = True,
-    update_item_description: bool = True,
 ) -> Iterable[tuple[str, Any]]:
     system_prompt = build_system_prompt()
     step_timings: dict[str, Any] = {}
@@ -2936,21 +3063,28 @@ def _stream_pricing_item(
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
-    feature_default_candidates = _load_feature_default_candidates(conn, code_check.get("base_code") or _base_code(boq_item["item_code"]))
-    feature_default_text = _json_dumps(feature_default_candidates) if feature_default_candidates else "[]"
+    feature_context = _load_feature_default_context(
+        conn,
+        code_check.get("base_code") or _base_code(boq_item["item_code"]),
+        kb_version_id,
+    )
+    feature_schema_text = _json_dumps(feature_context["feature_schema"]) if feature_context["feature_schema"] else "[]"
+    feature_default_text = _json_dumps(feature_context["default_candidates"]) if feature_context["default_candidates"] else "[]"
     messages_r2 = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (
-                f"请分析以下工程量清单项的项目特征描述是否完整充分，能否满足套定额要求：\n\n"
-                f"清单编码：{boq_item['item_code']}\n清单名称：{boq_item['item_name']}\n"
-                f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n计量单位：{boq_item.get('unit') or '无'}\n\n"
-                f"【综合考虑默认值候选，来源 tqdk_tzhkl】\n{feature_default_text}\n\n"
-                f"如果项目特征中存在“综合考虑”，请只从上述候选中选择明确匹配的 feature_name/default_value，"
-                f"把对应“特征名: 综合考虑”替换为“特征名: 默认值”，生成 normalized_description。"
-                f"不要覆盖已有明确特征值；无法明确匹配时不要补全。\n"
-                f"请调用工具提交你的分析结果。"
+                "Analyze whether this BOQ item's feature description is sufficient for quota matching.\n\n"
+                f"BOQ code: {boq_item['item_code']}\nBOQ name: {boq_item['item_name']}\n"
+                f"Original features: {boq_item.get('item_description') or 'not provided'}\n"
+                f"Unit: {boq_item.get('unit') or 'not provided'}\n\n"
+                f"[Standard feature schema from TQDK_TQDXMTZ]\n{feature_schema_text}\n\n"
+                f"[Default candidates, already ordered by priority]\n{feature_default_text}\n\n"
+                "Only fill entries whose original value is 综合考虑. Select only candidate_id values from the supplied list. "
+                "For one target feature, TQDK_TQDXMTZ always takes priority; use tqdk_tzhkl only when that target has no native default. "
+                "You may semantically map a tqdk_tzhkl candidate to a standard feature, but do not overwrite an explicit original value and do not invent defaults. "
+                "Submit the tool result with candidate_id, target_feature_name, confidence, and a concise reason."
             ),
         },
     ]
@@ -2964,16 +3098,12 @@ def _stream_pricing_item(
         feature_result,
         boq_item.get("item_description"),
         code_check.get("base_code") or _base_code(boq_item["item_code"]),
-        feature_default_candidates,
+        feature_context,
     )
-    normalized_description = str(feature_result.get("normalized_description") or "").strip()
-    if feature_result.get("default_fills") and normalized_description and normalized_description != (boq_item.get("item_description") or "").strip():
-        with conn.cursor() as cur:
-            if update_item_description:
-                cur.execute("UPDATE boq_items SET item_description = %s WHERE id = %s", (normalized_description, boq_item["id"]))
-                conn.commit()
-        boq_item["item_description"] = normalized_description
-        feature_result["description_updated"] = bool(update_item_description)
+    effective_description = str(feature_result.get("effective_description") or "").strip()
+    if feature_result.get("default_fills") and effective_description:
+        # Preserve the source BOQ; downstream steps consume this run's enriched description only.
+        boq_item["item_description"] = effective_description
     yield ("feature_check", feature_result)
     if persist_run and run_id is not None:
         _update_run(conn, run_id, feature_check=feature_result)
@@ -3616,7 +3746,7 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
             """
             SELECT r.id, r.batch_id, r.status, r.quota_match, r.confirmed_results,
                    r.conversion_check, i.id, i.item_code, i.item_name, i.item_description,
-                   i.unit, i.quantity, i.project_id, r.kb_version_id
+                   i.unit, i.quantity, i.project_id, r.kb_version_id, r.feature_check
             FROM pricing_task_batch_item_runs r
             JOIN boq_items i ON i.id = r.boq_item_id
             WHERE r.id=%s
@@ -3636,13 +3766,16 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
         "conversion_check": row[5],
         "kb_version_id": int(row[13]),
     }
+    feature_check = row[14] if isinstance(row[14], dict) else {}
+    effective_description = str(feature_check.get("effective_description") or "").strip()
     boq_item = {
         "run_id": row[0],
         "status": row[2],
         "id": row[6],
         "item_code": row[7],
         "item_name": row[8],
-        "item_description": row[9] or "",
+        "item_description": effective_description or row[9] or "",
+        "original_item_description": row[9] or "",
         "unit": row[10] or "",
         "quantity": float(row[11]) if row[11] is not None else None,
         "project_id": row[12],
@@ -3682,7 +3815,6 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
                 None,
                 batch["kb_version_id"],
                 persist_run=False,
-                update_item_description=False,
             ):
                 if event_type == "reasoning_token":
                     reasoning_text_parts.append(data)

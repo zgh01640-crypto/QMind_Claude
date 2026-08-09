@@ -51,11 +51,27 @@ WHERE run.status = 'done'
 ORDER BY source_file_sha256, COALESCE(finished_at, created_at) DESC
 ON CONFLICT DO NOTHING;
 
+-- Added after early installations existed, so create it before applying version columns.
+CREATE TABLE IF NOT EXISTS tqdk_tqdxmtz (
+    qdkid               BIGINT,
+    qdzmid              BIGINT,
+    tzmc                TEXT,
+    defaulttzms         TEXT,
+    zytz                TEXT,
+    bctz                TEXT,
+    remark              TEXT,
+    source_file_sha256  VARCHAR(64) NOT NULL,
+    source_rowid        BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_file_sha256, source_rowid)
+);
 -- Every imported source row belongs to exactly one immutable version.
 ALTER TABLE tlibs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tqdk_tzjmc ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tzjmc ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tqdk_tqdzm ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
+ALTER TABLE tqdk_tqdxmtz ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tdezm ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tzmgc ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tznhs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
@@ -70,6 +86,7 @@ FROM (
     UNION SELECT source_file_sha256 FROM tqdk_tzjmc
     UNION SELECT source_file_sha256 FROM tdek_tzjmc
     UNION SELECT source_file_sha256 FROM tqdk_tqdzm
+    UNION SELECT source_file_sha256 FROM tqdk_tqdxmtz
     UNION SELECT source_file_sha256 FROM tdek_tdezm
     UNION SELECT source_file_sha256 FROM tdek_tzmgc
     UNION SELECT source_file_sha256 FROM tdek_tznhs
@@ -90,6 +107,8 @@ UPDATE tqdk_tzjmc t SET kb_version_id=v.id FROM pricing_kb_versions v
 UPDATE tdek_tzjmc t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
 UPDATE tqdk_tqdzm t SET kb_version_id=v.id FROM pricing_kb_versions v
+ WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
+UPDATE tqdk_tqdxmtz t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
 UPDATE tdek_tdezm t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
@@ -138,6 +157,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tzjmc_version_item
     ON tdek_tzjmc(kb_version_id, dekid, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tqdzm_version_item
     ON tqdk_tqdzm(kb_version_id, qdkid, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tqdxmtz_version_row
+    ON tqdk_tqdxmtz(kb_version_id, source_rowid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tdezm_version_item
     ON tdek_tdezm(kb_version_id, dekid, id);
 
@@ -149,6 +170,8 @@ CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzm_version_chapter
     ON tqdk_tqdzm(kb_version_id, qdkid, zjh);
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzm_version_code
     ON tqdk_tqdzm(kb_version_id, zmbh);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdxmtz_version_item
+    ON tqdk_tqdxmtz(kb_version_id, qdkid, qdzmid);
 CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_version_chapter
     ON tdek_tdezm(kb_version_id, dekid, zjh);
 CREATE INDEX IF NOT EXISTS idx_tdek_tdezm_version_code
@@ -175,6 +198,8 @@ CREATE OR REPLACE VIEW active_tdek_tzjmc AS
 SELECT t.* FROM tdek_tzjmc t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
 CREATE OR REPLACE VIEW active_tqdk_tqdzm AS
 SELECT t.* FROM tqdk_tqdzm t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
+CREATE OR REPLACE VIEW active_tqdk_tqdxmtz AS
+SELECT t.* FROM tqdk_tqdxmtz t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
 CREATE OR REPLACE VIEW active_tdek_tdezm AS
 SELECT t.* FROM tdek_tdezm t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
 CREATE OR REPLACE VIEW active_tdek_tzmgc AS

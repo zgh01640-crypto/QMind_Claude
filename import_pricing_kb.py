@@ -25,6 +25,11 @@ SQLITE_TABLES = {
     "TQDK_TZJMC": ("tqdk_tzjmc", ["qdkid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, QDKID, ID, PID, ZJMC, ZJSM FROM TQDK_TZJMC"),
     "TDEK_TZJMC": ("tdek_tzjmc", ["dekid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, DEKID, ID, PID, ZJMC, ZJSM FROM TDEK_TZJMC"),
     "TQDK_TQDZM": ("tqdk_tqdzm", ["qdkid", "id", "zmbh", "zmmc", "dw", "zjh"], "SELECT rowid, QDKID, ID, ZMBH, ZMMC, DW, ZJH FROM TQDK_TQDZM"),
+    "TQDK_TQDXMTZ": (
+        "tqdk_tqdxmtz",
+        ["qdkid", "qdzmid", "tzmc", "defaulttzms", "zytz", "bctz", "remark"],
+        "SELECT rowid, QDKID, QDZMID, TZMC, DEFAULTTZMS, ZYTZ, BCTZ, REMARK FROM TQDK_TQDXMTZ",
+    ),
     "TDEK_TDEZM": (
         "tdek_tdezm",
         ["dekid", "id", "zmbh", "zmmc", "dw", "gznr", "zjh", "dj", "rgf", "clf", "jxf", "zcf", "sbf", "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj"],
@@ -84,6 +89,7 @@ def inspect_sqlite(source: Path) -> dict[str, Any]:
             "libraries": sqlite_count(cur, "TLibs"),
             "boq_chapters": sqlite_count(cur, "TQDK_TZJMC"),
             "boq_items": sqlite_count(cur, "TQDK_TQDZM"),
+            "boq_feature_definitions": sqlite_count(cur, "TQDK_TQDXMTZ"),
             "quota_chapters": sqlite_count(cur, "TDEK_TZJMC"),
             "quota_items": sqlite_count(cur, "TDEK_TDEZM"),
             "quota_resources": sqlite_count(cur, "TDEK_TZMGC"),
@@ -146,6 +152,10 @@ def validate_sqlite_relations(source: Path) -> dict[str, int]:
             "duplicate_boq_chapters": duplicate_boq_chapters,
             "duplicate_quota_chapters": duplicate_quota_chapters,
             "duplicate_boq_items": duplicate_boq_items,
+            "orphan_boq_feature_definitions": sum(
+                (row[0], row[1]) not in boq_items
+                for row in cur.execute("SELECT QDKID,QDZMID FROM TQDK_TQDXMTZ")
+            ),
             "duplicate_quota_items": duplicate_quota_items,
             "orphan_candidate_boq": orphan_candidate_boq,
             "orphan_candidate_quota": orphan_candidate_quota,
@@ -170,9 +180,11 @@ def begin_version(pg, source: Path, source_hash: str, inspection: dict[str, Any]
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('pricing_kb_import'))")
         cur.execute(
             """SELECT id, status FROM pricing_kb_versions
-               WHERE source_file_sha256=%s AND manifest_sha256 IS NULL
-               ORDER BY id LIMIT 1 FOR UPDATE""",
-            (source_hash,),
+               WHERE source_file_sha256=%s
+                 AND schema_signature=%s
+                 AND manifest_sha256 IS NULL
+               ORDER BY id DESC LIMIT 1 FOR UPDATE""",
+            (source_hash, sqlite_schema_signature(source)),
         )
         row = cur.fetchone()
         if row and row[1] in {"validated", "active", "retired"}:
@@ -217,7 +229,7 @@ def clear_version_rows(pg, version_id: int) -> None:
     with pg.cursor() as cur:
         for table in [
             "tqdk_tqdzy", "tdek_tzhhs", "tdek_tznhs", "tdek_tzmgc",
-            "tdek_tdezm", "tqdk_tqdzm", "tdek_tzjmc", "tqdk_tzjmc", "tlibs",
+            "tdek_tdezm", "tqdk_tqdxmtz", "tqdk_tqdzm", "tdek_tzjmc", "tqdk_tzjmc", "tlibs",
         ]:
             cur.execute(f"DELETE FROM {table} WHERE kb_version_id=%s", (version_id,))
 
@@ -707,9 +719,14 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
         clear_import_issues(pg, source_hash)
         run_id = insert_run(pg, source, source_hash, version_id)
         pg.commit()
-        if any(relation_validation.values()):
+        blocking_relation_issues = {
+            key: value
+            for key, value in relation_validation.items()
+            if key != "orphan_boq_feature_definitions" and value
+        }
+        if blocking_relation_issues:
             raise RuntimeError(
-                f"knowledge-base relation validation failed: {relation_validation}"
+                f"knowledge-base relation validation failed: {blocking_relation_issues}"
             )
 
         sqlite_cur = sqlite_conn.cursor()
