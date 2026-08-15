@@ -1402,6 +1402,7 @@ export interface PricingTaskRun {
   status: string
   code_check: any
   feature_check: any
+  chapter_rule_check: PricingTaskChapterRuleCheck | null
   work_procedures: { procedures?: string[]; procedure_text?: string; found?: boolean; base_code?: string } | null
   quota_candidates: { candidates?: QuotaCandidate[]; total?: number } | null
   quota_match: { matches?: QuotaMatch[]; issues?: string[] } | null
@@ -1414,6 +1415,40 @@ export interface PricingTaskRun {
   finished_at: string | null
   reasoning_text?: string | null
   confirmed_results?: PricingTaskConfirmedResult[]
+}
+
+export interface PricingTaskChapterRule {
+  chapter_id: number
+  chapter_name: string
+  rule_reference: string
+  rule_text: string
+  matched: boolean
+  matched_keywords: string[]
+  evidence: string
+  action: string
+  requires_project_check: boolean
+  requires_manual_review: boolean
+}
+
+export interface PricingTaskChapterRuleCheck {
+  available: boolean
+  base_code: string
+  kb_version_id: number
+  chapters: Array<{ chapter_id: number; chapter_name: string; zjsm: string; depth: number }>
+  project_items_checked: number
+  rules: PricingTaskChapterRule[]
+  issues: string[]
+  validation: {
+    status: 'pending' | 'not_applicable' | 'passed' | 'failed' | 'manual_review'
+    validations: Array<{
+      rule_index: number
+      status: 'passed' | 'warning' | 'failed' | 'manual_review'
+      evidence: string
+      related_quota_codes: string[]
+      message: string
+    }>
+    issues: string[]
+  }
 }
 
 export interface PricingTaskLatestRun {
@@ -1769,6 +1804,7 @@ export type PricingTaskEvent =
       }>
       unresolved_features?: string[]
     }  | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
+  | ({ type: 'chapter_rule_check' } & PricingTaskChapterRuleCheck)
   | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
   | { type: 'conversion_check_start'; run_id: number; total: number }

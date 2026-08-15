@@ -218,6 +218,7 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS chapter_rule_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS accuracy_report JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS selected_count INTEGER NOT NULL DEFAULT 0")
@@ -227,6 +228,7 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS confirmed_results JSONB")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS chapter_rule_check JSONB")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS step_timings JSONB")
         cur.execute(
             """
@@ -366,6 +368,74 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
                 },
             },
             "required": ["is_complete", "missing_features", "analysis", "default_fills"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_TOOL_SUBMIT_CHAPTER_RULE_CHECK = {
+    "type": "function",
+    "function": {
+        "name": "submit_chapter_rule_check",
+        "description": "逐条判断章节说明规则是否命中当前清单，并说明必须执行的组价动作。只评估提供的规则，不得编造规则。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "chapter_id": {"type": "integer"},
+                            "rule_reference": {"type": "string", "description": "章节内条款序号或可定位的标题"},
+                            "rule_text": {"type": "string", "description": "命中的规则原文摘要，不得改变规则含义"},
+                            "matched": {"type": "boolean"},
+                            "matched_keywords": {"type": "array", "items": {"type": "string"}},
+                            "evidence": {"type": "string"},
+                            "action": {"type": "string", "description": "命中后必须执行或核查的组价动作；未命中时写不适用原因"},
+                            "requires_project_check": {"type": "boolean"},
+                            "requires_manual_review": {"type": "boolean"},
+                        },
+                        "required": ["chapter_id", "rule_reference", "rule_text", "matched", "matched_keywords", "evidence", "action", "requires_project_check", "requires_manual_review"],
+                        "additionalProperties": False,
+                    },
+                },
+                "issues": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["rules", "issues"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_TOOL_SUBMIT_CHAPTER_RULE_VALIDATION = {
+    "type": "function",
+    "function": {
+        "name": "submit_chapter_rule_validation",
+        "description": "校验最终套取的定额是否落实所有已命中的章节规则。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "validations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "rule_index": {"type": "integer"},
+                            "status": {"type": "string", "enum": ["passed", "warning", "failed", "manual_review"]},
+                            "evidence": {"type": "string"},
+                            "related_quota_codes": {"type": "array", "items": {"type": "string"}},
+                            "message": {"type": "string"},
+                        },
+                        "required": ["rule_index", "status", "evidence", "related_quota_codes", "message"],
+                        "additionalProperties": False,
+                    },
+                },
+                "issues": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["validations", "issues"],
             "additionalProperties": False,
         },
     },
@@ -838,6 +908,169 @@ def _normalize_feature_analysis_result(
         "default_candidates": candidates,
         "unresolved_features": unresolved_features,
     }
+
+
+def _load_chapter_rule_context(
+    conn, base_code: str, kb_version_id: int, boq_project_id: int
+) -> dict[str, Any]:
+    """Resolve the BOQ chapter path and its non-empty rule descriptions for one pinned KB version."""
+    context: dict[str, Any] = {
+        "base_code": base_code,
+        "kb_version_id": kb_version_id,
+        "chapters": [],
+        "project_items": [],
+        "available": False,
+    }
+    if not base_code:
+        return context
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH RECURSIVE chapter_path AS (
+                SELECT c.qdkid, c.id, c.pid, c.zjmc, c.zjsm, 0 AS depth
+                FROM tqdk_tqdzm item
+                JOIN tqdk_tzjmc c ON c.qdkid=item.qdkid AND c.id=item.zjh
+                WHERE item.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
+                  AND c.kb_version_id=pricing_kb_data_version(%s,'TQDK_TZJMC')
+                  AND item.zmbh=%s
+                UNION ALL
+                SELECT parent.qdkid, parent.id, parent.pid, parent.zjmc, parent.zjsm, child.depth + 1
+                FROM tqdk_tzjmc parent
+                JOIN chapter_path child ON child.qdkid=parent.qdkid AND child.pid=parent.id
+                WHERE parent.kb_version_id=pricing_kb_data_version(%s,'TQDK_TZJMC')
+            )
+            SELECT qdkid, id, pid, zjmc, zjsm, depth
+            FROM chapter_path
+            WHERE LENGTH(REGEXP_REPLACE(COALESCE(zjsm, ''), '\\s+', '', 'g')) > 0
+            ORDER BY depth DESC, id
+            """,
+            (kb_version_id, kb_version_id, base_code, kb_version_id),
+        )
+        rows = cur.fetchall()
+        context["chapters"] = [
+            {
+                "qdkid": int(row[0]),
+                "chapter_id": int(row[1]),
+                "parent_id": int(row[2]) if row[2] is not None else None,
+                "chapter_name": row[3] or "",
+                "zjsm": row[4] or "",
+                "depth": int(row[5]),
+            }
+            for row in rows
+        ]
+        context["available"] = bool(context["chapters"])
+        needs_project_index = any(
+            re.search(r"全(?:工)?程|全项目|全.*清单", str(row[4] or ""))
+            for row in rows
+        )
+        if needs_project_index:
+            cur.execute(
+                """
+                SELECT item_code, item_name
+                FROM boq_items
+                WHERE project_id=%s
+                ORDER BY item_seq NULLS LAST, id
+                LIMIT 500
+                """,
+                (boq_project_id,),
+            )
+            context["project_items"] = [
+                {"item_code": row[0] or "", "item_name": row[1] or ""}
+                for row in cur.fetchall()
+            ]
+    return context
+
+
+def _normalize_chapter_rule_check(raw: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    chapters = context.get("chapters", [])
+    allowed_ids = {int(chapter["chapter_id"]) for chapter in chapters}
+    chapter_names = {int(chapter["chapter_id"]): chapter.get("chapter_name") or "" for chapter in chapters}
+    rules: list[dict[str, Any]] = []
+    for item in raw.get("rules", []) if isinstance(raw, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            chapter_id = int(item.get("chapter_id"))
+        except (TypeError, ValueError):
+            continue
+        if chapter_id not in allowed_ids:
+            continue
+        rules.append(
+            {
+                "chapter_id": chapter_id,
+                "chapter_name": chapter_names[chapter_id],
+                "rule_reference": str(item.get("rule_reference") or "").strip(),
+                "rule_text": str(item.get("rule_text") or "").strip(),
+                "matched": bool(item.get("matched")),
+                "matched_keywords": [str(v).strip() for v in item.get("matched_keywords", []) if str(v).strip()],
+                "evidence": str(item.get("evidence") or "").strip(),
+                "action": str(item.get("action") or "").strip(),
+                "requires_project_check": bool(item.get("requires_project_check")),
+                "requires_manual_review": bool(item.get("requires_manual_review")),
+            }
+        )
+    return {
+        "available": bool(chapters),
+        "base_code": context.get("base_code"),
+        "kb_version_id": context.get("kb_version_id"),
+        "chapters": chapters,
+        "project_items_checked": len(context.get("project_items") or []),
+        "rules": rules,
+        "issues": [str(v).strip() for v in raw.get("issues", []) if str(v).strip()] if isinstance(raw, dict) else [],
+        "validation": {"validations": [], "issues": [], "status": "pending" if rules else "not_applicable"},
+    }
+
+
+def _validate_chapter_rules(
+    rule_check: dict[str, Any], matches: list[dict[str, Any]]
+) -> dict[str, Any]:
+    matched_rules = [rule for rule in rule_check.get("rules", []) if rule.get("matched")]
+    if not matched_rules:
+        return {"validations": [], "issues": [], "status": "not_applicable"}
+    quota_summary = [
+        {"code": item.get("zmbh") or "", "name": item.get("zmmc") or "", "reason": item.get("match_reason") or ""}
+        for item in matches
+    ]
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                "请校验最终套取的定额是否落实每条已命中的章节规则。"
+                "不能根据现有信息确认时标记 manual_review；发现冲突标记 failed。\n\n"
+                f"【已命中章节规则】\n{_json_dumps(matched_rules)}\n\n"
+                f"【最终定额】\n{_json_dumps(quota_summary)}"
+            ),
+        },
+    ]
+    raw = _run_tool_fallback(messages, _TOOL_SUBMIT_CHAPTER_RULE_VALIDATION, 3000)
+    validations = []
+    for item in raw.get("validations", []) if isinstance(raw, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        rule_index = item.get("rule_index")
+        if not isinstance(rule_index, int) or not 0 <= rule_index < len(matched_rules):
+            continue
+        status = item.get("status")
+        if status not in {"passed", "warning", "failed", "manual_review"}:
+            status = "manual_review"
+        validations.append(
+            {
+                "rule_index": rule_index,
+                "status": status,
+                "evidence": str(item.get("evidence") or "").strip(),
+                "related_quota_codes": [str(v).strip() for v in item.get("related_quota_codes", []) if str(v).strip()],
+                "message": str(item.get("message") or "").strip(),
+            }
+        )
+    issues = [str(v).strip() for v in raw.get("issues", []) if str(v).strip()] if isinstance(raw, dict) else []
+    status = "passed"
+    if any(item["status"] == "failed" for item in validations):
+        status = "failed"
+    elif len(validations) < len(matched_rules) or any(item["status"] in {"warning", "manual_review"} for item in validations):
+        status = "manual_review"
+    return {"validations": validations, "issues": issues, "status": status}
 
 def exec_fetch_quota_candidates(
     conn,
@@ -1656,6 +1889,7 @@ def _build_pricing_task_detail_report(
             status,
             code_check,
             feature_check,
+            chapter_rule_check,
             quota_candidates,
             quota_match,
             evaluation,
@@ -1674,6 +1908,7 @@ def _build_pricing_task_detail_report(
         ) = row
         code_check = code_check if isinstance(code_check, dict) else {}
         feature_check = feature_check if isinstance(feature_check, dict) else {}
+        chapter_rule_check = chapter_rule_check if isinstance(chapter_rule_check, dict) else {}
         quota_candidates = quota_candidates if isinstance(quota_candidates, dict) else {}
         quota_match = quota_match if isinstance(quota_match, dict) else {}
         if source_type == "batch":
@@ -1724,6 +1959,7 @@ def _build_pricing_task_detail_report(
                     "missing_features": feature_check.get("missing_features") or [],
                     "analysis": feature_check.get("analysis") or "",
                 },
+                "chapter_rule_check": chapter_rule_check,
                 "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
                 "finished_at": finished_at.isoformat() if hasattr(finished_at, "isoformat") else finished_at,
                 "item": {
@@ -1738,11 +1974,12 @@ def _build_pricing_task_detail_report(
                 "rounds": [
                     _round_payload("编码核查", 1, code_check, step_timings.get("1")),
                     _round_payload("项目特征", 2, feature_check, step_timings.get("2")),
-                    _round_payload("定额候选", 3, quota_candidates, step_timings.get("3")),
-                    _round_payload("AI套定额结果", 4, quota_match, step_timings.get("4")),
-                    _round_payload("人工套定额对比", 5, evaluation, step_timings.get("5")),
-                    _round_payload("组合换算", 6, conversion_check or {}, step_timings.get("6")),
-                    _round_payload("系数换算", 7, coefficient_check or {}, step_timings.get("7")),
+                    _round_payload("章节规则校验", 3, chapter_rule_check, step_timings.get("3")),
+                    _round_payload("定额候选", 4, quota_candidates, step_timings.get("4")),
+                    _round_payload("AI套定额结果", 5, quota_match, step_timings.get("5")),
+                    _round_payload("人工套定额对比", 6, evaluation, step_timings.get("6")),
+                    _round_payload("组合换算", 7, conversion_check or {}, step_timings.get("7")),
+                    _round_payload("系数换算", 8, coefficient_check or {}, step_timings.get("8")),
                 ],
                 "ai_quota_results": consistency["ai_results"],
                 "manual_quota_results": consistency["manual_results"],
@@ -2818,6 +3055,7 @@ def _update_run(conn, run_id: int, **fields: Any) -> None:
         values.append(Json(value, dumps=_json_dumps) if key in {
             "code_check",
             "feature_check",
+            "chapter_rule_check",
             "work_procedures",
             "quota_candidates",
             "quota_match",
@@ -2842,6 +3080,7 @@ def _update_batch_item_run(conn, item_run_id: int, **fields: Any) -> None:
     json_fields = {
         "code_check",
         "feature_check",
+        "chapter_rule_check",
         "work_procedures",
         "quota_candidates",
         "quota_match",
@@ -3063,13 +3302,52 @@ def _stream_pricing_item(
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
+    chapter_context = _load_chapter_rule_context(
+        conn,
+        code_check.get("base_code") or _base_code(boq_item["item_code"]),
+        kb_version_id,
+        int(boq_item["project_id"]),
+    )
+    if chapter_context["available"]:
+        rule_messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "请按章节说明逐条识别当前清单命中的规则，并给出必须执行的组价动作。"
+                    "规则来自知识库，命中后必须在后续套定额中执行；不得编造规则。"
+                    "若章节说明要求核查全工程清单，只能依据提供的工程清单索引判断。\n\n"
+                    f"【清单项】\n编码：{boq_item['item_code']}\n名称：{boq_item['item_name']}\n"
+                    f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n\n"
+                    f"【章节说明规则（父章节在前，所属章节优先）】\n{_json_dumps(chapter_context['chapters'])}\n\n"
+                    f"【全工程清单索引】\n{_json_dumps(chapter_context['project_items'])}"
+                ),
+            },
+        ]
+        raw_rule_check: dict[str, Any] = {}
+        for event_type, data in _stream_tool_call(rule_messages, _TOOL_SUBMIT_CHAPTER_RULE_CHECK, 5000):
+            if event_type == "reasoning_token":
+                yield ("reasoning_token", data)
+            else:
+                raw_rule_check = data
+        chapter_rule_check = _normalize_chapter_rule_check(raw_rule_check, chapter_context)
+    else:
+        chapter_rule_check = _normalize_chapter_rule_check({}, chapter_context)
+        chapter_rule_check["issues"] = ["未找到该清单对应的章节说明规则"]
+    yield ("chapter_rule_check", chapter_rule_check)
+    if persist_run and run_id is not None:
+        _update_run(conn, run_id, chapter_rule_check=chapter_rule_check)
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "章节规则校验", step_started_at, step_started_perf))
+
+    step_started_at = datetime.now()
+    step_started_perf = perf_counter()
     candidates_data = exec_fetch_quota_candidates(
         conn, boq_item["item_code"], kb_version_id, quota_library_ids
     )
     yield ("quota_candidates", candidates_data)
     if persist_run and run_id is not None:
         _update_run(conn, run_id, quota_candidates=candidates_data)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 3, "定额候选", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "定额候选", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
@@ -3092,6 +3370,7 @@ def _stream_pricing_item(
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
                 f"【编码核查】{_json_dumps(code_check)}\n"
                 f"【项目特征分析】{_json_dumps(feature_result)}\n"
+                f"【章节规则校验】{_json_dumps(chapter_rule_check)}\n"
                 f"【候选定额子目（共 {candidates_data['total']} 条）】\n{candidate_text}\n"
             ),
         },
@@ -3117,6 +3396,7 @@ def _stream_pricing_item(
                 f"项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
                 f"【编码核查】{_json_dumps(code_check)}\n"
                 f"【项目特征分析】{_json_dumps(feature_result)}\n"
+                f"【章节规则校验】{_json_dumps(chapter_rule_check)}\n"
                 f"【第五轮A套定额分析】\n{quota_analysis or '（无分析文本）'}\n\n"
                 f"【候选定额子目（共 {candidates_data['total']} 条）】\n{candidate_text}\n"
             ),
@@ -3124,10 +3404,20 @@ def _stream_pricing_item(
     ]
     raw_match = _run_submit_match(messages_r5_submit) if candidates else {"matches": [], "issues": ["未找到候选定额子目"]}
     match_result = _normalize_matches(raw_match, candidates)
+    try:
+        chapter_rule_check["validation"] = _validate_chapter_rules(chapter_rule_check, match_result["matches"])
+    except Exception as exc:
+        chapter_rule_check["validation"] = {
+            "validations": [],
+            "issues": [f"章节规则最终校验失败：{exc}"],
+            "status": "manual_review",
+        }
+    yield ("chapter_rule_check", chapter_rule_check)
     if persist_run and run_id is not None:
         _update_run(conn, run_id, quota_match=match_result)
+        _update_run(conn, run_id, chapter_rule_check=chapter_rule_check)
     yield ("quota_match", match_result)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 4, "套定额结果", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "套定额结果", step_started_at, step_started_perf))
 
     step_started_at = datetime.now()
     step_started_perf = perf_counter()
@@ -3137,7 +3427,7 @@ def _stream_pricing_item(
         _update_run(conn, run_id, evaluation=evaluation)
         _save_pending_results(conn, task_id, run_id, boq_item, match_result, evaluation)
     yield ("evaluation", evaluation)
-    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 5, "人工对比", step_started_at, step_started_perf))
+    yield ("step_timing", _finish_step_timing(conn, run_id, step_timings, 6, "人工对比", step_started_at, step_started_perf))
 
 
 def _row_to_task(row) -> dict[str, Any]:
@@ -3528,7 +3818,7 @@ def get_pricing_task_batch_items(batch_id: int):
             ]
             cur.execute(
                 """
-                SELECT boq_item_id, id, status, code_check, feature_check, work_procedures,
+                SELECT boq_item_id, id, status, code_check, feature_check, chapter_rule_check, work_procedures,
                        quota_candidates, quota_match, evaluation, conversion_check,
                        coefficient_check, step_timings, error_message, created_at, finished_at,
                        reasoning_text, confirmed_results, kb_version_id
@@ -3553,19 +3843,20 @@ def get_pricing_task_batch_items(batch_id: int):
                             "status": r[2],
                             "code_check": r[3],
                             "feature_check": r[4],
-                            "work_procedures": r[5],
-                            "quota_candidates": r[6],
-                            "quota_match": r[7],
-                            "evaluation": r[8],
-                            "conversion_check": _hydrate_conversion_for_batch_run(conn, int(r[1]), r[9]),
-                            "coefficient_check": r[10],
-                            "step_timings": r[11],
-                            "error_message": r[12],
-                            "created_at": r[13],
-                            "finished_at": r[14],
-                            "reasoning_text": r[15],
-                            "confirmed_results": r[16] or [],
-                            "kb_version_id": int(r[17]) if r[17] is not None else None,
+                            "chapter_rule_check": r[5],
+                            "work_procedures": r[6],
+                            "quota_candidates": r[7],
+                            "quota_match": r[8],
+                            "evaluation": r[9],
+                            "conversion_check": _hydrate_conversion_for_batch_run(conn, int(r[1]), r[10]),
+                            "coefficient_check": r[11],
+                            "step_timings": r[12],
+                            "error_message": r[13],
+                            "created_at": r[14],
+                            "finished_at": r[15],
+                            "reasoning_text": r[16],
+                            "confirmed_results": r[17] or [],
+                            "kb_version_id": int(r[18]) if r[18] is not None else None,
                         },
                     }
                 )
@@ -3628,11 +3919,11 @@ def _create_or_reset_batch_item_run(
             """
             INSERT INTO pricing_task_batch_item_runs(
                 batch_id, boq_item_id, boq_project_id, kb_version_id, status, started_at,
-                reasoning_text, code_check, feature_check, work_procedures,
+                reasoning_text, code_check, feature_check, chapter_rule_check, work_procedures,
                 quota_candidates, quota_match, evaluation, confirmed_results,
                 conversion_check, coefficient_check, step_timings, error_message, finished_at
             )
-            VALUES (%s, %s, %s, %s, 'running', NOW(), '', NULL, NULL, NULL, NULL, NULL, NULL, '[]'::jsonb, NULL, NULL, '{}'::jsonb, NULL, NULL)
+            VALUES (%s, %s, %s, %s, 'running', NOW(), '', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '[]'::jsonb, NULL, NULL, '{}'::jsonb, NULL, NULL)
             ON CONFLICT (batch_id, boq_item_id) DO UPDATE SET
                 status='running',
                 kb_version_id=EXCLUDED.kb_version_id,
@@ -3641,6 +3932,7 @@ def _create_or_reset_batch_item_run(
                 reasoning_text='',
                 code_check=NULL,
                 feature_check=NULL,
+                chapter_rule_check=NULL,
                 work_procedures=NULL,
                 quota_candidates=NULL,
                 quota_match=NULL,
@@ -3789,6 +4081,8 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
                         fields["code_check"] = data
                     elif event_type == "feature_check":
                         fields["feature_check"] = data
+                    elif event_type == "chapter_rule_check":
+                        fields["chapter_rule_check"] = data
                     elif event_type == "quota_candidates":
                         fields["quota_candidates"] = data
                     elif event_type == "quota_match":
@@ -3849,7 +4143,7 @@ def list_item_runs(task_id: int, boq_item_id: int):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, status, code_check, feature_check, work_procedures, quota_candidates,
+                SELECT id, status, code_check, feature_check, chapter_rule_check, work_procedures, quota_candidates,
                        quota_match, evaluation, conversion_check, coefficient_check,
                        step_timings, error_message, created_at, finished_at, reasoning_text,
                        kb_version_id
@@ -3867,19 +4161,20 @@ def list_item_runs(task_id: int, boq_item_id: int):
                 "status": r[1],
                 "code_check": r[2],
                 "feature_check": r[3],
-                "work_procedures": r[4],
-                "quota_candidates": r[5],
-                "quota_match": r[6],
-                "evaluation": r[7],
-                "conversion_check": _hydrate_conversion_for_run(conn, int(r[0]), r[8]),
-                "coefficient_check": r[9],
-                "step_timings": r[10],
-                "error_message": r[11],
-                "created_at": r[12],
-                "finished_at": r[13],
-                "reasoning_text": r[14],
+                "chapter_rule_check": r[4],
+                "work_procedures": r[5],
+                "quota_candidates": r[6],
+                "quota_match": r[7],
+                "evaluation": r[8],
+                "conversion_check": _hydrate_conversion_for_run(conn, int(r[0]), r[9]),
+                "coefficient_check": r[10],
+                "step_timings": r[11],
+                "error_message": r[12],
+                "created_at": r[13],
+                "finished_at": r[14],
+                "reasoning_text": r[15],
                 "confirmed_results": confirmed_results.get(int(r[0]), []),
-                "kb_version_id": int(r[15]) if r[15] is not None else None,
+                "kb_version_id": int(r[16]) if r[16] is not None else None,
             }
             for r in rows
         ]
@@ -3906,7 +4201,7 @@ def list_latest_task_runs(task_id: int):
             cur.execute(
                 """
                 SELECT DISTINCT ON (r.boq_item_id)
-                       r.boq_item_id, r.id, r.status, r.code_check, r.feature_check, r.work_procedures,
+                       r.boq_item_id, r.id, r.status, r.code_check, r.feature_check, r.chapter_rule_check, r.work_procedures,
                        r.quota_candidates, r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
                        r.step_timings, r.error_message, r.created_at, r.finished_at, r.reasoning_text,
                        r.kb_version_id, i.item_code
@@ -3922,8 +4217,8 @@ def list_latest_task_runs(task_id: int):
         manual_by_code = _manual_quotas_by_code(conn, manual_project_id)
         result = []
         for row in rows:
-            quota_match = row[7] if isinstance(row[7], dict) else {}
-            item_code = str(row[17] or "").strip().replace(" ", "")
+            quota_match = row[8] if isinstance(row[8], dict) else {}
+            item_code = str(row[18] or "").strip().replace(" ", "")
             current_evaluation = _evaluate(
                 quota_match.get("matches", []),
                 manual_by_code.get(item_code, []),
@@ -3936,19 +4231,20 @@ def list_latest_task_runs(task_id: int):
                         "status": row[2],
                         "code_check": row[3],
                         "feature_check": row[4],
-                        "work_procedures": row[5],
-                        "quota_candidates": row[6],
+                        "chapter_rule_check": row[5],
+                        "work_procedures": row[6],
+                        "quota_candidates": row[7],
                         "quota_match": quota_match,
                         "evaluation": current_evaluation,
-                        "conversion_check": _hydrate_conversion_for_run(conn, int(row[1]), row[9]),
-                        "coefficient_check": row[10],
-                        "step_timings": row[11],
-                        "error_message": row[12],
-                        "created_at": row[13],
-                        "finished_at": row[14],
-                        "reasoning_text": row[15],
+                        "conversion_check": _hydrate_conversion_for_run(conn, int(row[1]), row[10]),
+                        "coefficient_check": row[11],
+                        "step_timings": row[12],
+                        "error_message": row[13],
+                        "created_at": row[14],
+                        "finished_at": row[15],
+                        "reasoning_text": row[16],
                         "confirmed_results": confirmed_results.get(int(row[1]), []),
-                        "kb_version_id": int(row[16]) if row[16] is not None else None,
+                        "kb_version_id": int(row[17]) if row[17] is not None else None,
                     },
                 }
             )
@@ -4167,7 +4463,7 @@ def get_pricing_task_detail_report(task_id: int):
             cur.execute(
                 """
                 SELECT DISTINCT ON (r.boq_item_id)
-                       r.id, r.boq_item_id, r.status, r.code_check, r.feature_check,
+                       r.id, r.boq_item_id, r.status, r.code_check, r.feature_check, r.chapter_rule_check,
                        r.quota_candidates, r.quota_match, r.evaluation, r.conversion_check,
                        r.coefficient_check, r.step_timings, r.reasoning_text, r.created_at, r.finished_at,
                        i.item_code, i.item_name, i.item_description, i.unit, i.quantity, i.item_seq
@@ -4235,7 +4531,7 @@ def _get_new_batch_detail_report(batch_id: int) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT DISTINCT ON (r.boq_item_id)
-                       r.id, r.boq_item_id, r.status, r.code_check, r.feature_check,
+                       r.id, r.boq_item_id, r.status, r.code_check, r.feature_check, r.chapter_rule_check,
                        r.quota_candidates, r.quota_match, r.evaluation, r.conversion_check,
                        r.coefficient_check, r.step_timings, r.reasoning_text, r.created_at, r.finished_at,
                        i.item_code, i.item_name, i.item_description, i.unit, i.quantity, i.item_seq
@@ -4304,7 +4600,7 @@ def pricing_task_conversion_check_stream(run_id: int):
                 yield _sse({"type": "combo_adjustment_rules", "items": []})
                 _update_run(conn, run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -4325,7 +4621,7 @@ def pricing_task_conversion_check_stream(run_id: int):
                 )
                 _update_run(conn, run_id, conversion_check=result)
                 yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
             analysis_prompt = (
@@ -4371,7 +4667,7 @@ def pricing_task_conversion_check_stream(run_id: int):
             result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
             _update_run(conn, run_id, conversion_check=result)
             yield _sse({"type": "conversion_check", "conversion_check": result})
-            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "组合换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -4404,7 +4700,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 result = {"items": [], "issues": ["未找到已确认定额，无法进行系数换算。"]}
                 _update_run(conn, run_id, coefficient_check=result)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -4412,7 +4708,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 result = _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")
                 _update_run(conn, run_id, coefficient_check=result)
                 yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
+                yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
                 yield _sse({"type": "done", "run_id": run_id})
                 return
 
@@ -4476,7 +4772,7 @@ def pricing_task_coefficient_check_stream(run_id: int):
                 )
             _update_run(conn, run_id, coefficient_check=result)
             yield _sse({"type": "coefficient_check", "coefficient_check": result})
-            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_step_timing(conn, run_id, step_timings, 8, "系数换算", step_started_at, step_started_perf)})
             yield _sse({"type": "done", "run_id": run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})

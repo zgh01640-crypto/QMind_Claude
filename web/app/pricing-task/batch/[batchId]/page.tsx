@@ -8,6 +8,7 @@ import {
   PricingTaskBatch,
   PricingTaskBatchItemRun,
   PricingTaskCoefficientCheck,
+  PricingTaskChapterRuleCheck,
   PricingTaskConversionCheck,
   PricingTaskEvaluation,
   PricingTaskEvent,
@@ -71,6 +72,7 @@ interface ItemResult {
   status?: string
   codeCheck?: CodeCheck
   featureCheck?: FeatureCheck
+  chapterRuleCheck?: PricingTaskChapterRuleCheck
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
@@ -153,6 +155,7 @@ function runToResult(run: PricingTaskBatchItemRun['run']): ItemResult {
     status: run.status,
     codeCheck: run.code_check as CodeCheck | undefined,
     featureCheck: run.feature_check as FeatureCheck | undefined,
+    chapterRuleCheck: run.chapter_rule_check ?? undefined,
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
     quotaMatch: run.quota_match as ItemResult['quotaMatch'],
     evaluation: run.evaluation ?? undefined,
@@ -244,6 +247,21 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
   }  if (evt.type === 'quota_candidates') {
     return { ...prev, quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total } }
   }
+  if (evt.type === 'chapter_rule_check') {
+    return {
+      ...prev,
+      chapterRuleCheck: {
+        available: evt.available,
+        base_code: evt.base_code,
+        kb_version_id: evt.kb_version_id,
+        chapters: evt.chapters ?? [],
+        project_items_checked: evt.project_items_checked ?? 0,
+        rules: evt.rules ?? [],
+        issues: evt.issues ?? [],
+        validation: evt.validation ?? { status: 'pending', validations: [], issues: [] },
+      },
+    }
+  }
   if (evt.type === 'quota_match') return { ...prev, quotaMatch: { matches: evt.matches, issues: evt.issues } }
   if (evt.type === 'evaluation') return { ...prev, evaluation: evt.evaluation }
   if (evt.type === 'step_timing') return { ...prev, stepTimings: { ...(prev.stepTimings ?? {}), [String(evt.step_no)]: evt } }
@@ -312,14 +330,25 @@ function StepCards({ result }: { result?: ItemResult }) {
           )}
           <div className="mt-1 text-orange-800">{result.featureCheck.analysis}</div>
         </section>
-      )}      {result.quotaCandidates && (
+      )}
+      {result.chapterRuleCheck && (
+        <section className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs">
+          <div className="font-semibold text-sky-900">3. 章节规则校验</div>
+          <div className="mt-1 text-sky-800">{result.chapterRuleCheck.chapters.map(chapter => chapter.chapter_name).join(' / ') || '未找到章节规则'}</div>
+          {result.chapterRuleCheck.rules.filter(rule => rule.matched).map((rule, index) => (
+            <div key={`${rule.chapter_id}-${index}`} className="mt-1 rounded bg-white px-2 py-1 text-slate-700">已命中：{rule.rule_reference || rule.rule_text}；{rule.action}</div>
+          ))}
+          {result.chapterRuleCheck.validation?.status === 'failed' && <div className="mt-1 text-red-700">规则校验未通过，需复核定额结果。</div>}
+        </section>
+      )}
+      {result.quotaCandidates && (
         <section className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-slate-900">3. 定额候选：{result.quotaCandidates.total} 条</div>
+          <div className="font-semibold text-slate-900">4. 定额候选：{result.quotaCandidates.total} 条</div>
         </section>
       )}
       {result.quotaMatch && (
         <section className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-emerald-900">4. 套定额结果：{result.quotaMatch.matches.length} 条</div>
+          <div className="font-semibold text-emerald-900">5. 套定额结果：{result.quotaMatch.matches.length} 条</div>
           <div className="mt-2 space-y-1">
             {result.quotaMatch.matches.map((match, index) => (
               <div key={`${match.zmbh}-${index}`} className="rounded bg-white px-2 py-1">
@@ -332,7 +361,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {result.evaluation && (
         <section className="rounded border border-purple-200 bg-purple-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-purple-900">5. 人工对比</div>
+          <div className="font-semibold text-purple-900">6. 人工对比</div>
           <div className="mt-1 text-purple-800">
             命中 {result.evaluation.hit_count}，遗漏 {result.evaluation.missed_count}，额外 {result.evaluation.extra_count}
           </div>
@@ -340,7 +369,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {(result.conversionChecking || result.conversionCheck || result.comboAdjustmentPreview || result.conversionError) && (
         <section className="rounded border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-cyan-900">6. 组合换算</div>
+          <div className="font-semibold text-cyan-900">7. 组合换算</div>
           {result.conversionChecking && <div className="mt-1 text-cyan-700">运行中...</div>}
           {result.conversionError && <div className="mt-1 text-red-700">{result.conversionError}</div>}
           {(result.conversionCheck || result.comboAdjustmentPreview) && (
@@ -377,7 +406,7 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {(result.coefficientChecking || result.coefficientCheck || result.coefficientPreview || result.coefficientError) && (
         <section className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-violet-900">7. 系数换算</div>
+          <div className="font-semibold text-violet-900">8. 系数换算</div>
           {result.coefficientChecking && <div className="mt-1 text-violet-700">运行中...</div>}
           {result.coefficientError && <div className="mt-1 text-red-700">{result.coefficientError}</div>}
           {(result.coefficientCheck || result.coefficientPreview) && (

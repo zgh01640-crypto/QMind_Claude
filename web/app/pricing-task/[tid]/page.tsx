@@ -7,6 +7,7 @@ import {
   BoqItem,
   PricingTask,
   PricingTaskCoefficientCheck,
+  PricingTaskChapterRuleCheck,
   PricingTaskConversionCheck,
   PricingTaskConversionResource,
   PricingTaskDetailReport,
@@ -98,6 +99,7 @@ interface ItemResult {
   codeCheck?: CodeCheck
   judgment?: { is_consistent: boolean; reasoning: string }
   featureCheck?: FeatureCheck
+  chapterRuleCheck?: PricingTaskChapterRuleCheck
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   evaluation?: PricingTaskEvaluation
@@ -133,6 +135,7 @@ function runToResult(run: PricingTaskRun): ItemResult {
         }
       : undefined,
     featureCheck: run.feature_check as ItemResult['featureCheck'],
+    chapterRuleCheck: run.chapter_rule_check ?? undefined,
     quotaCandidates: run.quota_candidates as ItemResult['quotaCandidates'],
     quotaMatch: normalizedQuotaMatch,
     evaluation: run.evaluation ?? undefined,
@@ -251,16 +254,27 @@ function stepBadges(result?: ItemResult) {
     },
     {
       no: 3,
+      title: '章节规则',
+      tone: !result?.chapterRuleCheck
+        ? 'pending'
+        : result.chapterRuleCheck.validation?.status === 'failed'
+          ? 'error'
+          : result.chapterRuleCheck.validation?.status === 'manual_review'
+            ? 'warning'
+            : 'success',
+    },
+    {
+      no: 4,
       title: '定额候选',
       tone: !result?.quotaCandidates ? 'pending' : result.quotaCandidates.total > 0 ? 'success' : 'warning',
     },
     {
-      no: 4,
+      no: 5,
       title: '套定额结果',
       tone: !result?.quotaMatch ? (result?.phase === 'error' ? 'error' : 'pending') : result.quotaMatch.matches.length > 0 ? 'success' : 'warning',
     },
     {
-      no: 5,
+      no: 6,
       title: '人工对比',
       tone: !result?.evaluation
         ? 'pending'
@@ -271,7 +285,7 @@ function stepBadges(result?: ItemResult) {
             : 'warning',
     },
     {
-      no: 6,
+      no: 7,
       title: '组合换算',
       tone: result?.conversionChecking
         ? 'pending'
@@ -282,7 +296,7 @@ function stepBadges(result?: ItemResult) {
             : 'success',
     },
     {
-      no: 7,
+      no: 8,
       title: '系数换算',
       tone: result?.coefficientChecking
         ? 'pending'
@@ -296,14 +310,15 @@ function stepBadges(result?: ItemResult) {
 }
 
 function activeStepNo(result?: ItemResult) {
-  if (result?.coefficientChecking) return 7
-  if (result?.conversionChecking) return 6
+  if (result?.coefficientChecking) return 8
+  if (result?.conversionChecking) return 7
   if (!result || result.phase !== 'reasoning') return null
   if (!result.codeCheck) return 1
   if (!result.featureCheck) return 2
-  if (!result.quotaCandidates) return 3
-  if (!result.quotaMatch) return 4
-  if (!result.evaluation) return 5
+  if (!result.chapterRuleCheck) return 3
+  if (!result.quotaCandidates) return 4
+  if (!result.quotaMatch) return 5
+  if (!result.evaluation) return 6
   return null
 }
 
@@ -1347,6 +1362,20 @@ export default function PricingTaskDetailPage() {
               unresolved_features: evt.unresolved_features ?? [],
             },
           }))
+        } else if (evt.type === 'chapter_rule_check') {
+          updateResult(itemId, s => ({
+            ...s,
+            chapterRuleCheck: {
+              available: evt.available,
+              base_code: evt.base_code,
+              kb_version_id: evt.kb_version_id,
+              chapters: evt.chapters ?? [],
+              project_items_checked: evt.project_items_checked ?? 0,
+              rules: evt.rules ?? [],
+              issues: evt.issues ?? [],
+              validation: evt.validation ?? { status: 'pending', validations: [], issues: [] },
+            },
+          }))
         } else if (evt.type === 'quota_candidates') {
           updateResult(itemId, s => ({
             ...s,
@@ -1395,7 +1424,7 @@ export default function PricingTaskDetailPage() {
             ...s,
             conversionChecking: true,
             conversionError: undefined,
-            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第六轮 组合换算】\n`,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 组合换算】\n`,
           }))
         } else if (evt.type === 'combo_adjustment_rules') {
           updateResult(itemId, s => ({
@@ -1441,7 +1470,7 @@ export default function PricingTaskDetailPage() {
             ...s,
             coefficientChecking: true,
             coefficientError: undefined,
-            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第七轮 系数换算】\n`,
+            reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第八轮 系数换算】\n`,
           }))
         } else if (evt.type === 'coefficient_rules') {
           updateResult(itemId, s => ({
@@ -1931,6 +1960,49 @@ export default function PricingTaskDetailPage() {
                     </section>
                   )}
 
+                  {currentResult.chapterRuleCheck && (
+                    <section className={`px-4 py-4 border-b ${currentResult.chapterRuleCheck.validation?.status === 'failed' ? 'bg-red-50 border-red-200' : currentResult.chapterRuleCheck.validation?.status === 'manual_review' ? 'bg-amber-50 border-amber-200' : 'bg-sky-50 border-sky-200'}`}>
+                      <h4 className="font-semibold text-sm text-sky-900 mb-2">
+                        3. 章节规则校验<StepDuration result={currentResult} stepNo={3} />
+                      </h4>
+                      {!currentResult.chapterRuleCheck.available ? (
+                        <p className="text-xs text-slate-600">未找到该清单对应的章节说明规则。</p>
+                      ) : (
+                        <>
+                          <p className="mb-2 text-xs text-sky-800">章节：{currentResult.chapterRuleCheck.chapters.map(chapter => chapter.chapter_name).join(' / ')}</p>
+                          {currentResult.chapterRuleCheck.project_items_checked > 0 && <p className="mb-2 text-xs text-sky-700">已核查全工程清单索引：{currentResult.chapterRuleCheck.project_items_checked} 条</p>}
+                          {currentResult.chapterRuleCheck.rules.length === 0 ? (
+                            <p className="text-xs text-slate-600">章节规则均未命中。</p>
+                          ) : (
+                            <div className="space-y-2 text-xs">
+                              {currentResult.chapterRuleCheck.rules.map((rule, index) => (
+                                <div key={`${rule.chapter_id}-${rule.rule_reference}-${index}`} className={`rounded border bg-white px-3 py-2 ${rule.matched ? 'border-sky-200' : 'border-slate-200'}`}>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${rule.matched ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-600'}`}>{rule.matched ? '已命中' : '未命中'}</span>
+                                    <span className="font-medium text-slate-900">{rule.rule_reference || '章节规则'}</span>
+                                  </div>
+                                  <p className="mt-1 whitespace-pre-wrap text-slate-600">{rule.rule_text}</p>
+                                  <p className="mt-1 text-slate-700">{rule.action}</p>
+                                  {rule.evidence && <p className="mt-1 text-slate-500">依据：{rule.evidence}</p>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {currentResult.chapterRuleCheck.validation?.validations.length > 0 && (
+                            <div className="mt-3 space-y-1 text-xs">
+                              {currentResult.chapterRuleCheck.validation.validations.map((validation, index) => (
+                                <p key={`${validation.rule_index}-${index}`} className={validation.status === 'failed' ? 'text-red-700' : validation.status === 'passed' ? 'text-green-700' : 'text-amber-700'}>
+                                  {validation.status === 'passed' ? '已落实' : validation.status === 'failed' ? '未通过' : '需复核'}：{validation.message || validation.evidence}
+                                </p>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {(currentResult.chapterRuleCheck.issues?.length ?? 0) > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-700">{currentResult.chapterRuleCheck.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>}
+                    </section>
+                  )}
+
                   {currentResult.quotaCandidates && (
                     <section className="px-4 py-4 border-b bg-slate-50 border-slate-200">
                       <button
@@ -1939,8 +2011,8 @@ export default function PricingTaskDetailPage() {
                         className="w-full flex items-center justify-between text-left"
                       >
                         <h4 className="font-semibold text-sm text-slate-900">
-                          3. 定额候选子目 <span className="text-xs font-normal text-slate-500">共 {currentResult.quotaCandidates.total} 条</span>
-                          <StepDuration result={currentResult} stepNo={3} />
+                          4. 定额候选子目 <span className="text-xs font-normal text-slate-500">共 {currentResult.quotaCandidates.total} 条</span>
+                          <StepDuration result={currentResult} stepNo={4} />
                         </h4>
                         <span className="text-xs text-slate-500">{quotaCandidatesExpanded ? '收起' : '展开'}</span>
                       </button>
@@ -1971,8 +2043,8 @@ export default function PricingTaskDetailPage() {
                   {currentResult.quotaMatch && (
                     <section className="px-4 py-4 border-b bg-emerald-50 border-emerald-200">
                       <h4 className="font-semibold text-sm text-emerald-900 mb-3">
-                        4. 套定额结果 <span className="text-xs font-normal text-emerald-600">{currentResult.quotaMatch.matches.length} 条匹配</span>
-                        <StepDuration result={currentResult} stepNo={4} />
+                        5. 套定额结果 <span className="text-xs font-normal text-emerald-600">{currentResult.quotaMatch.matches.length} 条匹配</span>
+                        <StepDuration result={currentResult} stepNo={5} />
                       </h4>
                       {currentResult.quotaMatch.matches.length === 0 ? (
                         <p className="text-xs text-gray-400">未找到匹配定额</p>
@@ -2009,7 +2081,7 @@ export default function PricingTaskDetailPage() {
 
                   {currentResult.evaluation && (
                     <section className="px-4 py-4 border-b bg-purple-50 border-purple-200">
-                      <h4 className="font-semibold text-sm text-purple-900 mb-2">5. 人工对比一致性<StepDuration result={currentResult} stepNo={5} /></h4>
+                      <h4 className="font-semibold text-sm text-purple-900 mb-2">6. 人工对比一致性<StepDuration result={currentResult} stepNo={6} /></h4>
                       <div className="grid grid-cols-3 gap-2 text-xs mb-2">
                         <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.hit_count}</div><div className="text-gray-500">双方一致</div></div>
                         <div className="bg-white rounded p-2 text-center"><div className="font-semibold">{currentResult.evaluation.missed_count}</div><div className="text-gray-500">仅人工</div></div>
@@ -2068,7 +2140,7 @@ export default function PricingTaskDetailPage() {
                   {(currentResult.conversionChecking || currentResult.conversionCheck || currentResult.conversionError) && (
                     <section className="px-4 py-4 border-b bg-cyan-50 border-cyan-200">
                       <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-cyan-900">6. 组合换算<StepDuration result={currentResult} stepNo={6} /></h4>
+                        <h4 className="font-semibold text-sm text-cyan-900">7. 组合换算<StepDuration result={currentResult} stepNo={7} /></h4>
                         {currentResult.conversionChecking && (
                           <span className="inline-block h-4 w-4 rounded-full border-2 border-cyan-200 border-t-cyan-700 animate-spin" title="组合换算运行中" />
                         )}
@@ -2121,7 +2193,7 @@ export default function PricingTaskDetailPage() {
                   {(currentResult.coefficientChecking || currentResult.coefficientCheck || currentResult.coefficientPreview || currentResult.coefficientError) && (
                     <section className="px-4 py-4 border-b bg-violet-50 border-violet-200">
                       <div className="mb-3 flex items-center justify-between">
-                        <h4 className="font-semibold text-sm text-violet-900">7. 系数换算<StepDuration result={currentResult} stepNo={7} /></h4>
+                        <h4 className="font-semibold text-sm text-violet-900">8. 系数换算<StepDuration result={currentResult} stepNo={8} /></h4>
                         {currentResult.coefficientChecking && (
                           <span className="inline-block h-4 w-4 rounded-full border-2 border-violet-200 border-t-violet-700 animate-spin" title="系数换算运行中" />
                         )}
