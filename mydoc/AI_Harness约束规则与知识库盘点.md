@@ -86,16 +86,17 @@ AI 只能从后端返回的候选定额中选择：
 
 当项目特征包含“综合考虑”时：
 
-- AI 只能从 `tqdk_tzhkl` 返回的默认值候选中选择；
+- 运行时唯一默认值来源是 `TQDK_TQDXMTZ.DEFAULTTZMS`；
+- AI 只能从该表返回的原生默认值候选中选择；
 - 只能补全明确匹配的 `feature_name/default_value`；
 - 不得覆盖已经存在的明确特征值；
 - 无法明确匹配时不得补全；
 - LLM 输出后由后端再次验证默认值是否属于候选集合；
-- 符合条件时可将规范化描述回写到 `boq_items.item_description`。
+- 补全后的描述只保存在本次运行上下文，不回写 `boq_items.item_description`。
 
 相关实现：
 
-- `api/routers/pricing_task.py::_load_feature_default_candidates`
+- `api/routers/pricing_task.py::_load_feature_default_context`
 - `api/routers/pricing_task.py::_normalize_feature_analysis_result`
 - `api/routers/pricing_task.py::_TOOL_SUBMIT_FEATURE_ANALYSIS`
 
@@ -304,7 +305,7 @@ TDEK_TDEZM：定额子目
 - 覆盖 628 个清单编码；
 - 解析过程记录 628 条问题或提示。
 
-运行时表：`tqdk_tzhkl`。
+保留表：`tqdk_tzhkl`。该表及其导入、管理能力继续保留，但已退出智能组价运行时默认值处理。
 
 主要字段：
 
@@ -317,7 +318,7 @@ TDEK_TDEZM：定额子目
 - 默认值；
 - 源文件哈希、Sheet 和行号。
 
-该知识库目前只用于处理“综合考虑”默认值，不是完整的项目特征本体或知识图谱。
+该知识库作为历史和补充资料保留，不再参与“综合考虑”默认值补全。运行时唯一来源为版本化的 `TQDK_TQDXMTZ.DEFAULTTZMS`。
 
 ### 4.3 人工组价对照库
 
@@ -417,7 +418,7 @@ TDEK_TDEZM：定额子目
 ### 7.2 知识版本没有完全统一
 
 - 九张核心组价表已经纳入 `kb_version_id`；
-- `tqdk_tzhkl` 默认值表没有版本绑定；
+- `tqdk_tzhkl` 表没有版本绑定，但已不参与组价运行时；
 - 人工组价数据没有 golden-set 版本；
 - Prompt 也没有随 Run 保存版本号。
 
