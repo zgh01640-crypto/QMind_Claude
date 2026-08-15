@@ -664,7 +664,7 @@ def exec_check_item_code(conn, item_code: str, item_name: str, kb_version_id: in
 
 
 def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> dict[str, Any]:
-    """Load the versioned feature schema and the two-tier default candidates."""
+    """Load the versioned feature schema and its native default candidates."""
     context: dict[str, Any] = {
         "feature_schema": [],
         "default_candidates": [],
@@ -698,22 +698,8 @@ def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> d
             (schema_kb_version_id, kb_version_id, base_code),
         )
         schema_rows = cur.fetchall()
-        cur.execute(
-            """
-            SELECT f.zmbh, f.feature_name, f.feature_value, f.default_value,
-                   f.source_rowid, f.source_file_sha256
-            FROM tqdk_tzhkl f
-            WHERE f.zmbh=%s
-              AND trim(COALESCE(f.feature_value, ''))='综合考虑'
-              AND trim(COALESCE(f.default_value, ''))<>''
-            ORDER BY f.source_rowid, f.feature_name
-            """,
-            (base_code,),
-        )
-        fallback_rows = cur.fetchall()
 
     schema_seen: set[str] = set()
-    primary_features: set[str] = set()
     candidate_seen: set[tuple[str, str, str]] = set()
     for feature_name_raw, native_default_raw, source_rowid in schema_rows:
         feature_name = str(feature_name_raw or "").strip()
@@ -732,7 +718,6 @@ def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> d
             )
         if not native_default:
             continue
-        primary_features.add(feature_name)
         key = ("TQDK_TQDXMTZ", feature_name, native_default)
         if key in candidate_seen:
             continue
@@ -748,29 +733,6 @@ def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> d
                 "feature_value": "综合考虑",
                 "default_value": native_default,
                 "source_rowid": source_rowid,
-            }
-        )
-
-    for source_code, feature_name_raw, feature_value_raw, default_value_raw, source_rowid, source_hash in fallback_rows:
-        feature_name = str(feature_name_raw or "").strip()
-        default_value = str(default_value_raw or "").strip()
-        key = ("tqdk_tzhkl", feature_name, default_value)
-        if not feature_name or not default_value or key in candidate_seen:
-            continue
-        candidate_seen.add(key)
-        context["default_candidates"].append(
-            {
-                "candidate_id": f"tzhkl:{source_rowid}",
-                "source": "tqdk_tzhkl",
-                "priority": 2,
-                "source_code": str(source_code or base_code),
-                "feature_name": feature_name,
-                "target_feature_name": feature_name,
-                "feature_value": str(feature_value_raw or "综合考虑"),
-                "default_value": default_value,
-                "source_rowid": source_rowid,
-                "source_file_sha256": source_hash or "",
-                "blocked_by_native_default": feature_name in primary_features,
             }
         )
     return context
@@ -805,12 +767,6 @@ def _normalize_feature_analysis_result(
         for item in feature_context.get("feature_schema", [])
         if str(item.get("feature_name") or "").strip()
     }
-    native_default_features = {
-        str(candidate.get("target_feature_name") or candidate.get("feature_name") or "").strip()
-        for candidate in candidates
-        if candidate.get("source") == "TQDK_TQDXMTZ"
-    }
-
     fills: list[dict[str, Any]] = []
     filled_targets: set[str] = set()
     raw_fills = raw.get("default_fills", []) if isinstance(raw, dict) and "综合考虑" in original_text else []
@@ -829,10 +785,6 @@ def _normalize_feature_analysis_result(
         if not target_feature_name or target_feature_name in filled_targets:
             continue
         if schema_names and target_feature_name not in schema_names:
-            continue
-        if candidate.get("source") == "tqdk_tzhkl" and target_feature_name in native_default_features:
-            continue
-        if candidate.get("blocked_by_native_default"):
             continue
         filled_targets.add(target_feature_name)
         fills.append(
@@ -3080,10 +3032,10 @@ def _stream_pricing_item(
                 f"Original features: {boq_item.get('item_description') or 'not provided'}\n"
                 f"Unit: {boq_item.get('unit') or 'not provided'}\n\n"
                 f"[Standard feature schema from TQDK_TQDXMTZ]\n{feature_schema_text}\n\n"
-                f"[Default candidates, already ordered by priority]\n{feature_default_text}\n\n"
+                f"[Native default candidates from TQDK_TQDXMTZ.DEFAULTTZMS]\n{feature_default_text}\n\n"
                 "Only fill entries whose original value is 综合考虑. Select only candidate_id values from the supplied list. "
-                "For one target feature, TQDK_TQDXMTZ always takes priority; use tqdk_tzhkl only when that target has no native default. "
-                "You may semantically map a tqdk_tzhkl candidate to a standard feature, but do not overwrite an explicit original value and do not invent defaults. "
+                "All candidates come from TQDK_TQDXMTZ.DEFAULTTZMS. If no candidate is supplied for a feature, leave it unfilled. "
+                "Do not overwrite an explicit original value and do not invent defaults. "
                 "Submit the tool result with candidate_id, target_feature_name, confidence, and a concise reason."
             ),
         },

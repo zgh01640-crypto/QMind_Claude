@@ -146,7 +146,11 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   }
 
   async function publish(version: PricingKbVersion) {
-    if (!token || !window.confirm(`发布知识库版本 #${version.id}？新任务将使用该版本。`)) return
+    if (!token) {
+      setError('请先在页面右上角输入管理员令牌，再发布知识库版本')
+      return
+    }
+    if (!window.confirm(`发布知识库版本 #${version.id}？新任务将使用该版本。`)) return
     setBusy(true); setError('')
     try { await publishPricingKbVersion(version.id, token); await reloadVersions(); onRefresh?.() }
     catch (reason) { setError(reason instanceof Error ? reason.message : '发布失败') }
@@ -308,11 +312,14 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
                 {!version.is_active && ['validated', 'retired'].includes(version.status) && (
                   <button
                     type="button"
-                    disabled={busy || !token}
+                    disabled={busy}
                     onClick={() => publish(version)}
+                    title={!token ? '请先输入管理员令牌' : undefined}
                     className="mt-3 w-full rounded border border-blue-200 bg-blue-50 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    {version.status === 'retired' ? '重新激活' : '发布版本'}
+                    {version.status === 'retired'
+                      ? (token ? '重新激活' : '输入令牌后重新激活')
+                      : (token ? '发布版本' : '输入令牌后发布')}
                   </button>
                 )}
               </div>
