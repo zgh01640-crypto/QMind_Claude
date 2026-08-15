@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS tqdk_tqdxmtz (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_file_sha256, source_rowid)
 );
+CREATE TABLE IF NOT EXISTS tqdk_tqdzy_special (
+    id                  BIGINT,
+    pid                 BIGINT,
+    qdkid               BIGINT,
+    qdzmid              BIGINT,
+    dekid               BIGINT,
+    dezmid              BIGINT,
+    zmbh                VARCHAR(64),
+    zmmc                TEXT,
+    dw                  VARCHAR(64),
+    source_file_sha256  VARCHAR(64) NOT NULL,
+    source_rowid        BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_file_sha256, source_rowid)
+);
 -- Every imported source row belongs to exactly one immutable version.
 ALTER TABLE tlibs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tqdk_tzjmc ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
@@ -77,6 +93,7 @@ ALTER TABLE tdek_tzmgc ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tznhs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tdek_tzhhs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 ALTER TABLE tqdk_tqdzy ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
+ALTER TABLE tqdk_tqdzy_special ADD COLUMN IF NOT EXISTS kb_version_id BIGINT;
 
 -- Some early imports may have rows without a matching import-run record.
 INSERT INTO pricing_kb_versions (source_file, source_file_sha256, status, validated_at)
@@ -92,6 +109,7 @@ FROM (
     UNION SELECT source_file_sha256 FROM tdek_tznhs
     UNION SELECT source_file_sha256 FROM tdek_tzhhs
     UNION SELECT source_file_sha256 FROM tqdk_tqdzy
+    UNION SELECT source_file_sha256 FROM tqdk_tqdzy_special
 ) sources
 WHERE source_file_sha256 IS NOT NULL
   AND NOT EXISTS (
@@ -119,6 +137,8 @@ UPDATE tdek_tznhs t SET kb_version_id=v.id FROM pricing_kb_versions v
 UPDATE tdek_tzhhs t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
 UPDATE tqdk_tqdzy t SET kb_version_id=v.id FROM pricing_kb_versions v
+ WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
+UPDATE tqdk_tqdzy_special t SET kb_version_id=v.id FROM pricing_kb_versions v
  WHERE t.kb_version_id IS NULL AND v.source_file_sha256=t.source_file_sha256;
 
 -- Preserve current behavior when upgrading an already populated installation.
@@ -188,6 +208,14 @@ CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_version_boq
     ON tqdk_tqdzy(kb_version_id, qdkid, qdzmid);
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_version_quota
     ON tqdk_tqdzy(kb_version_id, dekid, dezmid);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tqdzy_special_version_row
+    ON tqdk_tqdzy_special(kb_version_id, source_rowid);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_version_boq
+    ON tqdk_tqdzy_special(kb_version_id, qdkid, qdzmid);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_version_parent
+    ON tqdk_tqdzy_special(kb_version_id, qdkid, qdzmid, id);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_version_quota
+    ON tqdk_tqdzy_special(kb_version_id, dekid, dezmid);
 
 -- Existing read-only APIs use these views and always see the published version.
 CREATE OR REPLACE VIEW active_tlibs AS
@@ -210,3 +238,5 @@ CREATE OR REPLACE VIEW active_tdek_tzhhs AS
 SELECT t.* FROM tdek_tzhhs t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
 CREATE OR REPLACE VIEW active_tqdk_tqdzy AS
 SELECT t.* FROM tqdk_tqdzy t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;
+CREATE OR REPLACE VIEW active_tqdk_tqdzy_special AS
+SELECT t.* FROM tqdk_tqdzy_special t JOIN pricing_kb_active_version a ON a.kb_version_id=t.kb_version_id;

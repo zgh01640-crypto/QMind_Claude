@@ -1079,7 +1079,11 @@ def exec_fetch_quota_candidates(
     quota_library_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     base_code = _base_code(item_code)
-    params: list[Any] = [kb_version_id] * 5 + [base_code]
+    params: list[Any] = [
+        kb_version_id, kb_version_id, base_code,
+        kb_version_id, kb_version_id, base_code,
+        kb_version_id, kb_version_id, kb_version_id,
+    ]
     library_filter = ""
     if quota_library_ids:
         library_filter = "AND q.dekid = ANY(%s)"
@@ -1087,21 +1091,56 @@ def exec_fetch_quota_candidates(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT DISTINCT q.id, q.dekid, l.mc, q.zmbh, q.zmmc, q.dw, q.gznr, c.zjmc
-            FROM tqdk_tqdzm zm
-            JOIN tqdk_tqdzy cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
-            JOIN tdek_tdezm q ON q.dekid=cand.dekid AND q.id=cand.dezmid
+            WITH candidate_links AS (
+                SELECT cand.dekid, cand.dezmid,
+                       'TQDK_TQDZY'::TEXT AS source_table,
+                       NULL::BIGINT AS typical_group_id,
+                       NULL::TEXT AS typical_group_name
+                FROM tqdk_tqdzm zm
+                JOIN tqdk_tqdzy cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+                WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
+                  AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY')
+                  AND zm.zmbh=%s
+
+                UNION ALL
+
+                SELECT cand.dekid, cand.dezmid,
+                       'TQDK_TQDZY_SPECIAL'::TEXT AS source_table,
+                       cand.pid AS typical_group_id,
+                       parent.zmmc AS typical_group_name
+                FROM tqdk_tqdzm zm
+                JOIN tqdk_tqdzy_special cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+                LEFT JOIN tqdk_tqdzy_special parent
+                  ON parent.kb_version_id=cand.kb_version_id
+                 AND parent.qdkid=cand.qdkid
+                 AND parent.qdzmid=cand.qdzmid
+                 AND parent.id=cand.pid
+                WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
+                  AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY_SPECIAL')
+                  AND zm.zmbh=%s
+                  AND cand.dekid IS NOT NULL
+                  AND cand.dezmid IS NOT NULL
+            ), merged_candidates AS (
+                SELECT dekid, dezmid,
+                       ARRAY_AGG(DISTINCT source_table ORDER BY source_table) AS source_tables,
+                       ARRAY_AGG(DISTINCT typical_group_id ORDER BY typical_group_id)
+                           FILTER (WHERE typical_group_id IS NOT NULL) AS typical_group_ids,
+                       ARRAY_AGG(DISTINCT typical_group_name ORDER BY typical_group_name)
+                           FILTER (WHERE typical_group_name IS NOT NULL AND typical_group_name <> '') AS typical_group_names
+                FROM candidate_links
+                GROUP BY dekid, dezmid
+            )
+            SELECT q.id, q.dekid, l.mc, q.zmbh, q.zmmc, q.dw, q.gznr, c.zjmc,
+                   merged.source_tables, merged.typical_group_ids, merged.typical_group_names
+            FROM merged_candidates merged
+            JOIN tdek_tdezm q ON q.dekid=merged.dekid AND q.id=merged.dezmid
             JOIN tlibs l ON l.id=q.dekid
             LEFT JOIN tdek_tzjmc c ON c.dekid=q.dekid AND c.id=q.zjh
-            WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
-              AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY')
-              AND q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM')
+            WHERE q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM')
               AND l.kb_version_id=pricing_kb_data_version(%s,'TLibs')
               AND (c.kb_version_id IS NULL OR c.kb_version_id=pricing_kb_data_version(%s,'TDEK_TZJMC'))
-              AND zm.zmbh=%s
               {library_filter}
             ORDER BY q.dekid, q.zmbh NULLS LAST, q.id
-            LIMIT 80
             """,
             params,
         )
@@ -1117,6 +1156,9 @@ def exec_fetch_quota_candidates(
             "dw": r[5],
             "gznr": r[6] or "",
             "chapter_name": r[7],
+            "source_tables": list(r[8] or []),
+            "typical_group_ids": [int(value) for value in (r[9] or [])],
+            "typical_group_names": list(r[10] or []),
         }
         for r in rows
     ]
@@ -3354,7 +3396,8 @@ def _stream_pricing_item(
     candidates = candidates_data["candidates"]
     candidate_text = "\n".join(
         f"[{i + 1}] dekid={c['dekid']} dezmid={c['dezmid']} 编码={c['zmbh']} 名称={c['zmmc']} 单位={c['dw']} "
-        f"库={c['library_name']} 章节={c.get('chapter_name') or ''}"
+        f"库={c['library_name']} 章节={c.get('chapter_name') or ''} 来源={'、'.join(c.get('source_tables') or [])}"
+        + (f" 典型组价={'、'.join(c.get('typical_group_names') or [])}" if c.get("typical_group_names") else "")
         + (f"\n    工作内容：{c['gznr']}" if c.get("gznr") else "")
         for i, c in enumerate(candidates)
     ) or "（无候选定额）"

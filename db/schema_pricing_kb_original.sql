@@ -193,6 +193,27 @@ CREATE TABLE IF NOT EXISTS tqdk_tqdzy (
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_boq ON tqdk_tqdzy(qdkid, qdzmid);
 CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_quota ON tqdk_tqdzy(dekid, dezmid);
 
+-- 典型组价候选。ID/PID 保留源库中的分组层级；没有定额主键的行是分组标题或空行。
+CREATE TABLE IF NOT EXISTS tqdk_tqdzy_special (
+    id                  BIGINT,
+    pid                 BIGINT,
+    qdkid               BIGINT,
+    qdzmid              BIGINT,
+    dekid               BIGINT,
+    dezmid              BIGINT,
+    zmbh                VARCHAR(64),
+    zmmc                TEXT,
+    dw                  VARCHAR(64),
+    source_file_sha256  VARCHAR(64) NOT NULL,
+    source_rowid        BIGINT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_file_sha256, source_rowid)
+);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_boq ON tqdk_tqdzy_special(qdkid, qdzmid);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_parent ON tqdk_tqdzy_special(qdkid, qdzmid, id);
+CREATE INDEX IF NOT EXISTS idx_tqdk_tqdzy_special_quota ON tqdk_tqdzy_special(dekid, dezmid);
+
 CREATE TABLE IF NOT EXISTS pricing_kb_original_target_links (
     id                  BIGSERIAL PRIMARY KEY,
     dekid               BIGINT NOT NULL,

@@ -1344,6 +1344,9 @@ export interface QuotaCandidate {
   dw: string
   gznr: string
   chapter_name?: string | null
+  source_tables?: string[]
+  typical_group_ids?: number[]
+  typical_group_names?: string[]
 }
 
 export interface QuotaMatch {

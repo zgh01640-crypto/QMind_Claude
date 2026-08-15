@@ -43,6 +43,11 @@ SQLITE_TABLES = {
         "SELECT rowid, DEKID, DEZMID, TSXX, ZMBH, JCZ, ZJDW FROM TDEK_TZHHS",
     ),
     "TQDK_TQDZY": ("tqdk_tqdzy", ["qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"], "SELECT rowid, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY"),
+    "TQDK_TQDZY_SPECIAL": (
+        "tqdk_tqdzy_special",
+        ["id", "pid", "qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"],
+        "SELECT rowid, ID, PID, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY_SPECIAL",
+    ),
 }
 
 
@@ -79,11 +84,16 @@ def sqlite_count(cur: sqlite3.Cursor, table: str) -> int:
     return int(cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
+def sqlite_tables(cur: sqlite3.Cursor) -> set[str]:
+    return {str(row[0]) for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
 def inspect_sqlite(source: Path) -> dict[str, Any]:
     conn = sqlite_connect(source)
     try:
         cur = conn.cursor()
         quick_check = cur.execute("PRAGMA quick_check").fetchone()[0]
+        tables = sqlite_tables(cur)
         return {
             "quick_check": quick_check,
             "libraries": sqlite_count(cur, "TLibs"),
@@ -96,6 +106,7 @@ def inspect_sqlite(source: Path) -> dict[str, Any]:
             "conversion_rules": sqlite_count(cur, "TDEK_TZNHS"),
             "input_prompts": sqlite_count(cur, "TDEK_TZHHS"),
             "candidates": sqlite_count(cur, "TQDK_TQDZY"),
+            "special_candidates": sqlite_count(cur, "TQDK_TQDZY_SPECIAL") if "TQDK_TQDZY_SPECIAL" in tables else 0,
         }
     finally:
         conn.close()
@@ -106,7 +117,10 @@ def sqlite_schema_signature(source: Path) -> str:
     try:
         schema: dict[str, list[tuple[str, str, int]]] = {}
         cur = conn.cursor()
+        tables = sqlite_tables(cur)
         for table in SQLITE_TABLES:
+            if table not in tables:
+                continue
             schema[table] = [
                 (str(row[1]), str(row[2]), int(row[3]))
                 for row in cur.execute(f"PRAGMA table_info({table})")
@@ -121,6 +135,7 @@ def validate_sqlite_relations(source: Path) -> dict[str, int]:
     conn = sqlite_connect(source)
     try:
         cur = conn.cursor()
+        tables = sqlite_tables(cur)
         def keys(query: str) -> tuple[set[tuple[Any, ...]], int]:
             seen: set[tuple[Any, ...]] = set()
             duplicates = 0
@@ -144,6 +159,13 @@ def validate_sqlite_relations(source: Path) -> dict[str, int]:
             orphan_candidate_boq += (row[0], row[1]) not in boq_items
             orphan_candidate_quota += (row[2], row[3]) not in quota_items
 
+        orphan_special_candidate_boq = 0
+        orphan_special_candidate_quota = 0
+        if "TQDK_TQDZY_SPECIAL" in tables:
+            for row in cur.execute("SELECT QDKID,QDZMID,DEKID,DEZMID FROM TQDK_TQDZY_SPECIAL WHERE DEKID IS NOT NULL AND DEZMID IS NOT NULL"):
+                orphan_special_candidate_boq += (row[0], row[1]) not in boq_items
+                orphan_special_candidate_quota += (row[2], row[3]) not in quota_items
+
         def orphan_count(query: str) -> int:
             return sum(tuple(row) not in quota_items for row in cur.execute(query))
 
@@ -159,6 +181,8 @@ def validate_sqlite_relations(source: Path) -> dict[str, int]:
             "duplicate_quota_items": duplicate_quota_items,
             "orphan_candidate_boq": orphan_candidate_boq,
             "orphan_candidate_quota": orphan_candidate_quota,
+            "orphan_special_candidate_boq": orphan_special_candidate_boq,
+            "orphan_special_candidate_quota": orphan_special_candidate_quota,
             "orphan_resources": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZMGC"),
             "orphan_conversion_rules": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZHHS"),
             "orphan_coefficient_rules": orphan_count("SELECT DEKID,DEZMID FROM TDEK_TZNHS"),
@@ -228,7 +252,7 @@ def begin_version(pg, source: Path, source_hash: str, inspection: dict[str, Any]
 def clear_version_rows(pg, version_id: int) -> None:
     with pg.cursor() as cur:
         for table in [
-            "tqdk_tqdzy", "tdek_tzhhs", "tdek_tznhs", "tdek_tzmgc",
+            "tqdk_tqdzy_special", "tqdk_tqdzy", "tdek_tzhhs", "tdek_tznhs", "tdek_tzmgc",
             "tdek_tdezm", "tqdk_tqdxmtz", "tqdk_tqdzm", "tdek_tzjmc", "tqdk_tzjmc", "tlibs",
         ]:
             cur.execute(f"DELETE FROM {table} WHERE kb_version_id=%s", (version_id,))
@@ -270,26 +294,29 @@ def clear_import_issues(pg, source_hash: str) -> None:
 
 def remove_combo_quota_candidates(pg, version_id: int) -> int:
     """Remove candidate relations that point to combo-only quota items."""
+    removed = 0
     with pg.cursor() as cur:
-        cur.execute(
-            """
-            DELETE FROM tqdk_tqdzy cand
-            USING tdek_tdezm q
-            WHERE q.dekid = cand.dekid
-              AND q.id = cand.dezmid
-              AND q.kb_version_id = cand.kb_version_id
-              AND cand.kb_version_id = %s
-              AND EXISTS (
-                  SELECT 1
-                  FROM tdek_tzhhs h
-                  WHERE h.dekid = q.dekid
-                    AND h.zmbh = q.zmbh
-                    AND h.kb_version_id = q.kb_version_id
-              )
-            """,
-            (version_id,),
-        )
-        return int(cur.rowcount)
+        for table in ("tqdk_tqdzy", "tqdk_tqdzy_special"):
+            cur.execute(
+                f"""
+                DELETE FROM {table} cand
+                USING tdek_tdezm q
+                WHERE q.dekid = cand.dekid
+                  AND q.id = cand.dezmid
+                  AND q.kb_version_id = cand.kb_version_id
+                  AND cand.kb_version_id = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM tdek_tzhhs h
+                      WHERE h.dekid = q.dekid
+                        AND h.zmbh = q.zmbh
+                        AND h.kb_version_id = q.kb_version_id
+                  )
+                """,
+                (version_id,),
+            )
+            removed += int(cur.rowcount)
+    return removed
 
 
 def import_source_table(
@@ -730,8 +757,11 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
             )
 
         sqlite_cur = sqlite_conn.cursor()
+        source_tables = sqlite_tables(sqlite_cur)
         imported: dict[str, int] = {}
         for source_table in SQLITE_TABLES:
+            if source_table not in source_tables:
+                continue
             pg_table = SQLITE_TABLES[source_table][0]
             imported[pg_table] = import_source_table(
                 sqlite_cur, pg, version_id, source_hash, source_table

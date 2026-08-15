@@ -22,6 +22,7 @@ from import_pricing_kb import SQLITE_TABLES, import_source_table, sqlite_connect
 KNOWN_TABLES = tuple(SQLITE_TABLES)
 DEPENDENCIES = {
     "TQDK_TQDZY": {"TLibs", "TQDK_TQDZM", "TDEK_TDEZM"},
+    "TQDK_TQDZY_SPECIAL": {"TLibs", "TQDK_TQDZM", "TDEK_TDEZM"},
     "TDEK_TZMGC": {"TLibs", "TDEK_TDEZM"},
     "TDEK_TZNHS": {"TLibs", "TDEK_TDEZM"},
     "TDEK_TZHHS": {"TLibs", "TDEK_TDEZM"},
@@ -143,6 +144,18 @@ def _validate_effective_version(conn, version_id: int) -> dict[str, int]:
             """SELECT COUNT(*) FROM tqdk_tqdzy c WHERE c.kb_version_id=%s AND NOT EXISTS
                (SELECT 1 FROM tdek_tdezm q WHERE q.kb_version_id=%s AND q.dekid=c.dekid AND q.id=c.dezmid)""",
             (versions["TQDK_TQDZY"], versions["TDEK_TDEZM"]),
+        ),
+        "orphan_special_candidate_boq": (
+            """SELECT COUNT(*) FROM tqdk_tqdzy_special c WHERE c.kb_version_id=%s
+               AND c.dekid IS NOT NULL AND c.dezmid IS NOT NULL AND NOT EXISTS
+               (SELECT 1 FROM tqdk_tqdzm b WHERE b.kb_version_id=%s AND b.qdkid=c.qdkid AND b.id=c.qdzmid)""",
+            (versions["TQDK_TQDZY_SPECIAL"], versions["TQDK_TQDZM"]),
+        ),
+        "orphan_special_candidate_quota": (
+            """SELECT COUNT(*) FROM tqdk_tqdzy_special c WHERE c.kb_version_id=%s
+               AND c.dekid IS NOT NULL AND c.dezmid IS NOT NULL AND NOT EXISTS
+               (SELECT 1 FROM tdek_tdezm q WHERE q.kb_version_id=%s AND q.dekid=c.dekid AND q.id=c.dezmid)""",
+            (versions["TQDK_TQDZY_SPECIAL"], versions["TDEK_TDEZM"]),
         ),
         "orphan_resources": (
             """SELECT COUNT(*) FROM tdek_tzmgc r WHERE r.kb_version_id=%s AND NOT EXISTS

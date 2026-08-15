@@ -344,6 +344,9 @@ function StepCards({ result }: { result?: ItemResult }) {
       {result.quotaCandidates && (
         <section className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
           <div className="font-semibold text-slate-900">4. 定额候选：{result.quotaCandidates.total} 条</div>
+          {result.quotaCandidates.candidates.some(candidate => candidate.source_tables?.includes('TQDK_TQDZY_SPECIAL')) && (
+            <div className="mt-1 text-violet-600">已合并典型组价候选</div>
+          )}
         </section>
       )}
       {result.quotaMatch && (

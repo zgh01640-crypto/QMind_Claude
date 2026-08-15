@@ -1779,6 +1779,7 @@ export default function PricingTaskDetailPage() {
                                     <span className="text-slate-400 ml-auto flex-shrink-0">{c.dw}</span>
                                   </div>
                                   {c.library_name && <div className="text-slate-400">{c.library_name}{c.chapter_name ? ` / ${c.chapter_name}` : ''}</div>}
+                                  {c.source_tables?.length ? <div className="text-violet-600">来源：{c.source_tables.join('、')}{c.typical_group_names?.length ? ` / 典型组价：${c.typical_group_names.join('、')}` : ''}</div> : null}
                                   {c.gznr && <div className="text-slate-500 line-clamp-2">{c.gznr}</div>}
                                 </div>
                               ))}

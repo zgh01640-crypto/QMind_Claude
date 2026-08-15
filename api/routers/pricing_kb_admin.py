@@ -193,6 +193,9 @@ def create_import_job(body: ImportJobCreate):
                     selected = set(profile[0] or [])
                 selected.update(profile[1] or [])
             selected &= set(KNOWN_TABLES)
+            # 典型组价表是可选的：旧版知识库没有该表时仍可沿用普通候选表导入。
+            if "TQDK_TQDZY_SPECIAL" not in available:
+                selected.discard("TQDK_TQDZY_SPECIAL")
             selected = expand_dependencies(selected, available)
             missing = selected - available
             if missing:

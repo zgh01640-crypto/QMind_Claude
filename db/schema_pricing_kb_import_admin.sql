@@ -16,6 +16,7 @@ ALTER TABLE tdek_tzmgc DROP CONSTRAINT IF EXISTS tdek_tzmgc_source_file_sha256_s
 ALTER TABLE tdek_tznhs DROP CONSTRAINT IF EXISTS tdek_tznhs_source_file_sha256_source_rowid_key;
 ALTER TABLE tdek_tzhhs DROP CONSTRAINT IF EXISTS tdek_tzhhs_source_file_sha256_source_rowid_key;
 ALTER TABLE tqdk_tqdzy DROP CONSTRAINT IF EXISTS tqdk_tqdzy_source_file_sha256_source_rowid_key;
+ALTER TABLE tqdk_tqdzy_special DROP CONSTRAINT IF EXISTS tqdk_tqdzy_special_source_file_sha256_source_rowid_key;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tlibs_version_row ON tlibs(kb_version_id,source_rowid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tzjmc_version_row ON tqdk_tzjmc(kb_version_id,source_rowid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tzjmc_version_row ON tdek_tzjmc(kb_version_id,source_rowid);
@@ -25,6 +26,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tzmgc_version_row ON tdek_tzmgc(kb_ver
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tznhs_version_row ON tdek_tznhs(kb_version_id,source_rowid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tdek_tzhhs_version_row ON tdek_tzhhs(kb_version_id,source_rowid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tqdzy_version_row ON tqdk_tqdzy(kb_version_id,source_rowid);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tqdk_tqdzy_special_version_row ON tqdk_tqdzy_special(kb_version_id,source_rowid);
 
 CREATE TABLE IF NOT EXISTS pricing_kb_uploads (
     id BIGSERIAL PRIMARY KEY,
@@ -115,15 +117,19 @@ CREATE INDEX IF NOT EXISTS idx_pricing_kb_raw_rows_table
 INSERT INTO pricing_kb_import_profiles(profile_id,name,description,selected_tables,required_tables,is_system)
 VALUES
  ('full-pricing','完整组价库','九张核心清单、定额和规则表',
-  '["TLibs","TQDK_TZJMC","TDEK_TZJMC","TQDK_TQDZM","TDEK_TDEZM","TDEK_TZMGC","TDEK_TZNHS","TDEK_TZHHS","TQDK_TQDZY"]',
+  '["TLibs","TQDK_TZJMC","TDEK_TZJMC","TQDK_TQDZM","TDEK_TDEZM","TDEK_TZMGC","TDEK_TZNHS","TDEK_TZHHS","TQDK_TQDZY","TQDK_TQDZY_SPECIAL"]',
   '["TLibs","TQDK_TQDZM","TDEK_TDEZM","TQDK_TQDZY"]',TRUE),
  ('quota-update','定额更新','定额目录、章节、子目、资源和规则',
   '["TLibs","TDEK_TZJMC","TDEK_TDEZM","TDEK_TZMGC","TDEK_TZNHS","TDEK_TZHHS"]',
   '["TLibs","TDEK_TDEZM"]',TRUE),
  ('boq-update','清单更新','清单目录、章节、子目和候选关系',
-  '["TLibs","TQDK_TZJMC","TQDK_TQDZM","TQDK_TQDZY","TDEK_TDEZM"]',
+  '["TLibs","TQDK_TZJMC","TQDK_TQDZM","TQDK_TQDZY","TQDK_TQDZY_SPECIAL","TDEK_TDEZM"]',
   '["TLibs","TQDK_TQDZM","TQDK_TQDZY","TDEK_TDEZM"]',TRUE)
-ON CONFLICT (profile_id) DO NOTHING;
+ON CONFLICT (profile_id) DO UPDATE
+SET selected_tables=EXCLUDED.selected_tables,
+    required_tables=EXCLUDED.required_tables,
+    updated_at=NOW()
+WHERE pricing_kb_import_profiles.is_system=TRUE;
 
 -- Existing complete versions own all their source tables.
 INSERT INTO pricing_kb_version_tables(
@@ -133,7 +139,7 @@ SELECT v.id, table_name, v.id, v.source_file_sha256, 'typed', FALSE, 0
 FROM pricing_kb_versions v
 CROSS JOIN unnest(ARRAY[
  'TLibs','TQDK_TZJMC','TDEK_TZJMC','TQDK_TQDZM','TDEK_TDEZM',
- 'TDEK_TZMGC','TDEK_TZNHS','TDEK_TZHHS','TQDK_TQDZY'
+ 'TDEK_TZMGC','TDEK_TZNHS','TDEK_TZHHS','TQDK_TQDZY','TQDK_TQDZY_SPECIAL'
 ]) table_name
 ON CONFLICT (version_id, source_table) DO NOTHING;
 
@@ -151,7 +157,7 @@ BEGIN
     ) THEN
         FOREACH source_name IN ARRAY ARRAY[
             'TLibs','TQDK_TZJMC','TDEK_TZJMC','TQDK_TQDZM','TDEK_TDEZM',
-            'TDEK_TZMGC','TDEK_TZNHS','TDEK_TZHHS','TQDK_TQDZY'
+            'TDEK_TZMGC','TDEK_TZNHS','TDEK_TZHHS','TQDK_TQDZY','TQDK_TQDZY_SPECIAL'
         ] LOOP
             physical_name := lower(source_name);
             EXECUTE format($sql$
@@ -227,3 +233,6 @@ WHERE t.kb_version_id=pricing_kb_data_version(a.kb_version_id,'TDEK_TZHHS');
 CREATE OR REPLACE VIEW active_tqdk_tqdzy AS
 SELECT t.* FROM tqdk_tqdzy t JOIN pricing_kb_active_version a ON TRUE
 WHERE t.kb_version_id=pricing_kb_data_version(a.kb_version_id,'TQDK_TQDZY');
+CREATE OR REPLACE VIEW active_tqdk_tqdzy_special AS
+SELECT t.* FROM tqdk_tqdzy_special t JOIN pricing_kb_active_version a ON TRUE
+WHERE t.kb_version_id=pricing_kb_data_version(a.kb_version_id,'TQDK_TQDZY_SPECIAL');
