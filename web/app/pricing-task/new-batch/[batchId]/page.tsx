@@ -39,7 +39,8 @@ interface FeatureCheck {
   missing_features: string[]
   analysis: string
   normalized_description?: string
-  default_fills?: Array<{ feature_name: string; original_value: string; default_value: string; source_code: string; reason: string }>
+  default_fills?: Array<{ feature_name: string; target_feature_name?: string; original_value: string; default_value: string; source_code: string; reason: string; match_state?: 'comprehensive' | 'vague' | 'missing'; original_feature_text?: string }>
+  default_review_items?: Array<{ feature_name: string; target_feature_name?: string; original_value: string; default_value: string; source_code: string; reason: string; match_state?: 'comprehensive' | 'vague' | 'missing'; original_feature_text?: string; confidence: 'low' }>
   default_candidates?: Array<{ source_code: string; feature_name: string; feature_value: string; default_value: string; source_rowid?: number }>
   description_updated?: boolean
 }
@@ -501,6 +502,7 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
       analysis: evt.analysis,
       normalized_description: evt.normalized_description,
       default_fills: evt.default_fills ?? [],
+      default_review_items: evt.default_review_items ?? [],
       default_candidates: evt.default_candidates ?? [],
       description_updated: evt.description_updated,
     }
@@ -650,7 +652,19 @@ function StepCards({ result }: { result?: ItemResult }) {
           <div className="font-semibold text-orange-900">2. 项目特征{result.featureCheck.is_complete ? '完整' : '不完整'}</div>
           {(result.featureCheck.default_fills?.length ?? 0) > 0 && (
             <div className="mt-2 rounded bg-white/80 px-2 py-1 text-orange-800">
-              已补全 {result.featureCheck.default_fills?.length} 个综合考虑特征
+              <div>已应用 {result.featureCheck.default_fills?.length} 个原生默认值</div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {result.featureCheck.default_fills?.map((fill, index) => (
+                  <span key={`${fill.feature_name}-${index}`} className="rounded bg-blue-50 px-1.5 py-0.5 text-blue-700">
+                    {fill.target_feature_name || fill.feature_name} · {fill.match_state === 'vague' ? '模糊补全' : fill.match_state === 'missing' ? '缺失补全' : '综合考虑替换'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {(result.featureCheck.default_review_items?.length ?? 0) > 0 && (
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+              待复核原生默认值 {result.featureCheck.default_review_items?.length} 个，未参与本次组价
             </div>
           )}
           <div className="mt-1 text-orange-800">{result.featureCheck.analysis}</div>

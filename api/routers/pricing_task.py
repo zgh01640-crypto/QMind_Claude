@@ -353,16 +353,18 @@ _TOOL_SUBMIT_FEATURE_ANALYSIS = {
                 "analysis": {"type": "string", "description": "简短分析说明"},
                 "default_fills": {
                     "type": "array",
-                    "description": "Choose only supplied dual-library default candidates; do not create a value outside the candidates.",
+                    "description": "Choose only supplied TQDK_TQDXMTZ native default candidates; do not create or rewrite a default value.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "candidate_id": {"type": "string"},
                             "target_feature_name": {"type": "string"},
+                            "match_state": {"type": "string", "enum": ["comprehensive", "vague", "missing"]},
+                            "original_feature_text": {"type": "string"},
                             "reason": {"type": "string"},
                             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                         },
-                        "required": ["candidate_id", "target_feature_name", "reason", "confidence"],
+                        "required": ["candidate_id", "target_feature_name", "match_state", "original_feature_text", "reason", "confidence"],
                         "additionalProperties": False,
                     },
                 },
@@ -800,7 +802,7 @@ def _load_feature_default_context(conn, base_code: str, kb_version_id: int) -> d
                 "source_code": base_code,
                 "feature_name": feature_name,
                 "target_feature_name": feature_name,
-                "feature_value": "综合考虑",
+                "feature_value": "",
                 "default_value": native_default,
                 "source_rowid": source_rowid,
             }
@@ -838,8 +840,9 @@ def _normalize_feature_analysis_result(
         if str(item.get("feature_name") or "").strip()
     }
     fills: list[dict[str, Any]] = []
+    review_items: list[dict[str, Any]] = []
     filled_targets: set[str] = set()
-    raw_fills = raw.get("default_fills", []) if isinstance(raw, dict) and "综合考虑" in original_text else []
+    raw_fills = raw.get("default_fills", []) if isinstance(raw, dict) else []
     for raw_fill in raw_fills:
         if not isinstance(raw_fill, dict):
             continue
@@ -856,30 +859,50 @@ def _normalize_feature_analysis_result(
             continue
         if schema_names and target_feature_name not in schema_names:
             continue
+        default_value = str(candidate.get("default_value") or "").strip()
+        if not default_value or default_value in original_text:
+            continue
+        match_state = raw_fill.get("match_state")
+        if match_state not in {"comprehensive", "vague", "missing"}:
+            match_state = "comprehensive" if "综合考虑" in original_text else "vague"
+        original_feature_text = str(raw_fill.get("original_feature_text") or "").strip()
+        if match_state == "comprehensive" and "综合考虑" not in original_text:
+            continue
+        if match_state == "vague" and (not original_feature_text or original_feature_text not in original_text):
+            continue
+        if match_state == "missing" and original_feature_text:
+            continue
+        confidence = raw_fill.get("confidence") if raw_fill.get("confidence") in {"high", "medium", "low"} else "low"
+        normalized_fill = {
+            "candidate_id": candidate["candidate_id"],
+            "feature_name": candidate["feature_name"],
+            "target_feature_name": target_feature_name,
+            "match_state": match_state,
+            "original_feature_text": original_feature_text,
+            "original_value": original_feature_text or ("综合考虑" if match_state == "comprehensive" else "未明确"),
+            "default_value": default_value,
+            "source": candidate["source"],
+            "source_code": candidate.get("source_code") or base_code,
+            "source_rowid": candidate.get("source_rowid"),
+            "reason": str(raw_fill.get("reason") or "").strip(),
+            "confidence": confidence,
+        }
         filled_targets.add(target_feature_name)
-        fills.append(
-            {
-                "candidate_id": candidate["candidate_id"],
-                "feature_name": candidate["feature_name"],
-                "target_feature_name": target_feature_name,
-                "original_value": "综合考虑",
-                "default_value": candidate["default_value"],
-                "source": candidate["source"],
-                "source_code": candidate.get("source_code") or base_code,
-                "source_rowid": candidate.get("source_rowid"),
-                "reason": str(raw_fill.get("reason") or "").strip(),
-                "confidence": raw_fill.get("confidence") if raw_fill.get("confidence") in {"high", "medium", "low"} else "low",
-            }
-        )
+        if confidence == "low":
+            review_items.append(normalized_fill)
+        else:
+            fills.append(normalized_fill)
 
     effective_description = original_text
     appended_fills: list[str] = []
     for fill in fills:
-        effective_description, replaced = _replace_comprehensive_feature(
-            effective_description,
-            [fill["target_feature_name"], fill["feature_name"]],
-            fill["default_value"],
-        )
+        replaced = False
+        if fill["match_state"] == "comprehensive":
+            effective_description, replaced = _replace_comprehensive_feature(
+                effective_description,
+                [fill["target_feature_name"], fill["feature_name"]],
+                fill["default_value"],
+            )
         if not replaced:
             appended_fills.append(f"{fill['target_feature_name']}：{fill['default_value']}")
     if appended_fills:
@@ -894,6 +917,11 @@ def _normalize_feature_analysis_result(
             if item.get("feature_name") not in filled_targets
             and not str(item.get("native_default_value") or "").strip()
         ]
+    unresolved_features.extend(
+        item["target_feature_name"]
+        for item in review_items
+        if item["target_feature_name"] not in unresolved_features
+    )
     return {
         "is_complete": bool(raw.get("is_complete")) if isinstance(raw, dict) else False,
         "missing_features": [str(v) for v in raw.get("missing_features", []) if str(v).strip()] if isinstance(raw, dict) else [],
@@ -902,6 +930,7 @@ def _normalize_feature_analysis_result(
         "normalized_description": effective_description,
         "effective_description": effective_description,
         "default_fills": fills,
+        "default_review_items": review_items,
         "description_updated": False,
         "feature_schema": feature_context.get("feature_schema", []),
         "schema_kb_version_id": feature_context.get("schema_kb_version_id"),
@@ -2230,7 +2259,8 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT r.id, r.status, i.item_code, i.item_name, i.item_description, i.unit, r.kb_version_id
+            SELECT r.id, r.status, i.item_code, i.item_name, i.item_description, i.unit,
+                   r.kb_version_id, r.feature_check
             FROM pricing_task_runs r
             JOIN boq_items i ON i.id = r.boq_item_id
             WHERE r.id = %s
@@ -2242,12 +2272,15 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
             raise HTTPException(status_code=404, detail="run not found")
         if run_row[1] != "confirmed":
             raise HTTPException(status_code=400, detail="run must be confirmed before conversion check")
+        feature_check = run_row[7] if isinstance(run_row[7], dict) else {}
+        effective_description = str(feature_check.get("effective_description") or "").strip()
         boq_item = {
             "run_id": run_row[0],
             "status": run_row[1],
             "item_code": run_row[2],
             "item_name": run_row[3],
-            "item_description": run_row[4] or "",
+            "item_description": effective_description or run_row[4] or "",
+            "original_item_description": run_row[4] or "",
             "unit": run_row[5] or "",
             "kb_version_id": int(run_row[6]),
         }
@@ -3314,10 +3347,11 @@ def _stream_pricing_item(
                 f"Unit: {boq_item.get('unit') or 'not provided'}\n\n"
                 f"[Standard feature schema from TQDK_TQDXMTZ]\n{feature_schema_text}\n\n"
                 f"[Native default candidates from TQDK_TQDXMTZ.DEFAULTTZMS]\n{feature_default_text}\n\n"
-                "Only fill entries whose original value is 综合考虑. Select only candidate_id values from the supplied list. "
-                "All candidates come from TQDK_TQDXMTZ.DEFAULTTZMS. If no candidate is supplied for a feature, leave it unfilled. "
-                "Do not overwrite an explicit original value and do not invent defaults. "
-                "Submit the tool result with candidate_id, target_feature_name, confidence, and a concise reason."
+                "Evaluate every supplied native default candidate against the original BOQ features. Select a candidate only when its target feature is 综合考虑, missing, or vague/incomplete (for example 详见设计, 未注明, or a category without the required grade/count/method). "
+                "Use match_state=comprehensive, vague, or missing and quote the relevant original text in original_feature_text; use an empty string when the feature is missing. "
+                "Do not select a candidate when the original feature already contains an explicit concrete value, even if it differs from the default. "
+                "All candidates come from TQDK_TQDXMTZ.DEFAULTTZMS. Preserve conditional default expressions verbatim; do not resolve or rewrite them. "
+                "Do not overwrite an explicit original value and do not invent defaults. Use low confidence for uncertain cases; low-confidence items will require manual review and will not enter downstream pricing context."
             ),
         },
     ]

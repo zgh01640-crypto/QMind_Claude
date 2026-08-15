@@ -47,8 +47,23 @@ interface FeatureCheck {
     default_value: string
     source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
     source_code: string
+    match_state?: 'comprehensive' | 'vague' | 'missing'
+    original_feature_text?: string
     reason: string
     confidence: 'high' | 'medium' | 'low'
+  }>
+  default_review_items?: Array<{
+    candidate_id: string
+    feature_name: string
+    target_feature_name: string
+    original_value: string
+    default_value: string
+    source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+    source_code: string
+    match_state?: 'comprehensive' | 'vague' | 'missing'
+    original_feature_text?: string
+    reason: string
+    confidence: 'low'
   }>
   default_candidates?: Array<{
     candidate_id: string
@@ -239,6 +254,7 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
         schema_kb_version_id: evt.schema_kb_version_id,
         feature_schema: evt.feature_schema ?? [],
         default_fills: evt.default_fills ?? [],
+        default_review_items: evt.default_review_items ?? [],
         default_candidates: evt.default_candidates ?? [],
         unresolved_features: evt.unresolved_features ?? [],
         description_updated: false,
@@ -300,12 +316,12 @@ function StepCards({ result }: { result?: ItemResult }) {
           )}
           {(result.featureCheck.default_candidates?.length ?? 0) > 0 && (
             <details className="mt-2 rounded border border-orange-200 bg-white/80 px-2 py-1.5">
-              <summary className="cursor-pointer font-medium text-orange-900">默认值候选 {result.featureCheck.default_candidates?.length} 个</summary>
+              <summary className="cursor-pointer font-medium text-orange-900">原生默认值候选 {result.featureCheck.default_candidates?.length} 个</summary>
               <div className="mt-2 space-y-1 text-gray-700">
                 {result.featureCheck.default_candidates?.map(candidate => (
                   <div key={candidate.candidate_id} className="flex flex-wrap items-center gap-x-2 rounded bg-orange-50 px-2 py-1">
                     <span className="font-medium">{candidate.feature_name}</span>
-                    <span>{candidate.feature_value || '综合考虑'} → {candidate.default_value}</span>
+                    <span>默认：{candidate.default_value}</span>
                     <span className="text-gray-500">{candidate.source}</span>
                   </div>
                 ))}
@@ -317,12 +333,32 @@ function StepCards({ result }: { result?: ItemResult }) {
               <div className="font-semibold">本次组价已补全 {result.featureCheck.default_fills?.length} 个特征，原清单未修改</div>
               <div className="mt-1 space-y-1">
                 {result.featureCheck.default_fills?.map(fill => (
-                  <div key={fill.candidate_id}>{fill.target_feature_name}：{fill.original_value} → {fill.default_value}（{fill.source}）</div>
+                  <div key={fill.candidate_id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="font-medium">{fill.target_feature_name}</span>
+                    <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                      {fill.match_state === 'vague' ? '模糊补全' : fill.match_state === 'missing' ? '缺失补全' : '综合考虑替换'}
+                    </span>
+                    <span>{fill.original_value || '未明确'} → {fill.default_value}（{fill.source}）</span>
+                  </div>
                 ))}
               </div>
               {result.featureCheck.effective_description && (
                 <div className="mt-2 whitespace-pre-wrap rounded bg-white/80 px-2 py-1 text-blue-800">{result.featureCheck.effective_description}</div>
               )}
+            </div>
+          )}
+          {(result.featureCheck.default_review_items?.length ?? 0) > 0 && (
+            <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-2 text-amber-900">
+              <div className="font-semibold">原生默认值待人工复核，不参与本次组价</div>
+              <div className="mt-1 space-y-1">
+                {result.featureCheck.default_review_items?.map(fill => (
+                  <div key={fill.candidate_id}>
+                    <span className="font-medium">{fill.target_feature_name}</span>
+                    <span>：建议 {fill.default_value}</span>
+                    {fill.reason && <span className="text-amber-700">（{fill.reason}）</span>}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {(result.featureCheck.unresolved_features?.length ?? 0) > 0 && (

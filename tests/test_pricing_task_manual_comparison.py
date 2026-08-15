@@ -150,7 +150,7 @@ class ManualComparisonReviewTests(unittest.TestCase):
         self.assertIsNotNone(match)
         columns = [part.strip() for part in match.group(1).split(",")]
         values = [part.strip() for part in match.group(2).split(",")]
-        self.assertEqual(len(columns), 19)
+        self.assertEqual(len(columns), 20)
         self.assertEqual(len(values), len(columns))
         self.assertTrue(conn.committed)
 

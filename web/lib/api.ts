@@ -1782,8 +1782,24 @@ export type PricingTaskEvent =
         source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
         source_code: string
         source_rowid?: number
+        match_state?: 'comprehensive' | 'vague' | 'missing'
+        original_feature_text?: string
         reason: string
         confidence: 'high' | 'medium' | 'low'
+      }>
+      default_review_items?: Array<{
+        candidate_id: string
+        feature_name: string
+        target_feature_name: string
+        original_value: string
+        default_value: string
+        source: 'TQDK_TQDXMTZ' | 'tqdk_tzhkl'
+        source_code: string
+        source_rowid?: number
+        match_state?: 'comprehensive' | 'vague' | 'missing'
+        original_feature_text?: string
+        reason: string
+        confidence: 'low'
       }>
       description_updated?: boolean
       schema_kb_version_id?: number

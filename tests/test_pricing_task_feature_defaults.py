@@ -66,7 +66,7 @@ class FeatureDefaultTests(unittest.TestCase):
                     "source_code": "010505004",
                     "feature_name": "模板材质",
                     "target_feature_name": "模板材质",
-                    "feature_value": "综合考虑",
+                    "feature_value": "",
                     "default_value": "木模板",
                     "source_rowid": 11,
                 }
@@ -114,6 +114,8 @@ class FeatureDefaultTests(unittest.TestCase):
                 {
                     "candidate_id": "tqdxmtz:11",
                     "target_feature_name": "模板材质",
+                    "match_state": "comprehensive",
+                    "original_feature_text": "模板材质：综合考虑",
                     "confidence": "high",
                     "reason": "特征名一致",
                 }
@@ -131,32 +133,128 @@ class FeatureDefaultTests(unittest.TestCase):
         self.assertEqual(result["default_fills"][0]["source"], "TQDK_TQDXMTZ")
         self.assertFalse(result["description_updated"])
 
-    def test_explicit_original_value_is_not_filled(self):
-        context = {
-            "feature_schema": [],
+    def _native_context(self, feature_name="防腐：喷（刷）沥青或防腐漆", default_value="沥青漆二道"):
+        return {
+            "feature_schema": [
+                {
+                    "feature_name": feature_name,
+                    "native_default_value": default_value,
+                    "source": "TQDK_TQDXMTZ",
+                    "source_rowid": 15932,
+                }
+            ],
             "default_candidates": [
                 {
-                    "candidate_id": "tqdxmtz:11",
+                    "candidate_id": "tqdxmtz:15932",
                     "source": "TQDK_TQDXMTZ",
-                    "source_code": "010505004",
-                    "feature_name": "模板材质",
-                    "target_feature_name": "模板材质",
-                    "default_value": "木模板",
-                    "source_rowid": 11,
+                    "source_code": "031001001",
+                    "feature_name": feature_name,
+                    "target_feature_name": feature_name,
+                    "default_value": default_value,
+                    "source_rowid": 15932,
                 }
             ],
             "schema_kb_version_id": 7,
         }
 
+    def test_vague_native_feature_is_appended_without_rewriting_original(self):
+        context = self._native_context()
+        original = "防腐：管道及管件内外均应喷（刷）沥青或防腐漆，具体详见设计说明"
+        raw = {
+            "default_fills": [
+                {
+                    "candidate_id": "tqdxmtz:15932",
+                    "target_feature_name": "防腐：喷（刷）沥青或防腐漆",
+                    "match_state": "vague",
+                    "original_feature_text": original,
+                    "reason": "已说明防腐类别，但未给出涂刷遍数。",
+                    "confidence": "high",
+                }
+            ]
+        }
+
+        result = pricing_task._normalize_feature_analysis_result(raw, original, "031001001", context)
+
+        self.assertTrue(result["effective_description"].startswith(original))
+        self.assertIn("【智能补全项目特征】", result["effective_description"])
+        self.assertIn("沥青漆二道", result["effective_description"])
+        self.assertEqual(result["default_fills"][0]["match_state"], "vague")
+
+    def test_missing_native_feature_is_appended(self):
+        context = self._native_context()
+        raw = {
+            "default_fills": [
+                {
+                    "candidate_id": "tqdxmtz:15932",
+                    "target_feature_name": "防腐：喷（刷）沥青或防腐漆",
+                    "match_state": "missing",
+                    "original_feature_text": "",
+                    "reason": "原项目特征没有防腐做法。",
+                    "confidence": "medium",
+                }
+            ]
+        }
+
+        result = pricing_task._normalize_feature_analysis_result(raw, "材质：铸铁管", "031001001", context)
+
+        self.assertIn("沥青漆二道", result["effective_description"])
+        self.assertEqual(result["default_fills"][0]["match_state"], "missing")
+
+    def test_explicit_original_value_is_not_filled_when_model_returns_no_candidate(self):
+        context = self._native_context()
+
         result = pricing_task._normalize_feature_analysis_result(
-            {"default_fills": [{"candidate_id": "tqdxmtz:11"}]},
-            "模板材质：铝模板",
-            "010505004",
+            {"default_fills": []},
+            "防腐：四油三布石油沥青涂料外防腐层",
+            "031001001",
             context,
         )
 
         self.assertEqual(result["default_fills"], [])
-        self.assertEqual(result["effective_description"], "模板材质：铝模板")
+        self.assertEqual(result["effective_description"], "防腐：四油三布石油沥青涂料外防腐层")
+
+    def test_low_confidence_fill_requires_review_and_is_not_applied(self):
+        context = self._native_context()
+        original = "防腐做法满足设计要求"
+        raw = {
+            "default_fills": [
+                {
+                    "candidate_id": "tqdxmtz:15932",
+                    "target_feature_name": "防腐：喷（刷）沥青或防腐漆",
+                    "match_state": "vague",
+                    "original_feature_text": original,
+                    "reason": "无法确认防腐类别。",
+                    "confidence": "low",
+                }
+            ]
+        }
+
+        result = pricing_task._normalize_feature_analysis_result(raw, original, "031001001", context)
+
+        self.assertEqual(result["default_fills"], [])
+        self.assertEqual(result["effective_description"], original)
+        self.assertEqual(result["default_review_items"][0]["confidence"], "low")
+
+    def test_conditional_default_is_appended_verbatim(self):
+        default_rule = "DN≤32 螺纹连接；32＜DN 法兰连接；"
+        context = self._native_context("连接形式", default_rule)
+        raw = {
+            "default_fills": [
+                {
+                    "candidate_id": "tqdxmtz:15932",
+                    "target_feature_name": "连接形式",
+                    "match_state": "missing",
+                    "original_feature_text": "",
+                    "reason": "缺少连接形式。",
+                    "confidence": "high",
+                }
+            ]
+        }
+
+        result = pricing_task._normalize_feature_analysis_result(raw, "规格：DN25", "031002011", context)
+
+        self.assertIn(default_rule, result["effective_description"])
+        self.assertNotIn("连接形式：螺纹连接\n", result["effective_description"])
 
 
 if __name__ == "__main__":
