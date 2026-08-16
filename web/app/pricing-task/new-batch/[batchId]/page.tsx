@@ -810,7 +810,15 @@ export default function PricingTaskBatchPage() {
   const reviewResult = reviewItemId ? itemResults.get(reviewItemId) : undefined
   const selectedCount = selectedIds.size
   const succeededCount = Array.from(batchStates.values()).filter(state => state === 'succeeded').length
-  const failedCount = Array.from(batchStates.values()).filter(state => state === 'failed').length
+  const waitingItemIds = items
+    .filter(item => {
+      const state = batchStates.get(item.id)
+      return !state || state === 'idle' || state === 'queued'
+    })
+    .map(item => item.id)
+  const waitingCount = waitingItemIds.length
+  const failedItemIds = items.filter(item => batchStates.get(item.id) === 'failed').map(item => item.id)
+  const failedCount = failedItemIds.length
   const doneCount = succeededCount + failedCount
   const completedItems = items
     .map(item => ({ item, result: itemResults.get(item.id), state: batchStates.get(item.id) }))
@@ -897,6 +905,18 @@ export default function PricingTaskBatchPage() {
       else next.delete(itemId)
       return next
     })
+  }
+
+  function invertSelected() {
+    setSelectedIds(prev => new Set(items.filter(item => !prev.has(item.id)).map(item => item.id)))
+  }
+
+  function selectFailed() {
+    setSelectedIds(new Set(failedItemIds))
+  }
+
+  function selectWaiting() {
+    setSelectedIds(new Set(waitingItemIds))
   }
 
   async function runConversionAndCoefficient(itemId: number, runId: number, initial: ItemResult) {
@@ -1124,9 +1144,28 @@ export default function PricingTaskBatchPage() {
               <h2 className="text-sm font-semibold text-gray-900">清单选择</h2>
               <span className="text-xs text-gray-500">{selectedCount}/{items.length}</span>
             </div>
-            <div className="mt-2 flex gap-2">
-              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set(items.map(item => item.id)))} className="rounded border px-2 py-1 text-xs disabled:opacity-50">全选</button>
-              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set())} className="rounded border px-2 py-1 text-xs disabled:opacity-50">清空</button>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set(items.map(item => item.id)))} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">全选</button>
+              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set())} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">清空</button>
+              <button type="button" disabled={running} onClick={invertSelected} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">反选</button>
+              <button
+                type="button"
+                disabled={running || waitingCount === 0}
+                onClick={selectWaiting}
+                title={waitingCount > 0 ? `选择 ${waitingCount} 条等待清单` : '当前没有等待清单'}
+                className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                等待{waitingCount > 0 ? ` ${waitingCount}` : ''}
+              </button>
+              <button
+                type="button"
+                disabled={running || failedCount === 0}
+                onClick={selectFailed}
+                title={failedCount > 0 ? `选择 ${failedCount} 条失败清单` : '当前没有失败清单'}
+                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                失败{failedCount > 0 ? ` ${failedCount}` : ''}
+              </button>
             </div>
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-gray-100">

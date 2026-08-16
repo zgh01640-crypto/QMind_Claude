@@ -34,6 +34,7 @@ def _pricing_kb_worker_loop(stop_event: threading.Event) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     apply_auth_schema()
+    pricing_task.initialize_schema()
     stop_event = threading.Event()
     worker_thread: threading.Thread | None = None
     disabled_values = {"0", "false", "no"}

@@ -13,12 +13,19 @@ from threading import Lock
 from fastapi import HTTPException, Request
 
 from db.connection import get_connection
+from db.schema_lock import acquire_schema_transaction_lock
 
 logger = logging.getLogger(__name__)
 SESSION_COOKIE = "qmind_session"
 SESSION_DAYS = 30
 _schema_lock = Lock()
 _schema_ready = False
+_OWNERSHIP_TABLES = (
+    "boq_projects",
+    "manual_boq_projects",
+    "pricing_tasks",
+    "pricing_task_batches",
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,7 @@ def apply_auth_schema() -> None:
         conn = get_connection()
         try:
             from pathlib import Path
+            acquire_schema_transaction_lock(conn)
             with conn.cursor() as cur:
                 cur.execute(Path(__file__).parent.parent.joinpath("db", "schema_auth.sql").read_text(encoding="utf-8"))
                 cur.execute("SELECT COUNT(*) FROM users")
@@ -99,20 +107,72 @@ def apply_auth_schema() -> None:
             conn.close()
 
 
-def ensure_ownership_schema(conn) -> None:
-    """为延迟创建的业务表补齐所有权列，并归属旧数据。"""
+def _missing_ownership_objects(conn) -> list[tuple[str, bool, bool]]:
+    """Return existing tables that still need an owner column or index."""
+    missing: list[tuple[str, bool, bool]] = []
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE role='admin' AND is_active ORDER BY id LIMIT 1")
-        admin = cur.fetchone()
-        for table in ("boq_projects", "manual_boq_projects", "pricing_tasks", "pricing_task_batches"):
+        for table in _OWNERSHIP_TABLES:
             cur.execute("SELECT to_regclass(%s)", (table,))
-            if not cur.fetchone()[0]:
+            relation = cur.fetchone()[0]
+            if not relation:
                 continue
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS owner_user_id INT REFERENCES users(id)")
-            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_owner ON {table}(owner_user_id)")
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_attribute
+                    WHERE attrelid=%s::regclass
+                      AND attname='owner_user_id'
+                      AND NOT attisdropped
+                )
+                """,
+                (table,),
+            )
+            has_column = bool(cur.fetchone()[0])
+            cur.execute("SELECT to_regclass(%s)", (f"idx_{table}_owner",))
+            has_index = bool(cur.fetchone()[0])
+            if not has_column or not has_index:
+                missing.append((table, has_column, has_index))
+    return missing
+
+
+def ensure_ownership_schema(conn) -> None:
+    """补齐延迟创建表的所有权结构；已就绪时不执行任何 DDL。"""
+    try:
+        missing = _missing_ownership_objects(conn)
+        if missing:
+            # End the catalog-inspection transaction before waiting for the
+            # advisory lock, so it cannot retain relation locks needed by the
+            # process currently performing the migration.
+            conn.commit()
+            # Recheck after obtaining the cluster-wide lock because another API
+            # process may have completed the same migration while we waited.
+            acquire_schema_transaction_lock(conn)
+            for table, has_column, has_index in _missing_ownership_objects(conn):
+                with conn.cursor() as cur:
+                    if not has_column:
+                        cur.execute(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS owner_user_id INT REFERENCES users(id)"
+                        )
+                    if not has_index:
+                        cur.execute(
+                            f"CREATE INDEX IF NOT EXISTS idx_{table}_owner ON {table}(owner_user_id)"
+                        )
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE role='admin' AND is_active ORDER BY id LIMIT 1")
+            admin = cur.fetchone()
             if admin:
-                cur.execute(f"UPDATE {table} SET owner_user_id=%s WHERE owner_user_id IS NULL", (admin[0],))
-    conn.commit()
+                for table in _OWNERSHIP_TABLES:
+                    cur.execute("SELECT to_regclass(%s)", (table,))
+                    if cur.fetchone()[0]:
+                        cur.execute(
+                            f"UPDATE {table} SET owner_user_id=%s WHERE owner_user_id IS NULL",
+                            (admin[0],),
+                        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _digest(token: str) -> str:

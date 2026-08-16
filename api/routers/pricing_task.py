@@ -13,6 +13,7 @@ import sys
 from io import BytesIO
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from threading import Lock
 from time import perf_counter, sleep
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
@@ -24,9 +25,12 @@ from pydantic import BaseModel, Field
 from psycopg2.extras import Json
 
 from db.pricing_kb_versions import apply_version_schema, resolve_version_id
-from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner, require_task_owner
+from db.schema_lock import acquire_schema_transaction_lock
+from api.auth import CurrentUser, current_user, require_project_owner, require_task_owner
 
 router = APIRouter()
+_SCHEMA_LOCK = Lock()
+_SCHEMA_READY = False
 
 
 def _json_dumps(data: Any) -> str:
@@ -64,9 +68,8 @@ def _base_code(item_code: str | None) -> str:
     return code[:-3] if len(code) > 9 else code
 
 
-def _ensure_schema(conn):
+def _apply_schema(conn):
     """Idempotent schema for the pricing-task workflow."""
-    apply_version_schema(conn)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -77,6 +80,7 @@ def _ensure_schema(conn):
                 quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
                 kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
+                owner_user_id       INTEGER REFERENCES users(id),
                 legacy_local_id     TEXT UNIQUE,
                 accuracy_report     JSONB,
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
@@ -142,6 +146,7 @@ def _ensure_schema(conn):
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
                 kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 workflow_version     VARCHAR(16) NOT NULL DEFAULT 'legacy',
+                owner_user_id       INTEGER REFERENCES users(id),
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
                 selected_count      INTEGER NOT NULL DEFAULT 0,
                 completed_count     INTEGER NOT NULL DEFAULT 0,
@@ -271,6 +276,8 @@ def _ensure_schema(conn):
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_kb_version ON pricing_tasks(kb_version_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_kb_version ON pricing_task_runs(kb_version_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_project ON pricing_task_batches(boq_project_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_owner ON pricing_tasks(owner_user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_owner ON pricing_task_batches(owner_user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch ON pricing_task_batch_item_runs(batch_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ptbir_batch_item ON pricing_task_batch_item_runs(batch_id, boq_item_id)")
         cur.execute(
@@ -278,7 +285,37 @@ def _ensure_schema(conn):
             "ON pricing_task_manual_comparison_reviews(source_type, source_run_id, created_at DESC)"
         )
     conn.commit()
-    ensure_ownership_schema(conn)
+
+
+def _ensure_schema(conn):
+    """Initialize once per API process; never run DDL concurrently in requests."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        try:
+            # This initializer commits independently and uses the same advisory
+            # lock, so finish it before opening the pricing-task transaction.
+            apply_version_schema(conn)
+            acquire_schema_transaction_lock(conn)
+            _apply_schema(conn)
+            _SCHEMA_READY = True
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def initialize_schema() -> None:
+    """Run pricing-task migrations before the API starts accepting traffic."""
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+    finally:
+        conn.close()
 
 
 class PricingTaskCreate(BaseModel):

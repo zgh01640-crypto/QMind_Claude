@@ -25,6 +25,8 @@ async function proxy(request: NextRequest, context: ProxyContext) {
   target.search = request.nextUrl.search
 
   const requestHeaders = new Headers(request.headers)
+  const contentLength = request.headers.get('content-length')
+  const hasTransferEncoding = request.headers.has('transfer-encoding')
   HOP_BY_HOP_HEADERS.forEach(header => requestHeaders.delete(header))
 
   const init: StreamingRequestInit = {
@@ -33,7 +35,10 @@ async function proxy(request: NextRequest, context: ProxyContext) {
     redirect: 'manual',
     cache: 'no-store',
   }
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
+  const hasRequestBody = request.body && (
+    (contentLength !== null && contentLength !== '0') || hasTransferEncoding
+  )
+  if (request.method !== 'GET' && request.method !== 'HEAD' && hasRequestBody) {
     init.body = request.body
     init.duplex = 'half'
   }

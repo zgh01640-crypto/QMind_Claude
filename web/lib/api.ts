@@ -2201,7 +2201,8 @@ export async function streamPricingTaskCoefficientCheck(
 
 async function readPricingTaskEventStream(response: Response, onEvent: (e: PricingTaskEvent) => void): Promise<void> {
   if (!response.ok) {
-    onEvent({ type: 'error', error: `HTTP ${response.status}` })
+    const payload = await response.json().catch(() => null) as { detail?: string } | null
+    onEvent({ type: 'error', error: payload?.detail || `HTTP ${response.status}` })
     return
   }
 

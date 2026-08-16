@@ -4,6 +4,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from db.schema_lock import acquire_schema_transaction_lock
+
 
 SCHEMA_PATH = Path(__file__).with_name("schema_pricing_kb_versions.sql")
 ADMIN_SCHEMA_PATH = Path(__file__).with_name("schema_pricing_kb_import_admin.sql")
@@ -18,11 +20,16 @@ def apply_version_schema(conn) -> None:
     with _SCHEMA_LOCK:
         if _SCHEMA_APPLIED:
             return
-        with conn.cursor() as cur:
-            cur.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
-            cur.execute(ADMIN_SCHEMA_PATH.read_text(encoding="utf-8"))
-        conn.commit()
-        _SCHEMA_APPLIED = True
+        try:
+            acquire_schema_transaction_lock(conn)
+            with conn.cursor() as cur:
+                cur.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+                cur.execute(ADMIN_SCHEMA_PATH.read_text(encoding="utf-8"))
+            conn.commit()
+            _SCHEMA_APPLIED = True
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def get_active_version_id(conn, *, required: bool = True) -> int | None:
