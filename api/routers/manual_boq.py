@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Query, Form
 import tempfile
 import os
 import shutil
@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from db.connection import get_connection
 from api import schemas
+from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner
 
 router = APIRouter()
 
@@ -19,14 +20,20 @@ class ManualBoqProjectRename(BaseModel):
 
 
 @router.get("/manual-boq/projects", response_model=list[schemas.ManualBoqProject])
-def list_projects():
+def list_projects(user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            sql = """
                 SELECT id, project_name, bid_section, source_file, tag, imported_at, item_count
-                FROM manual_boq_projects ORDER BY imported_at DESC
-            """)
+                FROM manual_boq_projects
+            """
+            params = []
+            if not user.is_admin:
+                sql += " WHERE owner_user_id=%s"
+                params.append(user.id)
+            sql += " ORDER BY imported_at DESC"
+            cur.execute(sql, params)
             rows = cur.fetchall()
         return [schemas.ManualBoqProject(
             id=r[0], project_name=r[1], bid_section=r[2],
@@ -42,6 +49,7 @@ async def upload_project(
     force: bool = Query(False),
     tag: str = Query(None),
     project_name: str | None = Form(None),
+    user: CurrentUser = Depends(current_user),
 ):
     if not file.filename.endswith('.xlsx'):
         raise HTTPException(400, "仅支持 .xlsx 文件")
@@ -51,6 +59,16 @@ async def upload_project(
         shutil.copyfileobj(file.file, tmp)
         tmp.close()
 
+        conn = get_connection()
+        try:
+            ensure_ownership_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM manual_boq_projects WHERE source_file=%s", (file.filename,))
+                existing = cur.fetchone()
+            if existing:
+                require_project_owner(conn, user, int(existing[0]), manual=True)
+        finally:
+            conn.close()
         # 调用导入脚本（传原始文件名作为 source_file 标识）
         cmd = [sys.executable, 'import_manual_boq.py', tmp.name, '--original-name', file.filename]
         if force:
@@ -61,7 +79,8 @@ async def upload_project(
             cmd.extend(['--tag', tag])
         if project_name and project_name.strip():
             cmd.extend(['--project-name', project_name.strip()])
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        env = {**os.environ, 'AUTH_OWNER_USER_ID': str(user.id)}
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
         if result.returncode != 0:
             raise HTTPException(500, result.stderr or "导入失败")
 
@@ -92,9 +111,11 @@ async def upload_project(
 
 
 @router.get("/manual-boq/projects/{project_id}", response_model=schemas.ManualBoqProjectDetail)
-def get_project(project_id: int):
+def get_project(project_id: int, user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        ensure_ownership_schema(conn)
+        require_project_owner(conn, user, project_id, manual=True)
         with conn.cursor() as cur:
             # 工程基本信息
             cur.execute("""
@@ -187,7 +208,7 @@ def get_project(project_id: int):
 
 
 @router.patch("/manual-boq/projects/{project_id}", response_model=schemas.ManualBoqProject)
-def rename_project(project_id: int, body: ManualBoqProjectRename):
+def rename_project(project_id: int, body: ManualBoqProjectRename, user: CurrentUser = Depends(current_user)):
     project_name = body.project_name.strip()
     if not project_name:
         raise HTTPException(400, "工程名称不能为空")
@@ -196,6 +217,8 @@ def rename_project(project_id: int, body: ManualBoqProjectRename):
 
     conn = get_connection()
     try:
+        ensure_ownership_schema(conn)
+        require_project_owner(conn, user, project_id, manual=True)
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE manual_boq_projects
@@ -216,9 +239,11 @@ def rename_project(project_id: int, body: ManualBoqProjectRename):
 
 
 @router.delete("/manual-boq/projects/{project_id}")
-def delete_project(project_id: int):
+def delete_project(project_id: int, user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        ensure_ownership_schema(conn)
+        require_project_owner(conn, user, project_id, manual=True)
         with conn.cursor() as cur:
             cur.execute("DELETE FROM manual_boq_projects WHERE id = %s RETURNING id", (project_id,))
             if not cur.fetchone():

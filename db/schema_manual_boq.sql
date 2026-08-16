@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS manual_boq_projects (
     bid_section  VARCHAR(500),
     source_file  VARCHAR(500),
     tag          VARCHAR(100),
+    owner_user_id INT REFERENCES users(id),
     imported_at  TIMESTAMPTZ DEFAULT NOW(),
     item_count   INT
 );

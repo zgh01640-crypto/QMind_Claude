@@ -140,7 +140,7 @@ def _lookup_quota_item_id(conn, code: str) -> int | None:
 
 def import_to_db(
     conn, data: dict, source_file: str, tag: str | None, force: bool,
-    project_name_override: str | None = None, allow_duplicate: bool = False,
+    project_name_override: str | None = None, allow_duplicate: bool = False, owner_user_id: int | None = None,
 ) -> int:
     project_name = (project_name_override or "").strip() or data["project_name"]
 
@@ -162,9 +162,9 @@ def import_to_db(
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO manual_boq_projects
-                (project_name, bid_section, source_file, tag, item_count)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
-        """, (project_name, data['bid_section'], source_file, tag, item_count))
+                (project_name, bid_section, source_file, tag, item_count, owner_user_id)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+        """, (project_name, data['bid_section'], source_file, tag, item_count, owner_user_id))
         project_id = cur.fetchone()[0]
     conn.commit()
     print(f'  工程 id={project_id}，{item_count} 条清单项')
@@ -261,6 +261,7 @@ def main():
             conn, data, source_file, args.tag, args.force,
             project_name_override=args.project_name,
             allow_duplicate=args.allow_duplicate,
+            owner_user_id=int(os.environ["AUTH_OWNER_USER_ID"]) if os.environ.get("AUTH_OWNER_USER_ID") else None,
         )
         print(f'PROJECT_ID={project_id}')
         print('导入完成。')

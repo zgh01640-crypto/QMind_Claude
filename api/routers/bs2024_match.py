@@ -10,11 +10,12 @@
 
 import os
 import json
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from db.connection import get_connection
+from api.auth import CurrentUser, current_user, require_project_owner
 from db.pricing_kb_versions import apply_version_schema
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -599,10 +600,11 @@ def get_prompt_preview(chapter_ids: str = Query(..., description="逗号分隔�
 
 
 @router.get("/bs2024-match/runs")
-def get_runs(project_id: int = Query(...)):
+def get_runs(project_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     """工程的历史套定额批次列表。"""
     conn = get_connection()
     try:
+        require_project_owner(conn, user, project_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, chapter_id, chapter_name, run_name, status,

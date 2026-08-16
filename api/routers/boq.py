@@ -4,7 +4,7 @@ import threading
 import time
 import queue
 
-from fastapi import APIRouter, Query, HTTPException, UploadFile, File as FastAPIFile, Form
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File as FastAPIFile, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -16,6 +16,7 @@ from api.schemas import (
     BoqMatchRun, CompareResult, CompareRunInfo, CompareQuota, CompareBoqItem, CompareSummary,
 )
 from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item, _build_user_msg, _ROLE_DESC, _MATCH_TOOL
+from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner
 
 router = APIRouter()
 
@@ -32,7 +33,7 @@ def get_prompt_template():
 # ── 上传 BOQ ──────────────────────────────────────────────────────────────────
 
 @router.post("/boq/upload", response_model=BoqProject)
-def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project_name: Optional[str] = Form(None)):
+def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project_name: Optional[str] = Form(None), user: CurrentUser = Depends(current_user)):
     """上传 .xlsx 文件，解析并入库，返回 BoqProject。"""
     from importer.boq_parser import parse_boq_workbook
     from importer import boq_loader
@@ -41,9 +42,12 @@ def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project
     conn = get_connection()
     try:
         boq_loader.init_schema(conn)
+        ensure_ownership_schema(conn)
 
         # 检查同名文件是否已存在
         existing_id = boq_loader.get_project_by_source(conn, filename)
+        if existing_id:
+            require_project_owner(conn, user, existing_id)
         if existing_id and not force:
             raise HTTPException(
                 status_code=409,
@@ -77,6 +81,7 @@ def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project
             project_info.get("bid_section"),
             filename,
             None,  # tag
+            user.id,
         )
         seq_to_id = boq_loader.insert_sections(conn, project_id, sections)
         item_count = boq_loader.insert_items(conn, project_id, items, seq_to_id)
@@ -105,18 +110,25 @@ def upload_boq(file: UploadFile = FastAPIFile(...), force: bool = False, project
 # ── 项目 / 分部 / 清单项 ──────────────────────────────────────────────────────
 
 @router.get("/boq/projects", response_model=list[BoqProject])
-def get_boq_projects():
+def get_boq_projects(user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            sql = """
                 SELECT p.id, p.project_name, p.bid_section, p.source_file,
                        p.tag, p.imported_at, COUNT(i.id) AS item_count
                 FROM boq_projects p
                 LEFT JOIN boq_items i ON i.project_id = p.id
+            """
+            params = []
+            if not user.is_admin:
+                sql += " WHERE p.owner_user_id=%s"
+                params.append(user.id)
+            sql += """
                 GROUP BY p.id
                 ORDER BY p.imported_at DESC
-            """)
+            """
+            cur.execute(sql, params)
             rows = cur.fetchall()
         return [
             BoqProject(
@@ -130,9 +142,10 @@ def get_boq_projects():
 
 
 @router.get("/boq/sections", response_model=list[BoqSection])
-def get_boq_sections(project_id: int = Query(...)):
+def get_boq_sections(project_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        require_project_owner(conn, user, project_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, seq, section_name
@@ -153,9 +166,11 @@ def get_boq_items(
     search: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    user: CurrentUser = Depends(current_user),
 ):
     conn = get_connection()
     try:
+        require_project_owner(conn, user, project_id)
         conditions = ["i.project_id = %s"]
         params: list = [project_id]
 
@@ -204,10 +219,11 @@ def get_boq_items(
 
 
 @router.get("/boq/all-items", response_model=list[BoqItem])
-def get_all_boq_items(project_id: int = Query(...)):
+def get_all_boq_items(project_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     """返回项目下全部清单项（含分部名），用于树形视图。"""
     conn = get_connection()
     try:
+        require_project_owner(conn, user, project_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT i.id, i.section_id, s.section_name,
@@ -239,9 +255,15 @@ def get_all_boq_items(project_id: int = Query(...)):
 # ── 匹配运行记录 ──────────────────────────────────────────────────────────────
 
 @router.patch("/boq/items/{item_id}/description", response_model=BoqItem)
-def update_boq_item_description(item_id: int, body: BoqItemDescriptionUpdate):
+def update_boq_item_description(item_id: int, body: BoqItemDescriptionUpdate, user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT project_id FROM boq_items WHERE id=%s", (item_id,))
+            item = cur.fetchone()
+        if not item:
+            raise HTTPException(status_code=404, detail="BOQ item not found")
+        require_project_owner(conn, user, int(item[0]))
         new_description = body.item_description.strip() if body.item_description else None
         with conn.cursor() as cur:
             cur.execute(
@@ -278,10 +300,11 @@ def update_boq_item_description(item_id: int, body: BoqItemDescriptionUpdate):
 
 
 @router.get("/boq/runs", response_model=list[BoqMatchRun])
-def get_boq_runs(project_id: int = Query(...)):
+def get_boq_runs(project_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     """获取项目的所有匹配运行记录，按创建时间倒序。"""
     conn = get_connection()
     try:
+        require_project_owner(conn, user, project_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT r.id, r.project_id, r.standard_id, s.standard_code,
@@ -316,6 +339,35 @@ def _ensure_match_schema(conn):
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
+
+
+def _require_item_owner(conn, user: CurrentUser, item_id: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT project_id FROM boq_items WHERE id=%s", (item_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="清单项不存在")
+    require_project_owner(conn, user, int(row[0]))
+    return int(row[0])
+
+
+def _require_run_owner(conn, user: CurrentUser, run_id: int) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT project_id FROM boq_match_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    require_project_owner(conn, user, int(row[0]))
+    return int(row[0])
+
+
+def _require_match_owner(conn, user: CurrentUser, match_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT project_id FROM boq_quota_matches WHERE id=%s", (match_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="匹配记录不存在")
+    require_project_owner(conn, user, int(row[0]))
 
 
 def _run_match_for_item(conn, boq_item_id: int, standard_id: int, system_prompt: str, run_id) -> list[BoqMatchResult]:
@@ -455,11 +507,12 @@ class MatchProjectRequest(BaseModel):
 
 
 @router.post("/boq/match-item", response_model=list[BoqMatchResult])
-def match_item(req: MatchItemRequest):
+def match_item(req: MatchItemRequest, user: CurrentUser = Depends(current_user)):
     """对单条清单项触发 AI 匹配。"""
     conn = get_connection()
     try:
         _ensure_match_schema(conn)
+        _require_item_owner(conn, user, req.boq_item_id)
         sp = build_system_prompt(conn, req.standard_id)
         return _run_match_for_item(conn, req.boq_item_id, req.standard_id, sp, run_id=None)
     except HTTPException:
@@ -472,11 +525,12 @@ def match_item(req: MatchItemRequest):
 
 
 @router.post("/boq/match-project")
-def match_project(req: MatchProjectRequest):
+def match_project(req: MatchProjectRequest, user: CurrentUser = Depends(current_user)):
     """批量套定额：立即返回 run_id，后台线程执行，前端轮询进度。"""
     conn = get_connection()
     try:
         _ensure_match_schema(conn)
+        require_project_owner(conn, user, req.project_id)
 
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM boq_items WHERE project_id = %s", (req.project_id,))
@@ -562,10 +616,11 @@ def match_project(req: MatchProjectRequest):
 # ── 匹配结果 CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/boq/matches", response_model=list[BoqMatchResult])
-def get_boq_matches(run_id: int = Query(...)):
+def get_boq_matches(run_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     """获取指定 run 的所有匹配结果（含定额完整信息和工料机）。"""
     conn = get_connection()
     try:
+        _require_run_owner(conn, user, run_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT m.id, m.boq_item_id, m.quota_item_id,
@@ -635,12 +690,13 @@ class UpdateMatchRequest(BaseModel):
 
 
 @router.put("/boq/matches/{match_id}", response_model=BoqMatchResult)
-def update_match(match_id: int, req: UpdateMatchRequest):
+def update_match(match_id: int, req: UpdateMatchRequest, user: CurrentUser = Depends(current_user)):
     """确认或拒绝一条匹配。"""
     if req.status not in ("confirmed", "rejected", "ai"):
         raise HTTPException(status_code=400, detail="status 只能是 confirmed / rejected / ai")
     conn = get_connection()
     try:
+        _require_match_owner(conn, user, match_id)
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE boq_quota_matches
@@ -697,9 +753,10 @@ def update_match(match_id: int, req: UpdateMatchRequest):
 
 
 @router.delete("/boq/matches/{match_id}")
-def delete_match(match_id: int):
+def delete_match(match_id: int, user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        _require_match_owner(conn, user, match_id)
         with conn.cursor() as cur:
             cur.execute("DELETE FROM boq_quota_matches WHERE id = %s RETURNING id", (match_id,))
             if not cur.fetchone():
@@ -713,10 +770,11 @@ def delete_match(match_id: int):
 # ── 汇总计算 ──────────────────────────────────────────────────────────────────
 
 @router.get("/boq/summary")
-def get_boq_summary(run_id: int = Query(...)):
+def get_boq_summary(run_id: int = Query(...), user: CurrentUser = Depends(current_user)):
     """汇总综合单价 + 工料机总量（按 run_id 筛选）。"""
     conn = get_connection()
     try:
+        _require_run_owner(conn, user, run_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
@@ -1284,7 +1342,7 @@ class DebugBatchRename(BaseModel):
 
 
 @router.get("/debug-batches")
-def list_debug_batches():
+def list_debug_batches(user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -1295,10 +1353,11 @@ def list_debug_batches():
                 FROM debug_batches db
                 JOIN boq_projects bp ON bp.id = db.boq_project_id
                 LEFT JOIN debug_item_results dir ON dir.batch_id = db.id
+                WHERE (%s OR bp.owner_user_id=%s)
                 GROUP BY db.id, db.name, db.boq_project_id, bp.project_name,
                          db.manual_project_id, db.standard_ids, db.created_at
                 ORDER BY db.created_at DESC
-            """)
+            """, (user.is_admin, user.id))
             rows = cur.fetchall()
         result = []
         for r in rows:
@@ -1316,9 +1375,10 @@ def list_debug_batches():
 
 
 @router.post("/debug-batches", status_code=201)
-def create_debug_batch(body: DebugBatchCreate):
+def create_debug_batch(body: DebugBatchCreate, user: CurrentUser = Depends(current_user)):
     conn = get_connection()
     try:
+        require_project_owner(conn, user, body.boq_project_id)
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO debug_batches (name, boq_project_id, manual_project_id, standard_ids)

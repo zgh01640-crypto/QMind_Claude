@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS boq_projects (
     bid_section  VARCHAR(500),
     source_file  VARCHAR(255),
     tag          VARCHAR(100),
+    owner_user_id INT REFERENCES users(id),
     imported_at  TIMESTAMP DEFAULT NOW(),
     UNIQUE (source_file)
 );

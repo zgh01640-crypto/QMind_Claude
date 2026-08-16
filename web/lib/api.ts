@@ -2470,16 +2470,11 @@ export function fetchPricingKbImportIssues(params: {
   return req<PricingKbList<PricingKbImportIssue>>(`/api/pricing-kb/import-issues?${query}`)
 }
 
-const adminHeaders = (token: string, json = false): HeadersInit => ({
-  'X-Admin-Token': token,
-  ...(json ? { 'Content-Type': 'application/json' } : {}),
-})
-
-export async function uploadPricingKb(file: File, token: string) {
+export async function uploadPricingKb(file: File) {
   const body = new FormData()
   body.append('file', file)
   return req<PricingKbUploadResult>('/api/pricing-kb/uploads', {
-    method: 'POST', headers: adminHeaders(token), body,
+    method: 'POST', body,
   })
 }
 
@@ -2492,8 +2487,8 @@ export const savePricingKbImportProfile = (profile: {
   description?: string
   selected_tables: string[]
   required_tables: string[]
-}, token: string) => req<{ profile_id: string }>('/api/pricing-kb/import-profiles', {
-  method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify(profile),
+}) => req<{ profile_id: string }>('/api/pricing-kb/import-profiles', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile),
 })
 
 export function createPricingKbImportJob(input: {
@@ -2501,26 +2496,26 @@ export function createPricingKbImportJob(input: {
   profile_id: string | null
   selected_tables: string[]
   unknown_tables: Record<string, string>
-}, token: string) {
+}) {
   return req<{ id: number; status: string }>('/api/pricing-kb/import-jobs', {
-    method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify(input),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })
 }
 
-export const fetchPricingKbImportJob = (id: number, token: string) =>
-  req<PricingKbImportJob>(`/api/pricing-kb/import-jobs/${id}`, { headers: adminHeaders(token) })
+export const fetchPricingKbImportJob = (id: number) =>
+  req<PricingKbImportJob>(`/api/pricing-kb/import-jobs/${id}`)
 
-export const cancelPricingKbImportJob = (id: number, token: string) =>
+export const cancelPricingKbImportJob = (id: number) =>
   req<{ id: number; status: string }>(`/api/pricing-kb/import-jobs/${id}/cancel`, {
-    method: 'POST', headers: adminHeaders(token),
+    method: 'POST',
   })
 
 export const fetchPricingKbVersions = () =>
   req<PricingKbVersion[]>('/api/pricing-kb/versions')
 
-export const publishPricingKbVersion = (id: number, token: string) =>
+export const publishPricingKbVersion = (id: number) =>
   req<PricingKbVersion>(`/api/pricing-kb/versions/${id}/publish`, {
-    method: 'POST', headers: adminHeaders(token, true), body: JSON.stringify({ published_by: 'web-admin' }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ published_by: 'web-admin' }),
   })
 
 // ── 调试批次 ──────────────────────────────────────────────────────────────────

@@ -17,7 +17,6 @@ import {
   uploadPricingKb,
 } from '@/lib/api'
 
-const TOKEN_KEY = 'qmind_pricing_kb_admin_token'
 const terminal = new Set(['validated', 'failed', 'cancelled'])
 
 function Badge({ value }: { value: string }) {
@@ -31,7 +30,6 @@ function Badge({ value }: { value: string }) {
 }
 
 export default function ImportManager({ onRefresh }: { onRefresh?: () => void }) {
-  const [token, setToken] = useState('')
   const [profiles, setProfiles] = useState<PricingKbImportProfile[]>([])
   const [versions, setVersions] = useState<PricingKbVersion[]>([])
   const [upload, setUpload] = useState<PricingKbUploadResult | null>(null)
@@ -44,7 +42,6 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
 
   const reloadVersions = () => fetchPricingKbVersions().then(setVersions).catch(() => undefined)
   useEffect(() => {
-    setToken(sessionStorage.getItem(TOKEN_KEY) || '')
     fetchPricingKbImportProfiles().then(items => {
       setProfiles(items)
       const profile = items.find(item => item.profile_id === 'full-pricing')
@@ -54,9 +51,9 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   }, [])
 
   useEffect(() => {
-    if (!job || terminal.has(job.status) || !token) return
+    if (!job || terminal.has(job.status)) return
     const timer = window.setInterval(() => {
-      fetchPricingKbImportJob(job.id, token).then(next => {
+      fetchPricingKbImportJob(job.id).then(next => {
         setJob(next)
         if (terminal.has(next.status)) {
           reloadVersions()
@@ -65,16 +62,11 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
       }).catch(reason => setError(reason instanceof Error ? reason.message : '刷新任务失败'))
     }, 1800)
     return () => window.clearInterval(timer)
-  }, [job, onRefresh, token])
+  }, [job, onRefresh])
 
   const tables = upload?.inspection.tables ?? []
   const available = new Set(tables.map(table => table.name))
   const currentProfile = profiles.find(item => item.profile_id === profileId)
-
-  function saveToken(value: string) {
-    setToken(value)
-    sessionStorage.setItem(TOKEN_KEY, value)
-  }
 
   function applyProfile(id: string) {
     setProfileId(id)
@@ -104,10 +96,9 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   }
 
   async function handleUpload(file: File) {
-    if (!token) return setError('请先输入管理员令牌')
     setBusy(true); setError(''); setJob(null)
     try {
-      const result = await uploadPricingKb(file, token)
+      const result = await uploadPricingKb(file)
       setUpload(result)
       const profile = profiles.find(item => item.profile_id === profileId)
       const names = new Set(result.inspection.tables.map(table => table.name))
@@ -119,7 +110,7 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   }
 
   async function queueImport() {
-    if (!upload || !token) return
+    if (!upload) return
     setBusy(true); setError('')
     try {
       const created = await createPricingKbImportJob({
@@ -127,32 +118,27 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
         profile_id: profileId,
         selected_tables: Array.from(selected),
         unknown_tables: Object.fromEntries(Array.from(raw).map(name => [name, 'raw'])),
-      }, token)
-      setJob(await fetchPricingKbImportJob(created.id, token))
+      })
+      setJob(await fetchPricingKbImportJob(created.id))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建导入任务失败')
     } finally { setBusy(false) }
   }
 
   async function saveProfile() {
-    if (!token) return setError('请先输入管理员令牌')
     const name = window.prompt('自定义模板名称')?.trim()
     if (!name) return
     const profile_id = `custom-${Date.now()}`
     try {
-      await savePricingKbImportProfile({ profile_id, name, selected_tables: Array.from(selected), required_tables: [] }, token)
+      await savePricingKbImportProfile({ profile_id, name, selected_tables: Array.from(selected), required_tables: [] })
       const items = await fetchPricingKbImportProfiles(); setProfiles(items); setProfileId(profile_id)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '保存模板失败') }
   }
 
   async function publish(version: PricingKbVersion) {
-    if (!token) {
-      setError('请先在页面右上角输入管理员令牌，再发布知识库版本')
-      return
-    }
     if (!window.confirm(`发布知识库版本 #${version.id}？新任务将使用该版本。`)) return
     setBusy(true); setError('')
-    try { await publishPricingKbVersion(version.id, token); await reloadVersions(); onRefresh?.() }
+    try { await publishPricingKbVersion(version.id); await reloadVersions(); onRefresh?.() }
     catch (reason) { setError(reason instanceof Error ? reason.message : '发布失败') }
     finally { setBusy(false) }
   }
@@ -171,16 +157,7 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
             <h2 className="text-lg font-semibold text-gray-900">知识库导入控制台</h2>
             <p className="mt-1 text-sm text-gray-500">上传、扫描、校验并发布知识库版本，未知表将进入隔离原始区。</p>
           </div>
-          <label className="w-full max-w-xs">
-            <span className="mb-1 block text-xs font-medium text-gray-600">管理员令牌</span>
-            <input
-              type="password"
-              value={token}
-              onChange={event => saveToken(event.target.value)}
-              placeholder="PRICING_KB_ADMIN_TOKEN"
-              className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-xs text-gray-900 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            />
-          </label>
+          <span className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700">管理员专属操作</span>
         </div>
       </div>
 
@@ -283,7 +260,7 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
                 <span>{job.processed_rows.toLocaleString()} 行 · {progress}%</span>
               </div>
               {!terminal.has(job.status) && (
-                <button type="button" onClick={() => cancelPricingKbImportJob(job.id, token).then(() => fetchPricingKbImportJob(job.id, token).then(setJob))} className="mt-3 text-xs font-medium text-red-600 hover:text-red-700">
+                <button type="button" onClick={() => cancelPricingKbImportJob(job.id).then(() => fetchPricingKbImportJob(job.id).then(setJob))} className="mt-3 text-xs font-medium text-red-600 hover:text-red-700">
                   取消任务
                 </button>
               )}
@@ -314,12 +291,9 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
                     type="button"
                     disabled={busy}
                     onClick={() => publish(version)}
-                    title={!token ? '请先输入管理员令牌' : undefined}
                     className="mt-3 w-full rounded border border-blue-200 bg-blue-50 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    {version.status === 'retired'
-                      ? (token ? '重新激活' : '输入令牌后重新激活')
-                      : (token ? '发布版本' : '输入令牌后发布')}
+                    {version.status === 'retired' ? '重新激活' : '发布版本'}
                   </button>
                 )}
               </div>

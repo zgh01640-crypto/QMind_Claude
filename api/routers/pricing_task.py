@@ -17,13 +17,14 @@ from time import perf_counter, sleep
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from psycopg2.extras import Json
 
 from db.pricing_kb_versions import apply_version_schema, resolve_version_id
+from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner, require_task_owner
 
 router = APIRouter()
 
@@ -215,6 +216,8 @@ def _ensure_schema(conn):
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
         cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS workflow_version VARCHAR(16) NOT NULL DEFAULT 'legacy'")
+        cur.execute("ALTER TABLE pricing_tasks ADD COLUMN IF NOT EXISTS owner_user_id INT REFERENCES users(id)")
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS owner_user_id INT REFERENCES users(id)")
         cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS kb_version_id BIGINT")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS conversion_check JSONB")
         cur.execute("ALTER TABLE pricing_task_runs ADD COLUMN IF NOT EXISTS coefficient_check JSONB")
@@ -275,6 +278,7 @@ def _ensure_schema(conn):
             "ON pricing_task_manual_comparison_reviews(source_type, source_run_id, created_at DESC)"
         )
     conn.commit()
+    ensure_ownership_schema(conn)
 
 
 class PricingTaskCreate(BaseModel):
@@ -3550,8 +3554,26 @@ def _row_to_batch(row) -> dict[str, Any]:
     }
 
 
+def _require_task_run_owner(conn, user: CurrentUser, run_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT task_id FROM pricing_task_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="任务运行不存在")
+    require_task_owner(conn, user, int(row[0]))
+
+
+def _require_batch_item_run_owner(conn, user: CurrentUser, run_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT batch_id FROM pricing_task_batch_item_runs WHERE id=%s", (run_id,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="批次运行不存在")
+    require_task_owner(conn, user, int(row[0]), batch=True)
+
+
 @router.get("/pricing-tasks")
-def list_pricing_tasks():
+def list_pricing_tasks(user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3570,10 +3592,11 @@ def list_pricing_tasks():
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
                 LEFT JOIN LATERAL jsonb_array_elements_text(t.quota_library_ids) lib_id(value) ON TRUE
                 LEFT JOIN tlibs l ON l.kb_version_id=pricing_kb_data_version(t.kb_version_id,'TLibs') AND l.id=lib_id.value::bigint
-                WHERE t.status <> 'deleted'
+                WHERE t.status <> 'deleted' AND (%s OR t.owner_user_id=%s)
                 GROUP BY t.id, p.project_name, mp.project_name
                 ORDER BY t.created_at DESC
-                """
+                """,
+                (user.is_admin, user.id),
             )
             return [_row_to_task(row) for row in cur.fetchall()]
     finally:
@@ -3581,7 +3604,7 @@ def list_pricing_tasks():
 
 
 @router.post("/pricing-tasks")
-def create_pricing_task(body: PricingTaskCreate):
+def create_pricing_task(body: PricingTaskCreate, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3592,6 +3615,7 @@ def create_pricing_task(body: PricingTaskCreate):
                 kb_version_id = resolve_version_id(conn, body.kb_version_id)
             except (ValueError, RuntimeError) as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
+            require_project_owner(conn, user, body.boq_project_id)
             cur.execute("SELECT project_name FROM boq_projects WHERE id=%s", (body.boq_project_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="BOQ project not found")
@@ -3601,8 +3625,8 @@ def create_pricing_task(body: PricingTaskCreate):
                     raise HTTPException(status_code=404, detail="manual project not found")
             cur.execute(
                 """
-                INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id)
-                VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+                INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id, owner_user_id)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
                 ON CONFLICT (legacy_local_id) DO UPDATE SET updated_at=NOW()
                 RETURNING id
                 """,
@@ -3613,6 +3637,7 @@ def create_pricing_task(body: PricingTaskCreate):
                     body.manual_project_id,
                     body.legacy_local_id,
                     kb_version_id,
+                    user.id,
                 ),
             )
             task_id = cur.fetchone()[0]
@@ -3623,7 +3648,7 @@ def create_pricing_task(body: PricingTaskCreate):
 
 
 @router.post("/pricing-tasks/import-local")
-def import_local_tasks(body: PricingTaskImportRequest):
+def import_local_tasks(body: PricingTaskImportRequest, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3636,14 +3661,15 @@ def import_local_tasks(body: PricingTaskImportRequest):
             except (ValueError, RuntimeError) as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             for item in body.tasks:
+                require_project_owner(conn, user, item.project_id)
                 cur.execute(
                     """
-                    INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id)
-                    VALUES (%s, %s, '[]'::jsonb, %s, %s, %s)
+                    INSERT INTO pricing_tasks(name, boq_project_id, quota_library_ids, manual_project_id, legacy_local_id, kb_version_id, owner_user_id)
+                    VALUES (%s, %s, '[]'::jsonb, %s, %s, %s, %s)
                     ON CONFLICT (legacy_local_id) DO UPDATE SET updated_at=NOW()
                     RETURNING id
                     """,
-                    (item.name, item.project_id, item.manual_project_id, item.id, kb_version_id),
+                    (item.name, item.project_id, item.manual_project_id, item.id, kb_version_id, user.id),
                 )
                 imported.append({"legacy_local_id": item.id, "id": cur.fetchone()[0]})
         conn.commit()
@@ -3653,12 +3679,13 @@ def import_local_tasks(body: PricingTaskImportRequest):
 
 
 @router.get("/pricing-tasks/{task_id}")
-def get_pricing_task(task_id: int):
+def get_pricing_task(task_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -3711,7 +3738,7 @@ def _batch_select_sql() -> str:
 
 
 @router.get("/pricing-task-batches")
-def list_pricing_task_batches():
+def list_pricing_task_batches(user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3721,10 +3748,11 @@ def list_pricing_task_batches():
             cur.execute(
                 _batch_select_sql()
                 + """
-                WHERE b.status <> 'deleted' AND b.workflow_version='legacy'
+                WHERE b.status <> 'deleted' AND b.workflow_version='legacy' AND (%s OR b.owner_user_id=%s)
                 GROUP BY b.id, p.project_name, mp.project_name
                 ORDER BY b.created_at DESC
-                """
+                """,
+                (user.is_admin, user.id),
             )
             return [_row_to_batch(row) for row in cur.fetchall()]
     finally:
@@ -3732,7 +3760,7 @@ def list_pricing_task_batches():
 
 
 @router.get("/pricing-task-new-batches")
-def list_new_pricing_task_batches():
+def list_new_pricing_task_batches(user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
@@ -3742,10 +3770,11 @@ def list_new_pricing_task_batches():
             cur.execute(
                 _batch_select_sql()
                 + """
-                WHERE b.status <> 'deleted' AND b.workflow_version='streamlined'
+                WHERE b.status <> 'deleted' AND b.workflow_version='streamlined' AND (%s OR b.owner_user_id=%s)
                 GROUP BY b.id, p.project_name, mp.project_name
                 ORDER BY b.created_at DESC
-                """
+                """,
+                (user.is_admin, user.id),
             )
             return [_row_to_batch(row) for row in cur.fetchall()]
     finally:
@@ -3757,6 +3786,7 @@ def _create_pricing_task_batch_record(
     workflow_version: str,
     *,
     require_manual_project: bool,
+    user: CurrentUser,
 ):
     from db.connection import get_connection
 
@@ -3773,6 +3803,7 @@ def _create_pricing_task_batch_record(
                 kb_version_id = resolve_version_id(conn, body.kb_version_id)
             except (ValueError, RuntimeError) as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
+            require_project_owner(conn, user, body.boq_project_id)
             cur.execute("SELECT id FROM boq_projects WHERE id=%s", (body.boq_project_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="BOQ project not found")
@@ -3784,9 +3815,9 @@ def _create_pricing_task_batch_record(
                 """
                 INSERT INTO pricing_task_batches(
                     name, boq_project_id, quota_library_ids, manual_project_id,
-                    kb_version_id, workflow_version
+                    kb_version_id, workflow_version, owner_user_id
                 )
-                VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -3796,6 +3827,7 @@ def _create_pricing_task_batch_record(
                     body.manual_project_id,
                     kb_version_id,
                     workflow_version,
+                    user.id,
                 ),
             )
             batch_id = cur.fetchone()[0]
@@ -3806,30 +3838,33 @@ def _create_pricing_task_batch_record(
 
 
 @router.post("/pricing-task-batches")
-def create_pricing_task_batch(body: PricingTaskBatchCreate):
+def create_pricing_task_batch(body: PricingTaskBatchCreate, user: CurrentUser = Depends(current_user)):
     return _create_pricing_task_batch_record(
         body,
         "legacy",
         require_manual_project=False,
+        user=user,
     )
 
 
 @router.post("/pricing-task-new-batches")
-def create_new_pricing_task_batch(body: NewPricingTaskBatchCreate):
+def create_new_pricing_task_batch(body: NewPricingTaskBatchCreate, user: CurrentUser = Depends(current_user)):
     return _create_pricing_task_batch_record(
         body,
         "streamlined",
         require_manual_project=True,
+        user=user,
     )
 
 
 @router.get("/pricing-task-batches/{batch_id}")
-def get_pricing_task_batch(batch_id: int):
+def get_pricing_task_batch(batch_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
         with conn.cursor() as cur:
             cur.execute(
                 _batch_select_sql()
@@ -3848,12 +3883,13 @@ def get_pricing_task_batch(batch_id: int):
 
 
 @router.delete("/pricing-task-batches/{batch_id}", status_code=204)
-def delete_pricing_task_batch(batch_id: int):
+def delete_pricing_task_batch(batch_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
         with conn.cursor() as cur:
             cur.execute("UPDATE pricing_task_batches SET status='deleted', updated_at=NOW() WHERE id=%s", (batch_id,))
         conn.commit()
@@ -3862,13 +3898,13 @@ def delete_pricing_task_batch(batch_id: int):
 
 
 @router.get("/pricing-task-batches/{batch_id}/items")
-def get_pricing_task_batch_items(batch_id: int):
+def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
-        batch = get_pricing_task_batch(batch_id)
+        batch = get_pricing_task_batch(batch_id, user)
         project_id = int(batch["boq_project_id"])
         with conn.cursor() as cur:
             cur.execute(
@@ -4117,7 +4153,7 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
 
 
 @router.post("/pricing-task-batches/{batch_id}/items/{boq_item_id}/run-stream")
-def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
+def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
@@ -4211,12 +4247,13 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int):
 
 
 @router.get("/pricing-tasks/{task_id}/items/{boq_item_id}/runs")
-def list_item_runs(task_id: int, boq_item_id: int):
+def list_item_runs(task_id: int, boq_item_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -4260,12 +4297,13 @@ def list_item_runs(task_id: int, boq_item_id: int):
 
 
 @router.get("/pricing-tasks/{task_id}/runs/latest")
-def list_latest_task_runs(task_id: int):
+def list_latest_task_runs(task_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT manual_project_id FROM pricing_tasks WHERE id=%s AND status <> 'deleted'",
@@ -4331,7 +4369,7 @@ def list_latest_task_runs(task_id: int):
 
 
 @router.post("/pricing-tasks/{task_id}/items/{boq_item_id}/run-stream")
-def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
+def pricing_task_run_item_stream(task_id: int, boq_item_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
@@ -4339,6 +4377,8 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
         run_id = None
         try:
             _ensure_schema(conn)
+            require_task_owner(conn, user, batch_id, batch=True)
+            require_task_owner(conn, user, task_id)
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, kb_version_id FROM pricing_tasks WHERE id=%s",
@@ -4418,12 +4458,13 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int):
 
 
 @router.post("/pricing-tasks/{task_id}/accuracy-report")
-def generate_pricing_task_accuracy_report(task_id: int):
+def generate_pricing_task_accuracy_report(task_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -4516,12 +4557,13 @@ def generate_pricing_task_accuracy_report(task_id: int):
 
 
 @router.get("/pricing-tasks/{task_id}/detail-report")
-def get_pricing_task_detail_report(task_id: int):
+def get_pricing_task_detail_report(task_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     conn = get_connection()
     try:
         _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -4567,8 +4609,8 @@ def get_pricing_task_detail_report(task_id: int):
 
 
 @router.get("/pricing-tasks/{task_id}/detail-report/export")
-def export_pricing_task_detail_report(task_id: int):
-    report = get_pricing_task_detail_report(task_id)
+def export_pricing_task_detail_report(task_id: int, user: CurrentUser = Depends(current_user)):
+    report = get_pricing_task_detail_report(task_id, user)
     stream = _build_pricing_task_detail_report_excel(report)
     task_name = str((report.get("task") or {}).get("name") or f"task-{task_id}")
     safe_name = re.sub(r'[\\/:*?"<>|]+', "_", task_name).strip() or f"task-{task_id}"

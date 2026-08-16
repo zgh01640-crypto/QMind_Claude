@@ -11,6 +11,7 @@ requests
 numpy
 opencv-python
 pillow
+argon2-cffi
 paddleocr
 paddlepaddle
 easyocr

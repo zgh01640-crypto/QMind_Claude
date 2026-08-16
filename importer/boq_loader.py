@@ -27,12 +27,12 @@ def delete_project(conn, project_id):
     conn.commit()
 
 
-def insert_project(conn, project_name, bid_section, source_file, tag):
+def insert_project(conn, project_name, bid_section, source_file, tag, owner_user_id=None):
     with conn.cursor() as cur:
         cur.execute(
-            '''INSERT INTO boq_projects (project_name, bid_section, source_file, tag)
-               VALUES (%s, %s, %s, %s) RETURNING id''',
-            (project_name, bid_section, source_file, tag),
+            '''INSERT INTO boq_projects (project_name, bid_section, source_file, tag, owner_user_id)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id''',
+            (project_name, bid_section, source_file, tag, owner_user_id),
         )
         project_id = cur.fetchone()[0]
     conn.commit()

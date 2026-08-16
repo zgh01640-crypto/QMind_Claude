@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import os
 import sqlite3
@@ -11,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Request
 from psycopg2.extras import Json, execute_values
 
 from db.connection import get_connection
@@ -34,12 +33,10 @@ DEPENDENCIES = {
 }
 
 
-def require_admin(x_admin_token: str | None = Header(default=None)) -> None:
-    expected = os.getenv("PRICING_KB_ADMIN_TOKEN")
-    if not expected:
-        raise HTTPException(status_code=503, detail="PRICING_KB_ADMIN_TOKEN is not configured")
-    if not x_admin_token or not hmac.compare_digest(x_admin_token, expected):
-        raise HTTPException(status_code=403, detail="administrator token is invalid")
+def require_admin(request: Request):
+    """兼容旧导入路由；管理员身份已统一由应用会话验证。"""
+    from api.auth import require_admin as require_application_admin
+    return require_application_admin(request)
 
 
 def upload_root() -> Path:
