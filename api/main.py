@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from api.routers import auth, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
-from api.auth import SESSION_COOKIE, apply_auth_schema, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
+from api.auth import SESSION_COOKIE, apply_auth_schema, is_auth_enabled, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
 
 from api.services.pricing_kb_import_admin import run_next_job
 
@@ -33,7 +33,8 @@ def _pricing_kb_worker_loop(stop_event: threading.Event) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    apply_auth_schema()
+    if is_auth_enabled():
+        apply_auth_schema()
     pricing_task.initialize_schema()
     stop_event = threading.Event()
     worker_thread: threading.Thread | None = None
@@ -72,7 +73,7 @@ app = FastAPI(title="深圳信息价管理系统", version="1.0.0", lifespan=lif
 
 @app.middleware("http")
 async def attach_authenticated_user(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
+    if is_auth_enabled() and request.url.path.startswith("/api/"):
         request.state.user = resolve_session(request.cookies.get(SESSION_COOKIE))
     return await call_next(request)
 

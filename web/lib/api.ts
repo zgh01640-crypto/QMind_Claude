@@ -1226,6 +1226,7 @@ export interface PricingKbImportJob {
   created_at: string
   started_at: string | null
   finished_at: string | null
+  change_note: string | null
 }
 
 export interface PricingKbVersion {
@@ -1239,6 +1240,7 @@ export interface PricingKbVersion {
   published_at: string | null
   published_by: string | null
   is_active: boolean
+  change_note: string | null
 }
 
 export interface PricingKbList<T> {
@@ -2597,6 +2599,7 @@ export function createPricingKbImportJob(input: {
   profile_id: string | null
   selected_tables: string[]
   unknown_tables: Record<string, string>
+  change_note?: string
 }) {
   return req<{ id: number; status: string }>('/api/pricing-kb/import-jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),

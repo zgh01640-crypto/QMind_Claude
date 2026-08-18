@@ -41,7 +41,7 @@ VERSION_SELECT = """
            v.schema_signature, v.table_counts, v.validation_report,
            v.error_message, v.imported_at, v.validated_at, v.published_at,
            v.published_by, (a.kb_version_id IS NOT NULL) AS is_active,
-           v.parent_version_id, v.manifest_sha256
+           v.parent_version_id, v.manifest_sha256, v.change_note
     FROM pricing_kb_versions v
     LEFT JOIN pricing_kb_active_version a ON a.kb_version_id=v.id
 """

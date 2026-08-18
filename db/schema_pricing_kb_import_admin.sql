@@ -2,6 +2,7 @@
 
 ALTER TABLE pricing_kb_versions ADD COLUMN IF NOT EXISTS parent_version_id BIGINT REFERENCES pricing_kb_versions(id);
 ALTER TABLE pricing_kb_versions ADD COLUMN IF NOT EXISTS manifest_sha256 VARCHAR(64);
+ALTER TABLE pricing_kb_versions ADD COLUMN IF NOT EXISTS change_note TEXT;
 ALTER TABLE pricing_kb_versions DROP CONSTRAINT IF EXISTS pricing_kb_versions_source_file_sha256_key;
 CREATE INDEX IF NOT EXISTS idx_pricing_kb_versions_source_hash ON pricing_kb_versions(source_file_sha256);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pricing_kb_versions_manifest
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS pricing_kb_import_jobs (
     parent_version_id BIGINT REFERENCES pricing_kb_versions(id),
     version_id BIGINT REFERENCES pricing_kb_versions(id),
     config_json JSONB NOT NULL,
+    change_note TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued','running','validated','failed','cancel_requested','cancelled')),
     current_table TEXT,
@@ -76,6 +78,7 @@ CREATE TABLE IF NOT EXISTS pricing_kb_import_jobs (
     finished_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE pricing_kb_import_jobs ADD COLUMN IF NOT EXISTS change_note TEXT;
 CREATE INDEX IF NOT EXISTS idx_pricing_kb_import_jobs_claim
     ON pricing_kb_import_jobs(status, lease_expires_at, created_at);
 

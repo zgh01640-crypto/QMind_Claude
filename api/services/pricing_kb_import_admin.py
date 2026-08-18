@@ -179,7 +179,7 @@ def _validate_effective_version(conn, version_id: int) -> dict[str, int]:
 
 
 def _process_job(conn, job: tuple[Any, ...]) -> int:
-    job_id, upload_id, parent_id, config, stored_path, source_hash, inspection = job
+    job_id, upload_id, parent_id, config, change_note, stored_path, source_hash, inspection = job
     selected = set(config.get("selected_tables") or [])
     unknown = {k for k, v in (config.get("unknown_tables") or {}).items() if v == "raw"}
     manifest_payload = {
@@ -195,6 +195,10 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
         existing = cur.fetchone()
         if existing and existing[1] in {"validated", "active", "retired"}:
             cur.execute(
+                "UPDATE pricing_kb_versions SET change_note=COALESCE(change_note,%s),updated_at=NOW() WHERE id=%s",
+                (change_note, existing[0]),
+            )
+            cur.execute(
                 """UPDATE pricing_kb_import_jobs SET version_id=%s,status='validated',current_table=NULL,
                    completed_tables=total_tables,processed_rows=0,finished_at=NOW(),updated_at=NOW() WHERE id=%s""",
                 (existing[0], job_id),
@@ -208,13 +212,18 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
             cur.execute("DELETE FROM pricing_kb_raw_rows WHERE version_id=%s", (version_id,))
             cur.execute("DELETE FROM pricing_kb_raw_tables WHERE version_id=%s", (version_id,))
             cur.execute("DELETE FROM pricing_kb_version_tables WHERE version_id=%s", (version_id,))
-            cur.execute("UPDATE pricing_kb_versions SET status='importing',error_message=NULL,updated_at=NOW() WHERE id=%s", (version_id,))
+            cur.execute(
+                """UPDATE pricing_kb_versions
+                   SET status='importing',error_message=NULL,change_note=%s,updated_at=NOW()
+                   WHERE id=%s""",
+                (change_note, version_id),
+            )
         else:
             cur.execute(
                 """INSERT INTO pricing_kb_versions(source_file,source_file_sha256,status,schema_signature,
-                   table_counts,parent_version_id,manifest_sha256)
-                   VALUES(%s,%s,'importing',%s,%s,%s,%s) RETURNING id""",
-                (stored_path, source_hash, inspection.get("schema_signature"), Json(inspection), parent_id, manifest),
+                   table_counts,parent_version_id,manifest_sha256,change_note)
+                   VALUES(%s,%s,'importing',%s,%s,%s,%s,%s) RETURNING id""",
+                (stored_path, source_hash, inspection.get("schema_signature"), Json(inspection), parent_id, manifest, change_note),
             )
             version_id = int(cur.fetchone()[0])
         cur.execute("UPDATE pricing_kb_import_jobs SET version_id=%s WHERE id=%s", (version_id, job_id))
@@ -317,7 +326,8 @@ def run_next_job(worker_id: str | None = None) -> int | None:
                 conn.rollback()
                 return None
             cur.execute("""
-                SELECT j.id,j.upload_id,j.parent_version_id,j.config_json,u.stored_path,u.file_sha256,u.inspection_json
+                SELECT j.id,j.upload_id,j.parent_version_id,j.config_json,j.change_note,
+                       u.stored_path,u.file_sha256,u.inspection_json
                 FROM pricing_kb_import_jobs j JOIN pricing_kb_uploads u ON u.id=j.upload_id
                 WHERE j.status='queued' OR (j.status='running' AND j.lease_expires_at<NOW())
                 ORDER BY j.created_at FOR UPDATE OF j SKIP LOCKED LIMIT 1

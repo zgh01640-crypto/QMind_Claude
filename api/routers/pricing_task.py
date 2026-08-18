@@ -1350,19 +1350,31 @@ def _required_tool_choice(tool: dict[str, Any]) -> dict[str, Any]:
 def _run_tool_fallback(
     messages: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int
 ) -> dict[str, Any]:
-    response = _client(thinking=False).chat.completions.create(
-        model=_model(),
-        messages=messages,
-        tools=[tool],
-        tool_choice=_required_tool_choice(tool),
-        extra_body={"thinking": {"type": "disabled"}},
-        max_tokens=max_tokens,
-        stream=False,
-    )
-    message = response.choices[0].message
-    if not message.tool_calls:
-        raise ValueError("model returned no tool call")
-    return _parse_json_object(message.tool_calls[0].function.arguments)
+    last_error: Exception | None = None
+    for attempt in range(_MODEL_CALL_ATTEMPTS):
+        try:
+            response = _client(thinking=False).chat.completions.create(
+                model=_model(),
+                messages=messages,
+                tools=[tool],
+                tool_choice=_required_tool_choice(tool),
+                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=max_tokens,
+                stream=False,
+            )
+            message = response.choices[0].message
+            if not message.tool_calls:
+                raise ValueError("model returned no tool call")
+            return _parse_json_object(message.tool_calls[0].function.arguments)
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"[pricing-task] non-stream tool error attempt={attempt + 1}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            _wait_before_model_retry(attempt, "non-stream tool", exc)
+    raise last_error or RuntimeError("non-stream tool failed")
 
 
 def _run_stream_tool(messages: list[dict[str, Any]], tool: dict[str, Any], max_tokens: int, reasoning_parts: list[str]) -> dict[str, Any]:
@@ -1421,11 +1433,12 @@ def _stream_tool_call(messages: list[dict[str, Any]], tool: dict[str, Any], max_
             except ValueError as exc:
                 last_error = exc
                 print(
-                    f"[pricing-task] stream returned invalid tool arguments; using fallback: {exc}",
+                    f"[pricing-task] stream returned invalid tool arguments attempt={attempt + 1}: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
-                break
+                _wait_before_model_retry(attempt, "stream tool arguments", exc)
+                continue
             yield ("tool_result", tool_result)
             return
         except Exception as exc:
@@ -4697,7 +4710,6 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int, user: CurrentUs
         run_id = None
         try:
             _ensure_schema(conn)
-            require_task_owner(conn, user, batch_id, batch=True)
             require_task_owner(conn, user, task_id)
             with conn.cursor() as cur:
                 cur.execute(

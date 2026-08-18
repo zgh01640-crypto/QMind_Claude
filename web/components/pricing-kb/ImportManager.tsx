@@ -37,6 +37,7 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [raw, setRaw] = useState<Set<string>>(new Set())
   const [job, setJob] = useState<PricingKbImportJob | null>(null)
+  const [changeNote, setChangeNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -118,8 +119,10 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
         profile_id: profileId,
         selected_tables: Array.from(selected),
         unknown_tables: Object.fromEntries(Array.from(raw).map(name => [name, 'raw'])),
+        change_note: changeNote.trim(),
       })
       setJob(await fetchPricingKbImportJob(created.id))
+      setChangeNote('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建导入任务失败')
     } finally { setBusy(false) }
@@ -187,6 +190,22 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
             </button>
           </div>
           <p className="mt-2 text-xs text-gray-500">{currentProfile?.description || '选择一个导入模板'}</p>
+
+          <label className="mt-5 block">
+            <span className="flex items-center justify-between gap-3 text-xs font-medium text-gray-700">
+              <span>本次更新备注</span>
+              <span className="font-mono text-[10px] text-gray-400">{changeNote.length}/1000</span>
+            </span>
+            <textarea
+              value={changeNote}
+              maxLength={1000}
+              rows={3}
+              onChange={event => setChangeNote(event.target.value)}
+              placeholder="例如：补充安装工程定额，修正金属阀门候选关系与项目特征定义。"
+              className="mt-2 w-full resize-y rounded border border-gray-300 bg-white px-3 py-2.5 text-sm leading-6 text-gray-800 shadow-sm outline-none transition placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            />
+            <span className="mt-1.5 block text-xs text-gray-500">随导入任务保存，完成后显示在对应知识库版本中。</span>
+          </label>
 
           <div className="mt-5 overflow-hidden rounded border border-gray-200">
             <div className="grid grid-cols-[minmax(0,1fr)_90px_72px] border-b border-gray-200 bg-gray-50 px-3 py-2.5 text-xs font-medium text-gray-600">
@@ -259,6 +278,11 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
                 <span>{job.completed_tables}/{job.total_tables} 张表</span>
                 <span>{job.processed_rows.toLocaleString()} 行 · {progress}%</span>
               </div>
+              {job.change_note && (
+                <div className="mt-3 border-l-2 border-blue-200 pl-3 text-xs leading-5 text-gray-600">
+                  <span className="font-medium text-gray-800">更新备注：</span>{job.change_note}
+                </div>
+              )}
               {!terminal.has(job.status) && (
                 <button type="button" onClick={() => cancelPricingKbImportJob(job.id).then(() => fetchPricingKbImportJob(job.id).then(setJob))} className="mt-3 text-xs font-medium text-red-600 hover:text-red-700">
                   取消任务
@@ -286,6 +310,12 @@ export default function ImportManager({ onRefresh }: { onRefresh?: () => void })
                 </div>
                 <div className="mt-2 truncate font-mono text-xs text-gray-400">{version.source_file_sha256.slice(0, 20)}</div>
                 <div className="mt-1 text-xs text-gray-500">{new Date(version.imported_at).toLocaleString('zh-CN')}</div>
+                <div
+                  title={version.change_note || undefined}
+                  className={`mt-2 line-clamp-3 border-l-2 pl-2 text-xs leading-5 ${version.change_note ? 'border-blue-200 text-gray-600' : 'border-gray-200 text-gray-400'}`}
+                >
+                  {version.change_note || '未填写本次更新备注'}
+                </div>
                 {!version.is_active && ['validated', 'retired'].includes(version.status) && (
                   <button
                     type="button"

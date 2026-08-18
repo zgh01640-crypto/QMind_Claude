@@ -77,4 +77,5 @@ def version_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "is_active": bool(row[12]),
         "parent_version_id": int(row[13]) if len(row) > 13 and row[13] is not None else None,
         "manifest_sha256": row[14] if len(row) > 14 else None,
+        "change_note": row[15] if len(row) > 15 else None,
     }

@@ -41,6 +41,14 @@ class CurrentUser:
         return self.role == "admin"
 
 
+def is_auth_enabled() -> bool:
+    """认证默认开启；仅本地测试可通过 AUTH_ENABLED=0 暂时关闭。"""
+    return os.getenv("AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+TEST_USER = CurrentUser(id=0, username="test-admin", display_name="测试管理员", role="admin")
+
+
 def _password_hasher():
     try:
         from argon2 import PasswordHasher
@@ -233,6 +241,8 @@ def resolve_session(token: str | None) -> CurrentUser | None:
 
 
 def current_user(request: Request) -> CurrentUser:
+    if not is_auth_enabled():
+        return TEST_USER
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="请先登录")

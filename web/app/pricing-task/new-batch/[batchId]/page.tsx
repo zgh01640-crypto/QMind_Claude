@@ -523,11 +523,15 @@ function updateResultFromEvent(prev: ItemResult, evt: PricingTaskEvent): ItemRes
       issues: evt.issues ?? [],
       validation: evt.validation ?? { status: 'pending', validations: [], issues: [] },
     }
-    return withToolActivities(
+    const result = withToolActivities(
       { ...prev, chapterRuleCheck },
       { id: 'chapter_rule_check', status: chapterRuleCheck.validation.status === 'failed' ? 'error' : 'success', output: `命中 ${chapterRuleCheck.rules.filter(rule => rule.matched).length} 条章节规则` },
-      { id: 'quota_candidates', status: 'running' },
     )
+    // The backend emits chapter_rule_check both before candidate lookup and after
+    // final quota validation. Do not regress an already returned candidate result.
+    return prev.quotaCandidates
+      ? result
+      : withToolActivities(result, { id: 'quota_candidates', status: 'running' })
   }
   if (evt.type === 'quota_candidates') {
     return withToolActivities(
@@ -786,6 +790,7 @@ export default function PricingTaskBatchPage() {
   const batchId = Number(params.batchId)
   const [batch, setBatch] = useState<PricingTaskBatch | null>(null)
   const [items, setItems] = useState<BoqItem[]>([])
+  const [listQuery, setListQuery] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [focusedItemId, setFocusedItemId] = useState<number | null>(null)
   const [expandedItemId, setExpandedItemId] = useState<number | null>(null)
@@ -808,9 +813,16 @@ export default function PricingTaskBatchPage() {
   const detailResult = detailItemId ? itemResults.get(detailItemId) : undefined
   const reviewItem = reviewItemId ? items.find(item => item.id === reviewItemId) : undefined
   const reviewResult = reviewItemId ? itemResults.get(reviewItemId) : undefined
+  const queryTerms = listQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  const visibleItems = queryTerms.length === 0
+    ? items
+    : items.filter(item => {
+      const searchable = `${item.item_code ?? ''} ${item.item_name ?? ''}`.toLocaleLowerCase()
+      return queryTerms.every(term => searchable.includes(term))
+    })
   const selectedCount = selectedIds.size
   const succeededCount = Array.from(batchStates.values()).filter(state => state === 'succeeded').length
-  const waitingItemIds = items
+  const waitingItemIds = visibleItems
     .filter(item => {
       const state = batchStates.get(item.id)
       return !state || state === 'idle' || state === 'queued'
@@ -818,6 +830,8 @@ export default function PricingTaskBatchPage() {
     .map(item => item.id)
   const waitingCount = waitingItemIds.length
   const failedItemIds = items.filter(item => batchStates.get(item.id) === 'failed').map(item => item.id)
+  const visibleFailedItemIds = visibleItems.filter(item => batchStates.get(item.id) === 'failed').map(item => item.id)
+  const visibleFailedCount = visibleFailedItemIds.length
   const failedCount = failedItemIds.length
   const doneCount = succeededCount + failedCount
   const completedItems = items
@@ -908,15 +922,48 @@ export default function PricingTaskBatchPage() {
   }
 
   function invertSelected() {
-    setSelectedIds(prev => new Set(items.filter(item => !prev.has(item.id)).map(item => item.id)))
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      visibleItems.forEach(item => {
+        if (next.has(item.id)) next.delete(item.id)
+        else next.add(item.id)
+      })
+      return next
+    })
+  }
+
+  function selectVisible() {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      visibleItems.forEach(item => next.add(item.id))
+      return next
+    })
+  }
+
+  function clearVisible() {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      visibleItems.forEach(item => next.delete(item.id))
+      return next
+    })
   }
 
   function selectFailed() {
-    setSelectedIds(new Set(failedItemIds))
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      visibleItems.forEach(item => next.delete(item.id))
+      visibleFailedItemIds.forEach(itemId => next.add(itemId))
+      return next
+    })
   }
 
   function selectWaiting() {
-    setSelectedIds(new Set(waitingItemIds))
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      visibleItems.forEach(item => next.delete(item.id))
+      waitingItemIds.forEach(itemId => next.add(itemId))
+      return next
+    })
   }
 
   async function runConversionAndCoefficient(itemId: number, runId: number, initial: ItemResult) {
@@ -1060,7 +1107,7 @@ export default function PricingTaskBatchPage() {
       return next
     })
     let cursor = 0
-    const workerCount = Math.min(4, queue.length)
+    const workerCount = Math.min(20, queue.length)
     async function worker() {
       while (!stopRef.current) {
         const index = cursor
@@ -1144,10 +1191,32 @@ export default function PricingTaskBatchPage() {
               <h2 className="text-sm font-semibold text-gray-900">清单选择</h2>
               <span className="text-xs text-gray-500">{selectedCount}/{items.length}</span>
             </div>
+            <div className="relative mt-2.5">
+              <input
+                type="search"
+                value={listQuery}
+                onChange={event => setListQuery(event.target.value)}
+                placeholder="查询清单编码或名称"
+                aria-label="查询清单编码或名称"
+                className="w-full rounded-md border border-gray-300 bg-gray-50 py-2 pl-3 pr-16 text-xs text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
+              />
+              {listQuery && (
+                <button
+                  type="button"
+                  onClick={() => setListQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[11px] text-gray-500 transition hover:bg-gray-200 hover:text-gray-800"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+            <div className="mt-1.5 text-[11px] text-gray-400">
+              显示 {visibleItems.length}/{items.length} 条，选择操作仅作用于当前结果
+            </div>
             <div className="mt-2 flex flex-wrap gap-2">
-              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set(items.map(item => item.id)))} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">全选</button>
-              <button type="button" disabled={running} onClick={() => setSelectedIds(new Set())} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">清空</button>
-              <button type="button" disabled={running} onClick={invertSelected} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">反选</button>
+              <button type="button" disabled={running || visibleItems.length === 0} onClick={selectVisible} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">全选</button>
+              <button type="button" disabled={running || visibleItems.length === 0} onClick={clearVisible} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">清空</button>
+              <button type="button" disabled={running || visibleItems.length === 0} onClick={invertSelected} className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">反选</button>
               <button
                 type="button"
                 disabled={running || waitingCount === 0}
@@ -1159,17 +1228,17 @@ export default function PricingTaskBatchPage() {
               </button>
               <button
                 type="button"
-                disabled={running || failedCount === 0}
+                disabled={running || visibleFailedCount === 0}
                 onClick={selectFailed}
-                title={failedCount > 0 ? `选择 ${failedCount} 条失败清单` : '当前没有失败清单'}
+                title={visibleFailedCount > 0 ? `选择当前结果中的 ${visibleFailedCount} 条失败清单` : '当前结果中没有失败清单'}
                 className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                失败{failedCount > 0 ? ` ${failedCount}` : ''}
+                失败{visibleFailedCount > 0 ? ` ${visibleFailedCount}` : ''}
               </button>
             </div>
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-gray-100">
-            {items.map(item => {
+            {visibleItems.map(item => {
               const state = batchStates.get(item.id)
               const result = itemResults.get(item.id)
               const focused = focusedItemId === item.id
@@ -1221,6 +1290,12 @@ export default function PricingTaskBatchPage() {
                 </div>
               )
             })}
+            {visibleItems.length === 0 && (
+              <div className="px-4 py-12 text-center">
+                <div className="text-sm font-medium text-gray-600">没有匹配的清单</div>
+                <div className="mt-1 text-xs text-gray-400">请调整清单编码或名称关键词</div>
+              </div>
+            )}
           </div>
         </aside>
 

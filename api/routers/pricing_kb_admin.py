@@ -41,6 +41,7 @@ class ImportJobCreate(BaseModel):
     parent_version_id: int | None = None
     selected_tables: list[str] = Field(default_factory=list)
     unknown_tables: dict[str, str] = Field(default_factory=dict)
+    change_note: str | None = Field(default=None, max_length=1000)
 
 
 def _conn():
@@ -207,9 +208,12 @@ def create_import_job(body: ImportJobCreate):
             if len(selected) < len(KNOWN_TABLES) and parent_id is None:
                 raise HTTPException(status_code=409, detail="partial import requires an active parent version")
             config = {"selected_tables": sorted(selected), "unknown_tables": raw_tables}
-            cur.execute("""INSERT INTO pricing_kb_import_jobs(upload_id,profile_id,parent_version_id,config_json,total_tables)
-                VALUES(%s,%s,%s,%s,%s) RETURNING id""",
-                (body.upload_id, body.profile_id, parent_id, Json(config), len(selected) + len(raw_tables)))
+            change_note = (body.change_note or "").strip() or None
+            cur.execute("""INSERT INTO pricing_kb_import_jobs(
+                    upload_id,profile_id,parent_version_id,config_json,change_note,total_tables
+                ) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (body.upload_id, body.profile_id, parent_id, Json(config), change_note,
+                 len(selected) + len(raw_tables)))
             job_id = int(cur.fetchone()[0])
         conn.commit()
         return {"id": job_id, "status": "queued", "config": config, "parent_version_id": parent_id}
@@ -223,13 +227,15 @@ def get_import_job(job_id: int):
     try:
         with conn.cursor() as cur:
             cur.execute("""SELECT id,upload_id,profile_id,parent_version_id,version_id,config_json,status,current_table,
-                completed_tables,total_tables,processed_rows,progress_json,error_message,attempts,created_at,started_at,finished_at
+                completed_tables,total_tables,processed_rows,progress_json,error_message,attempts,created_at,started_at,finished_at,
+                change_note
                 FROM pricing_kb_import_jobs WHERE id=%s""", (job_id,))
             row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="import job not found")
         keys = ["id","upload_id","profile_id","parent_version_id","version_id","config","status","current_table",
-                "completed_tables","total_tables","processed_rows","progress","error_message","attempts","created_at","started_at","finished_at"]
+                "completed_tables","total_tables","processed_rows","progress","error_message","attempts","created_at","started_at","finished_at",
+                "change_note"]
         return dict(zip(keys, row))
     finally:
         conn.close()
