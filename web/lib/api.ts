@@ -1398,6 +1398,7 @@ export interface PricingTaskBatch {
   finished_at: string | null
   kb_version_id?: number | null
   consistency_rate: number | null
+  concurrency_limit?: number
 }
 
 export interface PricingTaskRun {
@@ -1418,6 +1419,12 @@ export interface PricingTaskRun {
   finished_at: string | null
   reasoning_text?: string | null
   confirmed_results?: PricingTaskConfirmedResult[]
+  execution_id?: number | null
+  attempt_count?: number
+  current_tool?: string | null
+  current_tool_status?: string | null
+  current_tool_output?: string | null
+  updated_at?: string | null
 }
 
 export interface PricingTaskChapterRule {
@@ -1468,6 +1475,29 @@ export interface PricingTaskBatchDetail {
   batch: PricingTaskBatch
   items: BoqItem[]
   runs: PricingTaskBatchItemRun[]
+  execution?: BackgroundBatchExecution | null
+}
+
+export interface BackgroundBatchExecution {
+  id: number
+  status: string
+  concurrency_limit: number
+  selected_count: number
+  completed_count: number
+  failed_count: number
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface BackgroundBatchEvent {
+  id: number
+  execution_id: number | null
+  item_run_id: number | null
+  boq_item_id: number | null
+  event_type: string
+  payload: Record<string, any>
+  created_at: string
 }
 
 export interface PricingTaskEvaluation {
@@ -1852,6 +1882,9 @@ export const fetchPricingTaskBatches = () => req<PricingTaskBatch[]>('/api/prici
 
 export const fetchNewPricingTaskBatches = () => req<PricingTaskBatch[]>('/api/pricing-task-new-batches')
 
+export const fetchBackgroundPricingTaskBatches = () =>
+  req<PricingTaskBatch[]>('/api/pricing-task-background-batches')
+
 export const fetchPricingTaskBatch = (id: number) => req<PricingTaskBatch>(`/api/pricing-task-batches/${id}`)
 
 export const fetchPricingTaskBatchDetail = (id: number) =>
@@ -1881,6 +1914,64 @@ export async function createNewPricingTaskBatch(body: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+export async function createBackgroundPricingTaskBatch(body: {
+  name: string
+  boq_project_id: number
+  quota_library_ids: number[]
+  manual_project_id: number
+  kb_version_id?: number | null
+}): Promise<{ id: number }> {
+  return req<{ id: number }>('/api/pricing-task-background-batches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function startBackgroundPricingTaskBatch(batchId: number, boqItemIds: number[]) {
+  return req<BackgroundBatchExecution>(`/api/pricing-task-background-batches/${batchId}/executions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boq_item_ids: boqItemIds }),
+  })
+}
+
+export async function stopBackgroundPricingTaskBatch(batchId: number, executionId: number) {
+  return req<{ ok: boolean }>(
+    `/api/pricing-task-background-batches/${batchId}/executions/${executionId}/stop`,
+    { method: 'POST' },
+  )
+}
+
+export async function streamBackgroundPricingTaskBatchEvents(
+  batchId: number,
+  afterId: number,
+  onEvent: (event: BackgroundBatchEvent) => void,
+) {
+  const response = await fetch(
+    `${API}/api/pricing-task-background-batches/${batchId}/events-stream?after_id=${afterId}`,
+  )
+  if (!response.ok || !response.body) throw new Error(`事件流连接失败 ${response.status}`)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split('\n\n')
+      buffer = blocks.pop() || ''
+      for (const block of blocks) {
+        const line = block.split('\n').find((part) => part.startsWith('data: '))
+        if (line) onEvent(JSON.parse(line.slice(6)) as BackgroundBatchEvent)
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 export async function deletePricingTaskBatch(id: number) {
@@ -1982,6 +2073,15 @@ export async function exportPricingTaskDetailReportExcel(taskId: number) {
 
 export async function exportNewPricingTaskBatchDetailReportExcel(batchId: number) {
   const response = await fetch(`${API}/api/pricing-task-new-batches/${batchId}/detail-report/export`)
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.detail || `请求失败 ${response.status}`)
+  }
+  return response.blob()
+}
+
+export async function exportBackgroundPricingTaskBatchDetailReportExcel(batchId: number) {
+  const response = await fetch(`${API}/api/pricing-task-background-batches/${batchId}/detail-report/export`)
   if (!response.ok) {
     const err = await response.json().catch(() => ({}))
     throw new Error(err.detail || `请求失败 ${response.status}`)

@@ -10,8 +10,9 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
 from time import perf_counter, sleep
@@ -146,6 +147,7 @@ def _apply_schema(conn):
                 manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
                 kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
                 workflow_version     VARCHAR(16) NOT NULL DEFAULT 'legacy',
+                concurrency_limit    INTEGER NOT NULL DEFAULT 20,
                 owner_user_id       INTEGER REFERENCES users(id),
                 status              VARCHAR(16) NOT NULL DEFAULT 'active',
                 selected_count      INTEGER NOT NULL DEFAULT 0,
@@ -182,6 +184,15 @@ def _apply_schema(conn):
                 created_at          TIMESTAMP DEFAULT NOW(),
                 started_at          TIMESTAMP,
                 finished_at         TIMESTAMP,
+                execution_id       BIGINT,
+                attempt_count      INTEGER NOT NULL DEFAULT 0,
+                current_tool       VARCHAR(32),
+                current_tool_status VARCHAR(16),
+                current_tool_output TEXT,
+                next_attempt_at    TIMESTAMP,
+                lease_owner        TEXT,
+                lease_expires_at   TIMESTAMP,
+                updated_at         TIMESTAMP DEFAULT NOW(),
                 UNIQUE(batch_id, boq_item_id)
             )
             """
@@ -284,6 +295,51 @@ def _apply_schema(conn):
             "CREATE INDEX IF NOT EXISTS idx_ptmcr_source "
             "ON pricing_task_manual_comparison_reviews(source_type, source_run_id, created_at DESC)"
         )
+        cur.execute("ALTER TABLE pricing_task_batches ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER NOT NULL DEFAULT 20")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS execution_id BIGINT")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS current_tool VARCHAR(32)")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS current_tool_status VARCHAR(16)")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS current_tool_output TEXT")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS lease_owner TEXT")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP")
+        cur.execute("ALTER TABLE pricing_task_batch_item_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pricing_task_batch_executions (
+                id BIGSERIAL PRIMARY KEY,
+                batch_id INTEGER NOT NULL REFERENCES pricing_task_batches(id) ON DELETE CASCADE,
+                status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                concurrency_limit INTEGER NOT NULL,
+                selected_count INTEGER NOT NULL DEFAULT 0,
+                completed_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                stop_requested_at TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pricing_task_batch_events (
+                id BIGSERIAL PRIMARY KEY,
+                batch_id INTEGER NOT NULL REFERENCES pricing_task_batches(id) ON DELETE CASCADE,
+                execution_id BIGINT REFERENCES pricing_task_batch_executions(id) ON DELETE CASCADE,
+                item_run_id INTEGER REFERENCES pricing_task_batch_item_runs(id) ON DELETE CASCADE,
+                boq_item_id INTEGER,
+                event_type VARCHAR(32) NOT NULL,
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_background_execution_claim ON pricing_task_batch_executions(status, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_background_item_claim ON pricing_task_batch_item_runs(execution_id, status, next_attempt_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_background_events_batch ON pricing_task_batch_events(batch_id, id)")
     conn.commit()
 
 
@@ -353,6 +409,10 @@ class NewPricingTaskBatchCreate(BaseModel):
     quota_library_ids: list[int] = Field(default_factory=list)
     manual_project_id: int
     kb_version_id: Optional[int] = None
+
+
+class BackgroundBatchExecutionCreate(BaseModel):
+    boq_item_ids: list[int] = Field(min_length=1)
 
 
 class RunRequest(BaseModel):
@@ -3588,6 +3648,7 @@ def _row_to_batch(row) -> dict[str, Any]:
         "finished_at": row[14],
         "kb_version_id": int(row[15]) if len(row) > 15 and row[15] is not None else None,
         "consistency_rate": float(row[16]) if len(row) > 16 and row[16] is not None else None,
+        "concurrency_limit": int(row[17]) if len(row) > 17 and row[17] is not None else 20,
     }
 
 
@@ -3765,7 +3826,8 @@ def _batch_select_sql() -> str:
                    )
                    FROM pricing_task_batch_item_runs r
                    WHERE r.batch_id=b.id AND r.evaluation IS NOT NULL
-               ) AS consistency_rate
+               ) AS consistency_rate,
+               b.concurrency_limit
         FROM pricing_task_batches b
         JOIN boq_projects p ON p.id = b.boq_project_id
         LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
@@ -3818,12 +3880,35 @@ def list_new_pricing_task_batches(user: CurrentUser = Depends(current_user)):
         conn.close()
 
 
+@router.get("/pricing-task-background-batches")
+def list_background_pricing_task_batches(user: CurrentUser = Depends(current_user)):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                _batch_select_sql()
+                + """
+                WHERE b.status <> 'deleted' AND b.workflow_version='background' AND (%s OR b.owner_user_id=%s)
+                GROUP BY b.id, p.project_name, mp.project_name
+                ORDER BY b.created_at DESC
+                """,
+                (user.is_admin, user.id),
+            )
+            return [_row_to_batch(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def _create_pricing_task_batch_record(
     body: PricingTaskBatchCreate | NewPricingTaskBatchCreate,
     workflow_version: str,
     *,
     require_manual_project: bool,
     user: CurrentUser,
+    concurrency_limit: int | None = None,
 ):
     from db.connection import get_connection
 
@@ -3852,9 +3937,9 @@ def _create_pricing_task_batch_record(
                 """
                 INSERT INTO pricing_task_batches(
                     name, boq_project_id, quota_library_ids, manual_project_id,
-                    kb_version_id, workflow_version, owner_user_id
+                    kb_version_id, workflow_version, owner_user_id, concurrency_limit
                 )
-                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -3865,6 +3950,7 @@ def _create_pricing_task_batch_record(
                     kb_version_id,
                     workflow_version,
                     user.id,
+                    concurrency_limit or 20,
                 ),
             )
             batch_id = cur.fetchone()[0]
@@ -3891,6 +3977,18 @@ def create_new_pricing_task_batch(body: NewPricingTaskBatchCreate, user: Current
         "streamlined",
         require_manual_project=True,
         user=user,
+    )
+
+
+@router.post("/pricing-task-background-batches")
+def create_background_pricing_task_batch(body: NewPricingTaskBatchCreate, user: CurrentUser = Depends(current_user)):
+    configured = int(os.getenv("PRICING_BACKGROUND_BATCH_CONCURRENCY", "99"))
+    return _create_pricing_task_batch_record(
+        body,
+        "background",
+        require_manual_project=True,
+        user=user,
+        concurrency_limit=max(1, min(configured, 100)),
     )
 
 
@@ -3971,7 +4069,8 @@ def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(curr
                 SELECT boq_item_id, id, status, code_check, feature_check, chapter_rule_check, work_procedures,
                        quota_candidates, quota_match, evaluation, conversion_check,
                        coefficient_check, step_timings, error_message, created_at, finished_at,
-                       reasoning_text, confirmed_results, kb_version_id
+                       reasoning_text, confirmed_results, kb_version_id, execution_id, attempt_count,
+                       current_tool, current_tool_status, current_tool_output, updated_at
                 FROM pricing_task_batch_item_runs
                 WHERE batch_id=%s
                 ORDER BY created_at DESC, id DESC
@@ -4007,12 +4106,196 @@ def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(curr
                             "reasoning_text": r[16],
                             "confirmed_results": r[17] or [],
                             "kb_version_id": int(r[18]) if r[18] is not None else None,
+                            "execution_id": int(r[19]) if r[19] is not None else None,
+                            "attempt_count": int(r[20] or 0),
+                            "current_tool": r[21],
+                            "current_tool_status": r[22],
+                            "current_tool_output": r[23],
+                            "updated_at": r[24],
                         },
                     }
                 )
-        return {"batch": batch, "items": items, "runs": runs}
+            execution = None
+            if batch.get("status") in {"queued", "running", "stop_requested"} or batch.get("concurrency_limit"):
+                cur.execute(
+                    """SELECT id,status,concurrency_limit,selected_count,completed_count,failed_count,
+                              created_at,started_at,finished_at
+                       FROM pricing_task_batch_executions WHERE batch_id=%s
+                       ORDER BY id DESC LIMIT 1""",
+                    (batch_id,),
+                )
+                erow = cur.fetchone()
+                if erow:
+                    execution = {
+                        "id": int(erow[0]), "status": erow[1], "concurrency_limit": int(erow[2]),
+                        "selected_count": int(erow[3]), "completed_count": int(erow[4]),
+                        "failed_count": int(erow[5]), "created_at": erow[6], "started_at": erow[7],
+                        "finished_at": erow[8],
+                    }
+        return {"batch": batch, "items": items, "runs": runs, "execution": execution}
     finally:
         conn.close()
+
+
+def _background_event(conn, batch_id: int, execution_id: int | None, item_run_id: int | None,
+                      boq_item_id: int | None, event_type: str, payload: dict[str, Any]) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO pricing_task_batch_events(
+                   batch_id,execution_id,item_run_id,boq_item_id,event_type,payload
+               ) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (batch_id, execution_id, item_run_id, boq_item_id, event_type, Json(payload, dumps=_json_dumps)),
+        )
+        event_id = int(cur.fetchone()[0])
+    conn.commit()
+    return event_id
+
+
+@router.post("/pricing-task-background-batches/{batch_id}/executions")
+def start_background_batch_execution(
+    batch_id: int,
+    body: BackgroundBatchExecutionCreate,
+    user: CurrentUser = Depends(current_user),
+):
+    from db.connection import get_connection
+
+    item_ids = list(dict.fromkeys(body.boq_item_ids))
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT boq_project_id,kb_version_id,concurrency_limit,workflow_version
+                   FROM pricing_task_batches WHERE id=%s AND status<>'deleted' FOR UPDATE""",
+                (batch_id,),
+            )
+            batch_row = cur.fetchone()
+            if not batch_row or batch_row[3] != "background":
+                raise HTTPException(status_code=404, detail="后台批次不存在")
+            cur.execute(
+                """SELECT 1 FROM pricing_task_batch_executions
+                   WHERE batch_id=%s AND status IN ('queued','running','stop_requested') LIMIT 1""",
+                (batch_id,),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="当前批次已有正在执行的后台任务")
+            cur.execute(
+                "SELECT id FROM boq_items WHERE project_id=%s AND id=ANY(%s)",
+                (batch_row[0], item_ids),
+            )
+            valid_ids = {int(row[0]) for row in cur.fetchall()}
+            if valid_ids != set(item_ids):
+                raise HTTPException(status_code=400, detail="部分清单不属于当前批次工程")
+            cur.execute(
+                """INSERT INTO pricing_task_batch_executions(
+                       batch_id,status,concurrency_limit,selected_count
+                   ) VALUES(%s,'queued',%s,%s) RETURNING id""",
+                (batch_id, int(batch_row[2]), len(item_ids)),
+            )
+            execution_id = int(cur.fetchone()[0])
+            for item_id in item_ids:
+                cur.execute(
+                    """INSERT INTO pricing_task_batch_item_runs(
+                           batch_id,boq_item_id,boq_project_id,kb_version_id,status,execution_id,
+                           attempt_count,step_timings,confirmed_results,updated_at
+                       ) VALUES(%s,%s,%s,%s,'queued',%s,0,'{}'::jsonb,'[]'::jsonb,NOW())
+                       ON CONFLICT(batch_id,boq_item_id) DO UPDATE SET
+                           status='queued',execution_id=EXCLUDED.execution_id,attempt_count=0,
+                           reasoning_text='',code_check=NULL,feature_check=NULL,chapter_rule_check=NULL,
+                           work_procedures=NULL,quota_candidates=NULL,quota_match=NULL,evaluation=NULL,
+                           confirmed_results='[]'::jsonb,conversion_check=NULL,coefficient_check=NULL,
+                           step_timings='{}'::jsonb,error_message=NULL,current_tool=NULL,
+                           current_tool_status=NULL,current_tool_output=NULL,next_attempt_at=NULL,
+                           lease_owner=NULL,lease_expires_at=NULL,started_at=NULL,finished_at=NULL,updated_at=NOW()""",
+                    (batch_id, item_id, batch_row[0], batch_row[1], execution_id),
+                )
+            cur.execute(
+                """UPDATE pricing_task_batches SET status='queued',selected_count=(
+                       SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s
+                   ),completed_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs
+                       WHERE batch_id=%s AND status IN ('confirmed','completed','no_match')),
+                   failed_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s AND status='failed'),
+                   started_at=COALESCE(started_at,NOW()),finished_at=NULL,updated_at=NOW() WHERE id=%s""",
+                (batch_id, batch_id, batch_id, batch_id),
+            )
+        conn.commit()
+        _background_event(conn, batch_id, execution_id, None, None, "execution_queued", {"selected_count": len(item_ids)})
+        return {"id": execution_id, "status": "queued", "concurrency_limit": int(batch_row[2])}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@router.post("/pricing-task-background-batches/{batch_id}/executions/{execution_id}/stop")
+def stop_background_batch_execution(batch_id: int, execution_id: int, user: CurrentUser = Depends(current_user)):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE pricing_task_batch_executions
+                   SET status='stop_requested',stop_requested_at=NOW(),updated_at=NOW()
+                   WHERE id=%s AND batch_id=%s AND status IN ('queued','running') RETURNING id""",
+                (execution_id, batch_id),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=409, detail="当前执行无法停止")
+            cur.execute("UPDATE pricing_task_batches SET status='stop_requested',updated_at=NOW() WHERE id=%s", (batch_id,))
+        conn.commit()
+        _background_event(conn, batch_id, execution_id, None, None, "execution_stop_requested", {})
+        return {"id": execution_id, "status": "stop_requested"}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-task-background-batches/{batch_id}/events-stream")
+def stream_background_batch_events(batch_id: int, after_id: int = 0, user: CurrentUser = Depends(current_user)):
+    from db.connection import get_connection
+
+    check_conn = get_connection()
+    try:
+        _ensure_schema(check_conn)
+        require_task_owner(check_conn, user, batch_id, batch=True)
+    finally:
+        check_conn.close()
+
+    def generate():
+        cursor_id = max(0, after_id)
+        idle_rounds = 0
+        while idle_rounds < 30:
+            conn = get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id,execution_id,item_run_id,boq_item_id,event_type,payload,created_at
+                           FROM pricing_task_batch_events WHERE batch_id=%s AND id>%s ORDER BY id LIMIT 200""",
+                        (batch_id, cursor_id),
+                    )
+                    rows = cur.fetchall()
+                if rows:
+                    idle_rounds = 0
+                    for row in rows:
+                        cursor_id = int(row[0])
+                        yield _sse({"id": cursor_id, "execution_id": row[1], "item_run_id": row[2],
+                                    "boq_item_id": row[3], "event_type": row[4], "payload": row[5] or {},
+                                    "created_at": row[6]})
+                else:
+                    idle_rounds += 1
+                    yield ": keep-alive\n\n"
+            finally:
+                conn.close()
+            sleep(1)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -4661,7 +4944,7 @@ def export_pricing_task_detail_report(task_id: int, user: CurrentUser = Depends(
     )
 
 
-def _get_new_batch_detail_report(batch_id: int) -> dict[str, Any]:
+def _get_new_batch_detail_report(batch_id: int, workflow_version: str = "streamlined") -> dict[str, Any]:
     from db.connection import get_connection
 
     conn = get_connection()
@@ -4677,9 +4960,9 @@ def _get_new_batch_detail_report(batch_id: int) -> dict[str, Any]:
                 LEFT JOIN manual_boq_projects mp ON mp.id = b.manual_project_id
                 WHERE b.id=%s
                   AND b.status <> 'deleted'
-                  AND b.workflow_version='streamlined'
+                  AND b.workflow_version=%s
                 """,
-                (batch_id,),
+                (batch_id, workflow_version),
             )
             batch_row = cur.fetchone()
             if not batch_row:
@@ -4734,6 +5017,21 @@ def export_new_pricing_task_batch_detail_report(batch_id: int):
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
+    )
+
+
+@router.get("/pricing-task-background-batches/{batch_id}/detail-report/export")
+def export_background_pricing_task_batch_detail_report(batch_id: int):
+    report = _get_new_batch_detail_report(batch_id, "background")
+    stream = _build_pricing_task_detail_report_excel(report)
+    batch_name = str((report.get("task") or {}).get("name") or f"batch-{batch_id}")
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", batch_name).strip() or f"batch-{batch_id}"
+    filename = f"后台批量组价明细报表-{safe_name}.xlsx"
+    quoted = quote(filename)
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"},
     )
 
 
@@ -4941,6 +5239,111 @@ def pricing_task_coefficient_check_stream(run_id: int):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+def _batch_conversion_business_events(confirmed_items: list[dict[str, Any]], boq_item: dict[str, Any]):
+    if not confirmed_items:
+        yield "combo_adjustment_rules", {"items": []}
+        yield "conversion_check", {"conversion_check": {"items": [], "issues": ["未找到批量确认定额，无法进行组合换算。"]}}
+        return
+    preview = _default_conversion_check(confirmed_items)
+    yield "combo_adjustment_rules", {"items": preview["items"]}
+    if not any(item.get("adjustment_rules") for item in confirmed_items):
+        result = _default_conversion_check(
+            confirmed_items, "已确认定额均未查询到 tdek_tzhhs 组合定额规则。", boq_item=boq_item
+        )
+        yield "conversion_check", {"conversion_check": result}
+        return
+    input_payload = {
+        "boq_item": boq_item,
+        "confirmed_quotas": confirmed_items,
+        "combo_adjustment_rule_guide": COMBO_ADJUSTMENT_RULE_GUIDE,
+    }
+    context_text = _json_dumps(input_payload)
+    system_prompt = build_system_prompt()
+    analysis_prompt = (
+        "请对已确认的批量定额进行第六轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
+        "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
+        "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
+        "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n\n"
+        f"【输入数据】\n{context_text}"
+    )
+    conversion_analysis = ""
+    for event_type, data in _stream_text_completion(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": analysis_prompt}], 6000
+    ):
+        if event_type == "reasoning_token":
+            yield "reasoning_token", {"token": data}
+        elif event_type == "text_result":
+            conversion_analysis = data
+    submit_prompt = (
+        "请严格调用 submit_conversion_check 提交第六轮结构化换算建议。\n"
+        "必须覆盖每一条已确认定额。\n"
+        "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
+        "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
+        "不匹配时 matched=false，feature_value 和 calculated_times 填 0，并说明原因。\n\n"
+        f"【第六轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
+        f"【输入数据】\n{context_text}"
+    )
+    raw_result = _run_submit_conversion_check(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": submit_prompt}]
+    )
+    yield "conversion_check", {"conversion_check": _normalize_conversion_check(raw_result, confirmed_items, boq_item)}
+
+
+def _batch_coefficient_business_events(items: list[dict[str, Any]], boq_item: dict[str, Any]):
+    preview = _default_coefficient_check(items)
+    yield "coefficient_rules", {"items": preview["items"]}
+    if not items:
+        yield "coefficient_check", {"coefficient_check": {"items": [], "issues": ["未找到批量确认定额，无法进行系数换算。"]}}
+        return
+    if not any(item.get("coefficient_rules") for item in items):
+        yield "coefficient_check", {"coefficient_check": _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")}
+        return
+    input_payload = {
+        "boq_item": boq_item,
+        "quotas": items,
+        "rule_source": "tdek_tznhs.hssm",
+        "target_resource_type_guide": {
+            "1": "人工费/人工消耗量", "2": "材料费/材料消耗量",
+            "3": "机械费/机械消耗量", "all": "子目或相应子目整体乘以系数",
+        },
+        "output_note": "本轮只保存系数和作用对象，不计算调整后含量。",
+    }
+    context_text = _json_dumps(input_payload)
+    system_prompt = build_system_prompt()
+    analysis_prompt = (
+        "请进行第七轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
+        "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
+        "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
+        "本轮不计算调整后含量，只说明哪些工料机行应显示乘以的系数。\n\n"
+        f"【输入数据】\n{context_text}"
+    )
+    try:
+        analysis = ""
+        for event_type, data in _stream_text_completion(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": analysis_prompt}], 6000
+        ):
+            if event_type == "reasoning_token":
+                yield "reasoning_token", {"token": data}
+            elif event_type == "text_result":
+                analysis = data
+        submit_prompt = (
+            "请严格调用 submit_coefficient_check 提交第七轮结构化系数换算判断。\n"
+            "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
+            "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
+            "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
+            f"【第七轮分析】\n{analysis or '（无分析文本）'}\n\n"
+            f"【输入数据】\n{context_text}"
+        )
+        raw_result = _run_submit_coefficient_check(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": submit_prompt}]
+        )
+        result = _normalize_coefficient_check(raw_result, items)
+    except Exception as exc:
+        print(f"[pricing-task] batch coefficient model result fallback: {exc}", file=sys.stderr, flush=True)
+        result = _default_coefficient_check(items, f"模型结构化输出解析失败，已保留系数换算说明待人工复核：{exc}")
+    yield "coefficient_check", {"coefficient_check": result}
+
+
 @router.post("/pricing-task-batch-item-runs/{item_run_id}/conversion-check-stream")
 def pricing_task_batch_conversion_check_stream(item_run_id: int):
     from db.connection import get_connection
@@ -4949,82 +5352,24 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
         conn = get_connection()
         try:
             _ensure_schema(conn)
-            batch_id, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+            _, _, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
             confirmed_items = context["items"]
             step_timings = _load_batch_step_timings(conn, item_run_id)
             step_started_at = datetime.now()
             step_started_perf = perf_counter()
             yield _sse({"type": "conversion_check_start", "run_id": item_run_id, "total": len(confirmed_items)})
 
-            if not confirmed_items:
-                result = {"items": [], "issues": ["未找到批量确认定额，无法进行组合换算。"]}
-                yield _sse({"type": "combo_adjustment_rules", "items": []})
-                _update_batch_item_run(conn, item_run_id, conversion_check=result)
-                yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
-                yield _sse({"type": "done", "run_id": item_run_id})
-                return
-
-            input_payload = {
-                "boq_item": boq_item,
-                "confirmed_quotas": confirmed_items,
-                "combo_adjustment_rule_guide": COMBO_ADJUSTMENT_RULE_GUIDE,
-            }
-            context_text = _json_dumps(input_payload)
-            system_prompt = build_system_prompt()
-            combo_preview = _default_conversion_check(confirmed_items)
-            yield _sse({"type": "combo_adjustment_rules", "items": combo_preview["items"]})
-            if not any(item.get("adjustment_rules") for item in confirmed_items):
-                result = _default_conversion_check(
-                    confirmed_items,
-                    "已确认定额均未查询到 tdek_tzhhs 组合定额规则。",
-                    boq_item=boq_item,
-                )
-                _update_batch_item_run(conn, item_run_id, conversion_check=result)
-                yield _sse({"type": "conversion_check", "conversion_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
-                yield _sse({"type": "done", "run_id": item_run_id})
-                return
-
-            analysis_prompt = (
-                "请对已确认的批量定额进行第六轮组合定额换算分析。先进行分析，不要调用工具，不要输出 JSON。\n"
-                "本轮只允许使用输入中的 adjustment_rules（来自 tdek_tzhhs 并关联 tdek_tdezm）。\n"
-                "请逐条基础定额、逐条组合规则判断：项目特征中是否存在与 prompt、combo_name 增减指标匹配的数量特征。\n"
-                "若匹配，请提取数量特征原文和数值；不要自行输出材料替换、工料机调整或工程量系数调整。\n\n"
-                f"【输入数据】\n{context_text}"
-            )
-            conversion_analysis = ""
-            for event_type, data in _stream_text_completion(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": analysis_prompt},
-                ],
-                6000,
-            ):
-                if event_type == "reasoning_token":
-                    yield _sse({"type": "reasoning_token", "token": data})
-                elif event_type == "text_result":
-                    conversion_analysis = data
-
-            submit_prompt = (
-                "请严格调用 submit_conversion_check 提交第六轮结构化换算建议。\n"
-                "必须覆盖每一条已确认定额。\n"
-                "每个 item 的 adjustment_rules 必须覆盖输入中该定额的每一条组合规则；rule_index 必须与输入保持一致。\n"
-                "只判断项目特征数量特征是否匹配 prompt/combo_name 的增减指标；匹配时 matched=true，并填写 matched_feature 和 feature_value。\n"
-                "不匹配时 matched=false，feature_value 和 calculated_times 填 0，并说明原因。\n\n"
-                f"【第六轮分析】\n{conversion_analysis or '（无分析文本）'}\n\n"
-                f"【输入数据】\n{context_text}"
-            )
-            raw_result = _run_submit_conversion_check(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": submit_prompt},
-                ]
-            )
-            result = _normalize_conversion_check(raw_result, confirmed_items, boq_item)
+            result = None
+            for event_type, payload in _batch_conversion_business_events(confirmed_items, boq_item):
+                if event_type == "conversion_check":
+                    result = payload["conversion_check"]
+                yield _sse({"type": event_type, **payload})
+            if result is None:
+                raise RuntimeError("组合换算未生成结果")
             _update_batch_item_run(conn, item_run_id, conversion_check=result)
-            yield _sse({"type": "conversion_check", "conversion_check": result})
-            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(
+                conn, item_run_id, step_timings, 6, "组合换算", step_started_at, step_started_perf
+            )})
             yield _sse({"type": "done", "run_id": item_run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -5050,94 +5395,26 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
             conversion_check = _hydrate_conversion_combo_resources(
                 conn, batch_run.get("conversion_check") or {}, kb_version_id
             ) or {}
-            items = _coefficient_items_from_context(
-                conn, context["items"], conversion_check, kb_version_id
-            )
+            items = _coefficient_items_from_context(conn, context["items"], conversion_check, kb_version_id)
             step_timings = _load_batch_step_timings(conn, item_run_id)
             step_started_at = datetime.now()
             step_started_perf = perf_counter()
             yield _sse({"type": "coefficient_check_start", "run_id": item_run_id, "total": len(items)})
-            preview = _default_coefficient_check(items)
-            yield _sse({"type": "coefficient_rules", "items": preview["items"]})
 
-            if not items:
-                result = {"items": [], "issues": ["未找到批量确认定额，无法进行系数换算。"]}
-                _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
-                _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
-                yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
-                yield _sse({"type": "done", "run_id": item_run_id})
-                return
-
-            if not any(item.get("coefficient_rules") for item in items):
-                result = _default_coefficient_check(items, "所有定额均未查询到 tdek_tznhs 系数换算说明。")
-                _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
-                _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
-                yield _sse({"type": "coefficient_check", "coefficient_check": result})
-                yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
-                yield _sse({"type": "done", "run_id": item_run_id})
-                return
-
-            input_payload = {
-                "boq_item": boq_item,
-                "quotas": items,
-                "rule_source": "tdek_tznhs.hssm",
-                "target_resource_type_guide": {
-                    "1": "人工费/人工消耗量",
-                    "2": "材料费/材料消耗量",
-                    "3": "机械费/机械消耗量",
-                    "all": "子目或相应子目整体乘以系数",
-                },
-                "output_note": "本轮只保存系数和作用对象，不计算调整后含量。",
-            }
-            context_text = _json_dumps(input_payload)
-            system_prompt = build_system_prompt()
-            analysis_prompt = (
-                "请进行第七轮系数换算分析。先分析，不要调用工具，不要输出 JSON。\n"
-                "规则来源只允许使用输入中的 coefficient_rules（tdek_tznhs.hssm）。\n"
-                "请逐条判断项目特征是否触发 hssm；触发时提取命中特征、特征值、系数和作用对象。\n"
-                "本轮不计算调整后含量，只说明哪些工料机行应显示乘以的系数。\n\n"
-                f"【输入数据】\n{context_text}"
+            result = None
+            for event_type, payload in _batch_coefficient_business_events(items, boq_item):
+                if event_type == "coefficient_check":
+                    result = payload["coefficient_check"]
+                yield _sse({"type": event_type, **payload})
+            if result is None:
+                raise RuntimeError("系数换算未生成结果")
+            _update_batch_item_run(
+                conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now()
             )
-            try:
-                analysis = ""
-                for event_type, data in _stream_text_completion(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": analysis_prompt},
-                    ],
-                    6000,
-                ):
-                    if event_type == "reasoning_token":
-                        yield _sse({"type": "reasoning_token", "token": data})
-                    elif event_type == "text_result":
-                        analysis = data
-
-                submit_prompt = (
-                    "请严格调用 submit_coefficient_check 提交第七轮结构化系数换算判断。\n"
-                    "必须覆盖输入中的每一条定额、每一条 coefficient_rules；rule_index 必须保持一致。\n"
-                    "matched=true 时填写 matched_feature、feature_value、factor、target_resource_types 和 reason。\n"
-                    "target_resource_types 只能使用 1、2、3、all；不要输出调整后数量。\n\n"
-                    f"【第七轮分析】\n{analysis or '（无分析文本）'}\n\n"
-                    f"【输入数据】\n{context_text}"
-                )
-                raw_result = _run_submit_coefficient_check(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": submit_prompt},
-                    ]
-                )
-                result = _normalize_coefficient_check(raw_result, items)
-            except Exception as exc:
-                print(f"[pricing-task] batch coefficient model result fallback: {exc}", file=sys.stderr, flush=True)
-                result = _default_coefficient_check(
-                    items,
-                    f"模型结构化输出解析失败，已保留系数换算说明待人工复核：{exc}",
-                )
-            _update_batch_item_run(conn, item_run_id, coefficient_check=result, status="confirmed", finished_at=datetime.now())
             _refresh_batch_counts(conn, batch_id, finish_if_idle=True)
-            yield _sse({"type": "coefficient_check", "coefficient_check": result})
-            yield _sse({"type": "step_timing", **_finish_batch_step_timing(conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf)})
+            yield _sse({"type": "step_timing", **_finish_batch_step_timing(
+                conn, item_run_id, step_timings, 7, "系数换算", step_started_at, step_started_perf
+            )})
             yield _sse({"type": "done", "run_id": item_run_id})
         except HTTPException as exc:
             yield _sse({"type": "error", "error": str(exc.detail)})
@@ -5148,6 +5425,313 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+_BACKGROUND_TOOL_NEXT = {
+    "code_check": "feature_check",
+    "feature_check": "chapter_rule_check",
+    "chapter_rule_check": "quota_candidates",
+    "quota_candidates": "quota_match",
+    "quota_match": "evaluation",
+}
+
+
+def _background_tool_output(event_type: str, data: dict[str, Any]) -> str:
+    if event_type == "code_check":
+        return "编码与名称一致" if data.get("is_consistent") else "编码核查完成"
+    if event_type == "feature_check":
+        return "项目特征完整" if data.get("is_complete") else "项目特征存在缺失"
+    if event_type == "chapter_rule_check":
+        return f"命中 {sum(1 for rule in data.get('rules', []) if rule.get('matched'))} 条章节规则"
+    if event_type == "quota_candidates":
+        return f"检索到 {data.get('total', 0)} 条候选定额"
+    if event_type == "quota_match":
+        return f"输出 {len(data.get('matches', []))} 条定额"
+    if event_type == "evaluation":
+        return f"命中 {data.get('hit_count', 0)}，遗漏 {data.get('missed_count', 0)}，额外 {data.get('extra_count', 0)}"
+    return "执行完成"
+
+
+def _set_background_tool(conn, batch_id: int, execution_id: int, item_run_id: int, boq_item_id: int,
+                         tool_id: str, status: str, output: str | None = None) -> None:
+    _update_batch_item_run(
+        conn, item_run_id, current_tool=tool_id, current_tool_status=status,
+        current_tool_output=output, updated_at=datetime.now(),
+        lease_expires_at=datetime.now() + timedelta(minutes=15),
+    )
+    _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id,
+                      "tool_started" if status == "running" else "tool_completed",
+                      {"tool_id": tool_id, "status": status, "output": output})
+
+
+def _execute_background_conversion(conn, batch_id: int, execution_id: int, item_run_id: int, boq_item_id: int) -> None:
+    _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "conversion_check", "running")
+    _, _, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+    started_at, started_perf = datetime.now(), perf_counter()
+    result = None
+    for event_type, payload in _batch_conversion_business_events(context["items"], boq_item):
+        if event_type == "reasoning_token":
+            continue
+        if event_type == "conversion_check":
+            result = payload["conversion_check"]
+        else:
+            _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, event_type, payload)
+    if result is None:
+        raise RuntimeError("组合换算未生成结果")
+    timings = _load_batch_step_timings(conn, item_run_id)
+    timing = _finish_step_timing(conn, None, timings, 6, "组合换算", started_at, started_perf)
+    _update_batch_item_run(
+        conn, item_run_id, conversion_check=result, step_timings=timings, updated_at=datetime.now()
+    )
+    _set_background_tool(
+        conn, batch_id, execution_id, item_run_id, boq_item_id, "conversion_check", "success",
+        f"完成 {len(result.get('items', []))} 条定额检查",
+    )
+    _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "step_timing", timing)
+
+
+def _execute_background_coefficient(conn, batch_id: int, execution_id: int, item_run_id: int, boq_item_id: int) -> None:
+    _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "coefficient_check", "running")
+    _, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+    kb_version_id = int(batch_run["kb_version_id"])
+    conversion = _hydrate_conversion_combo_resources(
+        conn, batch_run.get("conversion_check") or {}, kb_version_id
+    ) or {}
+    items = _coefficient_items_from_context(conn, context["items"], conversion, kb_version_id)
+    started_at, started_perf = datetime.now(), perf_counter()
+    result = None
+    for event_type, payload in _batch_coefficient_business_events(items, boq_item):
+        if event_type == "reasoning_token":
+            continue
+        if event_type == "coefficient_check":
+            result = payload["coefficient_check"]
+        else:
+            _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, event_type, payload)
+    if result is None:
+        raise RuntimeError("系数换算未生成结果")
+    timings = _load_batch_step_timings(conn, item_run_id)
+    timing = _finish_step_timing(conn, None, timings, 7, "系数换算", started_at, started_perf)
+    _update_batch_item_run(
+        conn, item_run_id, coefficient_check=result, step_timings=timings, updated_at=datetime.now()
+    )
+    _set_background_tool(
+        conn, batch_id, execution_id, item_run_id, boq_item_id, "coefficient_check", "success",
+        f"完成 {len(result.get('items', []))} 条定额检查",
+    )
+    _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "step_timing", timing)
+
+
+def _refresh_background_execution(conn, execution_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT batch_id,status,selected_count FROM pricing_task_batch_executions WHERE id=%s FOR UPDATE", (execution_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.rollback()
+            return
+        batch_id, execution_status, selected = int(row[0]), row[1], int(row[2])
+        cur.execute(
+            """SELECT COUNT(*) FILTER (WHERE status IN ('confirmed','completed','no_match')),
+                      COUNT(*) FILTER (WHERE status='failed'),
+                      COUNT(*) FILTER (WHERE status IN ('queued','running','retrying'))
+               FROM pricing_task_batch_item_runs WHERE execution_id=%s""",
+            (execution_id,),
+        )
+        completed, failed, pending = (int(v or 0) for v in cur.fetchone())
+        final_status = None
+        if pending == 0:
+            final_status = "stopped" if execution_status == "stop_requested" else "completed"
+        cur.execute(
+            """UPDATE pricing_task_batch_executions SET completed_count=%s,failed_count=%s,
+                      status=COALESCE(%s,status),finished_at=CASE WHEN %s IS NULL THEN finished_at ELSE NOW() END,
+                      updated_at=NOW() WHERE id=%s""",
+            (completed, failed, final_status, final_status, execution_id),
+        )
+        cur.execute(
+            """UPDATE pricing_task_batches SET
+                 selected_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s),
+                 completed_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s AND status IN ('confirmed','completed','no_match')),
+                 failed_count=(SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE batch_id=%s AND status='failed'),
+                 status=COALESCE(%s,status),finished_at=CASE WHEN %s IS NULL THEN finished_at ELSE NOW() END,
+                 updated_at=NOW() WHERE id=%s""",
+            (batch_id, batch_id, batch_id, final_status, final_status, batch_id),
+        )
+    conn.commit()
+    if final_status:
+        _background_event(conn, batch_id, execution_id, None, None, "execution_finished",
+                          {"status": final_status, "selected_count": selected, "completed_count": completed, "failed_count": failed})
+
+
+def _run_background_item(item_run_id: int, worker_id: str) -> None:
+    from db.connection import get_connection
+
+    conn = get_connection()
+    batch_id = execution_id = boq_item_id = None
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT r.batch_id,r.execution_id,r.boq_item_id,b.quota_library_ids,b.manual_project_id,b.kb_version_id,
+                          i.item_code,i.item_name,i.item_description,i.unit,i.quantity,i.project_id,r.attempt_count
+                   FROM pricing_task_batch_item_runs r
+                   JOIN pricing_task_batches b ON b.id=r.batch_id JOIN boq_items i ON i.id=r.boq_item_id
+                   WHERE r.id=%s""",
+                (item_run_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return
+        batch_id, execution_id, boq_item_id = int(row[0]), int(row[1]), int(row[2])
+        boq_item = {"id": boq_item_id, "item_code": row[6], "item_name": row[7], "item_description": row[8],
+                    "unit": row[9], "quantity": float(row[10]) if row[10] is not None else None, "project_id": int(row[11])}
+        _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "code_check", "running")
+        fields: dict[str, Any] = {}
+        chapter_seen = False
+        for event_type, data in _stream_pricing_item(conn, boq_item, row[3] or [], row[4], None, None, int(row[5]), persist_run=False):
+            if event_type in {"reasoning_token", "judgment"}:
+                continue
+            if event_type == "step_timing":
+                timings = dict(fields.get("step_timings") or {})
+                timings[str(data["step_no"])] = data
+                fields["step_timings"] = timings
+                _update_batch_item_run(conn, item_run_id, step_timings=timings, updated_at=datetime.now())
+                _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "step_timing", data)
+                continue
+            if event_type not in _BACKGROUND_TOOL_NEXT and event_type != "evaluation":
+                continue
+            if event_type == "chapter_rule_check" and chapter_seen:
+                fields[event_type] = data
+                _update_batch_item_run(conn, item_run_id, chapter_rule_check=data, updated_at=datetime.now())
+                continue
+            chapter_seen = chapter_seen or event_type == "chapter_rule_check"
+            fields[event_type] = data
+            _update_batch_item_run(conn, item_run_id, **{event_type: data, "updated_at": datetime.now()})
+            _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, event_type, "success",
+                                 _background_tool_output(event_type, data))
+            next_tool = _BACKGROUND_TOOL_NEXT.get(event_type)
+            if next_tool:
+                _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, next_tool, "running")
+        matches = (fields.get("quota_match") or {}).get("matches", [])
+        confirmed = _confirmed_results_from_matches(conn, matches, int(row[5]))
+        _update_batch_item_run(conn, item_run_id, confirmed_results=confirmed)
+        if not matches:
+            _update_batch_item_run(conn, item_run_id, status="no_match", current_tool_status="success",
+                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+        else:
+            _execute_background_conversion(conn, batch_id, execution_id, item_run_id, boq_item_id)
+            _execute_background_coefficient(conn, batch_id, execution_id, item_run_id, boq_item_id)
+            _update_batch_item_run(conn, item_run_id, status="confirmed", current_tool_status="success",
+                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+        _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_succeeded", {"status": "confirmed" if matches else "no_match"})
+    except Exception as exc:
+        conn.rollback()
+        if item_run_id:
+            with conn.cursor() as cur:
+                cur.execute("SELECT attempt_count FROM pricing_task_batch_item_runs WHERE id=%s", (item_run_id,))
+                attempt_row = cur.fetchone()
+            attempt = int(attempt_row[0] or 1) if attempt_row else 3
+            if attempt < 3:
+                delay = 5 if attempt == 1 else 20
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE pricing_task_batch_item_runs SET status='retrying',error_message=%s,
+                           current_tool_status='retrying',current_tool_output=%s,
+                           next_attempt_at=NOW()+(%s * INTERVAL '1 second'),lease_owner=NULL,
+                           lease_expires_at=NULL,updated_at=NOW() WHERE id=%s""",
+                        (str(exc), f"第 {attempt} 次执行失败，{delay} 秒后重试", delay, item_run_id),
+                    )
+                conn.commit()
+                if batch_id and execution_id and boq_item_id:
+                    _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_retrying",
+                                      {"attempt": attempt, "delay_seconds": delay, "error": str(exc)})
+            else:
+                _update_batch_item_run(conn, item_run_id, status="failed", error_message=str(exc),
+                                       current_tool_status="error", current_tool_output=str(exc),
+                                       finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+                if batch_id and execution_id and boq_item_id:
+                    _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_failed", {"error": str(exc)})
+    finally:
+        if execution_id:
+            _refresh_background_execution(conn, execution_id)
+        conn.close()
+
+
+def _claim_background_items(worker_id: str) -> list[int]:
+    from db.connection import get_connection
+
+    conn = get_connection()
+    claimed: list[int] = []
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE pricing_task_batch_item_runs SET status='retrying',lease_owner=NULL,lease_expires_at=NULL,
+                          next_attempt_at=NOW(),updated_at=NOW()
+                   WHERE status='running' AND execution_id IS NOT NULL AND lease_expires_at<NOW()"""
+            )
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM pricing_task_batch_executions WHERE status IN ('queued','running','stop_requested') ORDER BY id")
+            execution_ids = [int(row[0]) for row in cur.fetchall()]
+        for execution_id in execution_ids:
+            with conn.cursor() as cur:
+                cur.execute("SELECT batch_id,status,concurrency_limit FROM pricing_task_batch_executions WHERE id=%s FOR UPDATE", (execution_id,))
+                execution = cur.fetchone()
+                if not execution:
+                    conn.rollback()
+                    continue
+                batch_id, status, limit = int(execution[0]), execution[1], int(execution[2])
+                cur.execute("SELECT COUNT(*) FROM pricing_task_batch_item_runs WHERE execution_id=%s AND status='running'", (execution_id,))
+                running = int(cur.fetchone()[0])
+                if status == "stop_requested":
+                    if running == 0:
+                        cur.execute("UPDATE pricing_task_batch_item_runs SET status='idle',execution_id=NULL,current_tool=NULL,current_tool_status=NULL,updated_at=NOW() WHERE execution_id=%s AND status IN ('queued','retrying')", (execution_id,))
+                        cur.execute("UPDATE pricing_task_batch_executions SET status='stopped',finished_at=NOW(),updated_at=NOW() WHERE id=%s", (execution_id,))
+                        cur.execute("UPDATE pricing_task_batches SET status='stopped',finished_at=NOW(),updated_at=NOW() WHERE id=%s", (batch_id,))
+                    conn.commit()
+                    continue
+                available = max(0, limit - running)
+                if available:
+                    cur.execute(
+                        """SELECT id FROM pricing_task_batch_item_runs
+                           WHERE execution_id=%s AND status IN ('queued','retrying')
+                             AND (next_attempt_at IS NULL OR next_attempt_at<=NOW())
+                           ORDER BY id FOR UPDATE SKIP LOCKED LIMIT %s""",
+                        (execution_id, available),
+                    )
+                    ids = [int(row[0]) for row in cur.fetchall()]
+                    if ids:
+                        cur.execute(
+                            """UPDATE pricing_task_batch_item_runs SET status='running',attempt_count=attempt_count+1,
+                               started_at=COALESCE(started_at,NOW()),lease_owner=%s,
+                               lease_expires_at=NOW()+INTERVAL '15 minutes',next_attempt_at=NULL,updated_at=NOW()
+                               WHERE id=ANY(%s)""",
+                            (worker_id, ids),
+                        )
+                        claimed.extend(ids)
+                        cur.execute("UPDATE pricing_task_batch_executions SET status='running',started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE id=%s", (execution_id,))
+                        cur.execute("UPDATE pricing_task_batches SET status='running',updated_at=NOW() WHERE id=%s", (batch_id,))
+                conn.commit()
+            _refresh_background_execution(conn, execution_id)
+        return claimed
+    finally:
+        conn.close()
+
+
+def run_background_pricing_worker(stop_event: Any) -> None:
+    worker_id = f"background:{os.getpid()}"
+    executor = ThreadPoolExecutor(max_workers=256, thread_name_prefix="background-pricing")
+    futures: set[Any] = set()
+    try:
+        while not stop_event.is_set():
+            futures = {future for future in futures if not future.done()}
+            try:
+                for item_run_id in _claim_background_items(worker_id):
+                    futures.add(executor.submit(_run_background_item, item_run_id, worker_id))
+            except Exception as exc:
+                print(f"[background-pricing] dispatcher error: {exc}", file=sys.stderr, flush=True)
+            stop_event.wait(0.8)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=False)
 
 
 def _manual_comparison_review_payload(row: Any) -> dict[str, Any]:

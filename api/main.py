@@ -37,6 +37,7 @@ async def lifespan(_: FastAPI):
     pricing_task.initialize_schema()
     stop_event = threading.Event()
     worker_thread: threading.Thread | None = None
+    background_worker_thread: threading.Thread | None = None
     disabled_values = {"0", "false", "no"}
     worker_enabled = os.getenv("PRICING_KB_EMBEDDED_WORKER", "1").strip().lower() not in disabled_values
     if worker_enabled:
@@ -47,12 +48,23 @@ async def lifespan(_: FastAPI):
             daemon=True,
         )
         worker_thread.start()
+    background_worker_enabled = os.getenv("PRICING_BACKGROUND_BATCH_EMBEDDED_WORKER", "1").strip().lower() not in disabled_values
+    if background_worker_enabled:
+        background_worker_thread = threading.Thread(
+            target=pricing_task.run_background_pricing_worker,
+            args=(stop_event,),
+            name="background-pricing-worker",
+            daemon=True,
+        )
+        background_worker_thread.start()
     try:
         yield
     finally:
         stop_event.set()
         if worker_thread:
             worker_thread.join(timeout=5)
+        if background_worker_thread:
+            background_worker_thread.join(timeout=5)
 
 
 app = FastAPI(title="深圳信息价管理系统", version="1.0.0", lifespan=lifespan)
