@@ -21,6 +21,16 @@ const STATUS_LABEL: Record<string, string> = {
   stopped: '已停止', completed: '已完成', failed: '失败',
 }
 
+const ACTIVE_STATUS = new Set(['queued', 'running', 'stop_requested'])
+
+function batchDuration(batch: PricingTaskBatch) {
+  if (!batch.started_at) return '—'
+  const end = batch.finished_at ? new Date(batch.finished_at).getTime() : Date.now()
+  const seconds = Math.max(0, Math.round((end - new Date(batch.started_at).getTime()) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+}
+
 export default function BackgroundBatchListPage() {
   const router = useRouter()
   const [batches, setBatches] = useState<PricingTaskBatch[]>([])
@@ -36,13 +46,18 @@ export default function BackgroundBatchListPage() {
   const [manualProjectId, setManualProjectId] = useState<number | null>(null)
   const [libraryIds, setLibraryIds] = useState<Set<number>>(new Set())
 
-  async function load() {
-    setLoading(true)
+  async function load(silent = false) {
+    if (!silent) setLoading(true)
     try { setBatches(await fetchBackgroundPricingTaskBatches()) }
-    finally { setLoading(false) }
+    finally { if (!silent) setLoading(false) }
   }
 
   useEffect(() => { void load() }, [])
+  useEffect(() => {
+    if (!batches.some(batch => ACTIVE_STATUS.has(batch.status))) return
+    const timer = window.setInterval(() => void load(true), 8000)
+    return () => window.clearInterval(timer)
+  }, [batches])
 
   async function showCreate() {
     setOpen(true)
@@ -99,17 +114,18 @@ export default function BackgroundBatchListPage() {
           ) : (
             <table className="w-full text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                <tr><th className="px-5 py-3 text-left">批次</th><th className="px-5 py-3 text-left">工程 / 对比工程</th><th className="px-5 py-3 text-left">状态</th><th className="px-5 py-3 text-left">进度</th><th className="px-5 py-3 text-left">配置</th><th className="px-5 py-3 text-right">操作</th></tr>
+                <tr><th className="px-4 py-3 text-left">批次</th><th className="px-4 py-3 text-left">工程 / 对比工程</th><th className="px-4 py-3 text-left">定额库</th><th className="px-4 py-3 text-left">状态 / 进度</th><th className="px-4 py-3 text-left">一致性</th><th className="px-4 py-3 text-left">配置 / 耗时</th><th className="px-4 py-3 text-right">操作</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {batches.map(batch => (
                   <tr key={batch.id} className="hover:bg-slate-50/80">
-                    <td className="px-5 py-4"><Link href={`/pricing-task/background-batch/${batch.id}`} className="font-semibold text-slate-900 hover:text-blue-600">{batch.name}</Link><div className="mt-1 text-xs text-slate-400">{new Date(batch.created_at).toLocaleString()}</div></td>
-                    <td className="px-5 py-4"><div>{batch.project_name}</div><div className="mt-1 text-xs text-slate-500">人工：{batch.manual_project_name || `#${batch.manual_project_id}`}</div></td>
-                    <td className="px-5 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${batch.status === 'running' ? 'bg-blue-100 text-blue-700' : batch.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : batch.status === 'stopped' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{STATUS_LABEL[batch.status] || batch.status}</span></td>
-                    <td className="px-5 py-4 tabular-nums"><span className="font-semibold">{batch.completed_count}</span> / {batch.selected_count}{batch.failed_count > 0 && <span className="ml-2 text-rose-600">失败 {batch.failed_count}</span>}</td>
-                    <td className="px-5 py-4 text-xs text-slate-600"><div>并发 {batch.concurrency_limit ?? 20}</div><div className="mt-1">知识库版本 {batch.kb_version_id ?? '-'}</div></td>
-                    <td className="px-5 py-4 text-right"><Link href={`/pricing-task/background-batch/${batch.id}`} className="mr-4 font-medium text-blue-600 hover:text-blue-700">进入</Link><button onClick={() => void remove(batch.id)} className="text-slate-400 hover:text-rose-600">删除</button></td>
+                    <td className="px-4 py-4"><Link href={`/pricing-task/background-batch/${batch.id}`} className="font-semibold text-slate-900 hover:text-blue-600">{batch.name}</Link><div className="mt-1 text-xs text-slate-400">{new Date(batch.created_at).toLocaleString()}</div></td>
+                    <td className="px-4 py-4"><div>{batch.project_name}</div><div className="mt-1 text-xs text-slate-500">人工：{batch.manual_project_name || `#${batch.manual_project_id}`}</div></td>
+                    <td className="max-w-48 px-4 py-4 text-xs text-slate-600"><div className="line-clamp-2">{batch.quota_library_names.length ? batch.quota_library_names.join('、') : '全部定额库'}</div></td>
+                    <td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${batch.status === 'running' ? 'bg-blue-100 text-blue-700' : batch.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : batch.status === 'stopped' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{STATUS_LABEL[batch.status] || batch.status}</span><div className="mt-2 text-xs tabular-nums text-slate-500"><span className="font-semibold text-slate-800">{batch.completed_count}</span> / {batch.selected_count}{batch.failed_count > 0 && <span className="ml-2 text-rose-600">失败 {batch.failed_count}</span>}</div></td>
+                    <td className="px-4 py-4 text-xs"><div className={batch.consistency_rate == null ? 'text-slate-400' : batch.consistency_rate === 1 ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{batch.consistency_rate == null ? '尚未评测' : `命中率 ${(batch.consistency_rate * 100).toFixed(1)}%`}</div></td>
+                    <td className="px-4 py-4 text-xs text-slate-600"><div>并发 {batch.concurrency_limit ?? 20} · 知识库 {batch.kb_version_id ?? '-'}</div><div className="mt-1 text-slate-400">耗时 {batchDuration(batch)}</div></td>
+                    <td className="px-4 py-4 text-right"><Link href={`/pricing-task/background-batch/${batch.id}`} className="mr-4 font-medium text-blue-600 hover:text-blue-700">进入</Link><button onClick={() => void remove(batch.id)} className="text-slate-400 hover:text-rose-600">删除</button></td>
                   </tr>
                 ))}
               </tbody>

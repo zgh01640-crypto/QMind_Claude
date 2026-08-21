@@ -43,6 +43,25 @@ def _client(completions: _Completions):
 
 
 class PricingTaskToolRetryTests(unittest.TestCase):
+    def test_rate_limit_fails_immediately_without_tool_retry(self):
+        completions = _Completions(
+            [pricing_task.ModelRateLimitError("模型服务限流或配额不足")]
+        )
+
+        with (
+            patch.object(pricing_task, "_client", return_value=_client(completions)),
+            patch.object(pricing_task, "_wait_before_model_retry") as wait_mock,
+        ):
+            with self.assertRaises(pricing_task.ModelRateLimitError):
+                pricing_task._run_tool_fallback(
+                    [{"role": "user", "content": "check"}],
+                    pricing_task._TOOL_SUBMIT_CHAPTER_RULE_CHECK,
+                    5000,
+                )
+
+        self.assertEqual(completions.call_count, 1)
+        wait_mock.assert_not_called()
+
     def test_non_stream_fallback_retries_invalid_json(self):
         completions = _Completions(
             [

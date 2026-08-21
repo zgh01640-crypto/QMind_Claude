@@ -6,12 +6,14 @@ import threading
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from api.routers import auth, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
 from api.auth import SESSION_COOKIE, apply_auth_schema, is_auth_enabled, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
+from db.connection import DatabasePoolBusyError
 
 from api.services.pricing_kb_import_admin import run_next_job
 
@@ -75,7 +77,10 @@ app = FastAPI(title="深圳信息价管理系统", version="1.0.0", lifespan=lif
 async def attach_authenticated_user(request: Request, call_next):
     if is_auth_enabled() and request.url.path.startswith("/api/"):
         request.state.user = resolve_session(request.cookies.get(SESSION_COOKIE))
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    except DatabasePoolBusyError:
+        return JSONResponse(status_code=503, content={"detail": "数据库繁忙，请稍后重试"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,6 +90,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
     ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

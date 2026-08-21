@@ -1502,6 +1502,80 @@ export interface BackgroundBatchEvent {
   created_at: string
 }
 
+export type BackgroundBatchExecutionStatus = 'waiting' | 'processing' | 'retrying' | 'completed' | 'failed'
+export type BackgroundBatchConsistencyStatus =
+  | 'exact'
+  | 'partial'
+  | 'inconsistent'
+  | 'no_comparable'
+  | 'unassessed'
+
+export interface BackgroundBatchWorkspaceSummary {
+  total_count: number
+  selected_count: number
+  waiting_count: number
+  running_count: number
+  retrying_count: number
+  completed_count: number
+  failed_count: number
+  evaluated_count: number
+  exact_count: number
+  partial_count: number
+  inconsistent_count: number
+  no_comparable_count: number
+  unassessed_count: number
+  hit_count: number
+  missed_count: number
+  extra_count: number
+  manual_count: number
+  ai_count: number
+  hit_rate: number | null
+  elapsed_seconds: number
+  throughput_per_minute: number
+  eta_seconds: number | null
+}
+
+export interface BackgroundBatchWorkspaceItem extends BoqItem {
+  run_id: number | null
+  run_status: string
+  execution_status: BackgroundBatchExecutionStatus
+  execution_id: number | null
+  attempt_count: number
+  current_tool: string | null
+  current_tool_status: string | null
+  current_tool_output: string | null
+  error_message: string | null
+  candidate_count: number
+  match_count: number
+  hit_count: number
+  missed_count: number
+  extra_count: number
+  manual_count: number
+  ai_count: number
+  consistency_status: BackgroundBatchConsistencyStatus
+  duration_ms: number | null
+  updated_at: string | null
+  next_attempt_at: string | null
+  kb_version_id: number | null
+}
+
+export interface BackgroundBatchWorkspace {
+  batch: PricingTaskBatch
+  execution: BackgroundBatchExecution | null
+  summary: BackgroundBatchWorkspaceSummary
+  runtime_metrics: {
+    model: { limit: number; running: number; waiting: number }
+    database: { max: number; in_use: number; available: number }
+    model_rate_limited_failed_count: number
+  }
+  items: BackgroundBatchWorkspaceItem[]
+}
+
+export interface BackgroundBatchItemDetail {
+  item: BoqItem
+  run: PricingTaskRun | null
+}
+
 export interface PricingTaskEvaluation {
   manual_quotas: DebugManualQuota[]
   hit_codes: string[]
@@ -1891,6 +1965,14 @@ export const fetchPricingTaskBatch = (id: number) => req<PricingTaskBatch>(`/api
 
 export const fetchPricingTaskBatchDetail = (id: number) =>
   req<PricingTaskBatchDetail>(`/api/pricing-task-batches/${id}/items`)
+
+export const fetchBackgroundPricingTaskWorkspace = (id: number) =>
+  req<BackgroundBatchWorkspace>(`/api/pricing-task-background-batches/${id}/workspace`)
+
+export const fetchBackgroundPricingTaskItemDetail = (batchId: number, boqItemId: number) =>
+  req<BackgroundBatchItemDetail>(
+    `/api/pricing-task-background-batches/${batchId}/items/${boqItemId}`,
+  )
 
 export async function createPricingTaskBatch(body: {
   name: string

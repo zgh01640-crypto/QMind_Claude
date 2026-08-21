@@ -13,10 +13,15 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
   async function submit(event: FormEvent) {
     event.preventDefault(); setSubmitting(true); setError('')
-    const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
-    if (!response.ok) setError((await response.json().catch(() => ({}))).detail || '登录失败，请重试')
-    else { await refresh(); router.replace('/pricing-task') }
-    setSubmitting(false)
+    try {
+      const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
+      if (!response.ok) setError((await response.json().catch(() => ({}))).detail || '登录失败，请重试')
+      else { await refresh(); router.replace('/pricing-task') }
+    } catch {
+      setError('无法连接登录服务，请稍后重试')
+    } finally {
+      setSubmitting(false)
+    }
   }
   return <div className="mx-auto mt-16 w-full max-w-md overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-2xl shadow-blue-950/10">
     <div className="bg-blue-950 px-8 py-9 text-white"><p className="text-xs font-semibold tracking-[.24em] text-blue-300">QMIND · SECURE WORKSPACE</p><h1 className="mt-3 text-3xl font-semibold">欢迎回来</h1><p className="mt-2 text-sm text-blue-200">登录后查看仅属于你的工程与组价结果。</p></div>

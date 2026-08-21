@@ -11,10 +11,11 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from io import BytesIO
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 from time import perf_counter, sleep
 from typing import Any, Iterable, Optional
 from urllib.parse import quote
@@ -28,10 +29,17 @@ from psycopg2.extras import Json
 from db.pricing_kb_versions import apply_version_schema, resolve_version_id
 from db.schema_lock import acquire_schema_transaction_lock
 from api.auth import CurrentUser, current_user, require_project_owner, require_task_owner
+from db.connection import suspend_connections_for_model_call
 
 router = APIRouter()
 _SCHEMA_LOCK = Lock()
 _SCHEMA_READY = False
+_MODEL_GATE_LOCK = Lock()
+_MODEL_GATE: BoundedSemaphore | None = None
+_MODEL_GATE_LIMIT = 0
+_MODEL_GATE_RUNNING = 0
+_MODEL_GATE_WAITING = 0
+_MODEL_CLIENTS: dict[bool, "_GatedOpenAIClient"] = {}
 
 
 def _json_dumps(data: Any) -> str:
@@ -776,12 +784,141 @@ _TOOL_SUBMIT_COEFFICIENT_CHECK = {
 }
 
 
-def _client(thinking: bool = True) -> OpenAI:
+class ModelRateLimitError(RuntimeError):
+    """A provider-side capacity failure that must not enter item retry loops."""
+
+
+def _model_gate_limit() -> int:
+    try:
+        configured = int(os.getenv("PRICING_MODEL_CONCURRENCY", "99"))
+    except ValueError:
+        configured = 99
+    # This is deliberately a global safety ceiling, not a per-batch setting.
+    return max(1, min(configured, 99))
+
+
+def _get_model_gate() -> BoundedSemaphore:
+    global _MODEL_GATE, _MODEL_GATE_LIMIT
+    limit = _model_gate_limit()
+    with _MODEL_GATE_LOCK:
+        if _MODEL_GATE is None or _MODEL_GATE_LIMIT != limit:
+            # The limit is configured before process startup. Do not replace a
+            # live semaphore while calls are active.
+            if _MODEL_GATE is None or _MODEL_GATE_RUNNING == 0:
+                _MODEL_GATE = BoundedSemaphore(limit)
+                _MODEL_GATE_LIMIT = limit
+    return _MODEL_GATE or BoundedSemaphore(limit)
+
+
+def get_model_gate_metrics() -> dict[str, int]:
+    with _MODEL_GATE_LOCK:
+        limit = _MODEL_GATE_LIMIT or _model_gate_limit()
+        return {
+            "limit": limit,
+            "running": _MODEL_GATE_RUNNING,
+            "waiting": _MODEL_GATE_WAITING,
+        }
+
+
+@contextmanager
+def _model_call_slot():
+    global _MODEL_GATE_RUNNING, _MODEL_GATE_WAITING
+    gate = _get_model_gate()
+    with _MODEL_GATE_LOCK:
+        _MODEL_GATE_WAITING += 1
+    gate.acquire()
+    with _MODEL_GATE_LOCK:
+        _MODEL_GATE_WAITING -= 1
+        _MODEL_GATE_RUNNING += 1
+    try:
+        suspend_connections_for_model_call()
+        yield
+    finally:
+        with _MODEL_GATE_LOCK:
+            _MODEL_GATE_RUNNING -= 1
+        gate.release()
+
+
+def _is_model_rate_limited(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in (
+        "429", "rate limit", "rate_limit", "too many requests", "insufficient quota",
+        "quota exceeded", "insufficient balance", "service overloaded", "server overload",
+        "模型限流", "服务过载", "配额不足", "余额不足",
+    ))
+
+
+class _GatedStream:
+    def __init__(self, stream: Any, slot: Any) -> None:
+        self._stream = stream
+        self._slot = slot
+        self._released = False
+
+    def _release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._slot.__exit__(None, None, None)
+
+    def __iter__(self):
+        try:
+            yield from self._stream
+        except Exception as exc:
+            if _is_model_rate_limited(exc):
+                raise ModelRateLimitError("模型服务限流或配额不足，请稍后手动重新执行该清单") from exc
+            raise
+        finally:
+            self._release()
+
+    def close(self) -> None:
+        try:
+            close = getattr(self._stream, "close", None)
+            if close:
+                close()
+        finally:
+            self._release()
+
+
+class _GatedCompletions:
+    def __init__(self, client: OpenAI) -> None:
+        self._client = client
+
+    def create(self, *args, **kwargs):
+        slot = _model_call_slot()
+        slot.__enter__()
+        try:
+            response = self._client.chat.completions.create(*args, **kwargs)
+        except Exception as exc:
+            slot.__exit__(type(exc), exc, exc.__traceback__)
+            if _is_model_rate_limited(exc):
+                raise ModelRateLimitError("模型服务限流或配额不足，请稍后手动重新执行该清单") from exc
+            raise
+        if kwargs.get("stream"):
+            return _GatedStream(response, slot)
+        slot.__exit__(None, None, None)
+        return response
+
+
+class _GatedChat:
+    def __init__(self, client: OpenAI) -> None:
+        self.completions = _GatedCompletions(client)
+
+
+class _GatedOpenAIClient:
+    def __init__(self, client: OpenAI) -> None:
+        self.chat = _GatedChat(client)
+
+
+def _client(thinking: bool = True) -> _GatedOpenAIClient:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
-    base_url = "https://api.deepseek.com" if thinking else "https://api.deepseek.com/beta"
-    return OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=1)
+    with _MODEL_GATE_LOCK:
+        cached = _MODEL_CLIENTS.get(thinking)
+        if cached is None:
+            base_url = "https://api.deepseek.com" if thinking else "https://api.deepseek.com/beta"
+            cached = _GatedOpenAIClient(OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=1))
+            _MODEL_CLIENTS[thinking] = cached
+        return cached
 
 
 def _model() -> str:
@@ -1367,6 +1504,8 @@ def _run_tool_fallback(
                 raise ValueError("model returned no tool call")
             return _parse_json_object(message.tool_calls[0].function.arguments)
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(
                 f"[pricing-task] non-stream tool error attempt={attempt + 1}: {exc}",
@@ -1393,6 +1532,8 @@ def _run_stream_tool(messages: list[dict[str, Any]], tool: dict[str, Any], max_t
             raw = _collect_stream_tool_args(stream, reasoning_parts)
             return _parse_json_object(raw)
         except Exception as exc:  # keep the current stage retry-local
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] stream tool error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "stream tool", exc)
@@ -1442,6 +1583,8 @@ def _stream_tool_call(messages: list[dict[str, Any]], tool: dict[str, Any], max_
             yield ("tool_result", tool_result)
             return
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] stream tool error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "stream tool call", exc)
@@ -1482,6 +1625,8 @@ def _stream_text_completion(messages: list[dict[str, Any]], max_tokens: int) -> 
             yield ("text_result", "".join(parts))
             return
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] stream text error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "stream text", exc)
@@ -1509,6 +1654,8 @@ def _run_submit_match(messages: list[dict[str, Any]]) -> dict[str, Any]:
                 raise ValueError(f"unexpected tool call {call.function.name!r}")
             return _parse_json_object(call.function.arguments)
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] submit match error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "submit match", exc)
@@ -1536,6 +1683,8 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
                 raise ValueError(f"unexpected tool call {call.function.name!r}")
             return json.loads(call.function.arguments)
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] submit conversion check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "submit conversion check", exc)
@@ -1560,6 +1709,8 @@ def _run_submit_conversion_check(messages: list[dict[str, Any]]) -> dict[str, An
         )
         return _parse_json_content(resp.choices[0].message.content)
     except Exception as exc:
+        if isinstance(exc, ModelRateLimitError):
+            raise
         print(f"[pricing-task] conversion JSON fallback error: {exc}", file=sys.stderr, flush=True)
         raise exc from last_error
 
@@ -1585,6 +1736,8 @@ def _run_submit_coefficient_check(messages: list[dict[str, Any]]) -> dict[str, A
                 raise ValueError(f"unexpected tool call {call.function.name!r}")
             return _parse_json_object(call.function.arguments)
         except Exception as exc:
+            if isinstance(exc, ModelRateLimitError):
+                raise
             last_error = exc
             print(f"[pricing-task] submit coefficient check error attempt={attempt + 1}: {exc}", file=sys.stderr, flush=True)
             _wait_before_model_retry(attempt, "submit coefficient check", exc)
@@ -1609,6 +1762,8 @@ def _run_submit_coefficient_check(messages: list[dict[str, Any]]) -> dict[str, A
         )
         return _parse_json_content(resp.choices[0].message.content)
     except Exception as exc:
+        if isinstance(exc, ModelRateLimitError):
+            raise
         print(f"[pricing-task] coefficient JSON fallback error: {exc}", file=sys.stderr, flush=True)
         raise exc from last_error
 
@@ -3263,7 +3418,7 @@ def _json_value(value: Any) -> Any:
     return Json(value, dumps=_json_dumps)
 
 
-def _update_batch_item_run(conn, item_run_id: int, **fields: Any) -> None:
+def _update_batch_item_run(conn, item_run_id: int, *, commit: bool = True, **fields: Any) -> None:
     if not fields:
         return
     json_fields = {
@@ -3287,7 +3442,8 @@ def _update_batch_item_run(conn, item_run_id: int, **fields: Any) -> None:
     values.append(item_run_id)
     with conn.cursor() as cur:
         cur.execute(f"UPDATE pricing_task_batch_item_runs SET {', '.join(assignments)} WHERE id = %s", values)
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def _load_batch_step_timings(conn, item_run_id: int) -> dict[str, Any]:
@@ -3597,6 +3753,8 @@ def _stream_pricing_item(
     match_result = _normalize_matches(raw_match, candidates)
     try:
         chapter_rule_check["validation"] = _validate_chapter_rules(chapter_rule_check, match_result["matches"])
+    except ModelRateLimitError:
+        raise
     except Exception as exc:
         chapter_rule_check["validation"] = {
             "validations": [],
@@ -3663,6 +3821,49 @@ def _row_to_batch(row) -> dict[str, Any]:
         "consistency_rate": float(row[16]) if len(row) > 16 and row[16] is not None else None,
         "concurrency_limit": int(row[17]) if len(row) > 17 and row[17] is not None else 20,
     }
+
+
+_BACKGROUND_COMPLETED_STATUSES = {"confirmed", "completed", "no_match"}
+
+
+def _background_execution_status(status: str | None) -> str:
+    if not status or status in {"idle", "queued"}:
+        return "waiting"
+    if status == "running":
+        return "processing"
+    if status == "retrying":
+        return "retrying"
+    if status == "failed":
+        return "failed"
+    if status in _BACKGROUND_COMPLETED_STATUSES:
+        return "completed"
+    return status
+
+
+def _background_consistency_status(
+    evaluation: dict[str, Any] | None = None,
+    *,
+    hit_count: int | None = None,
+    missed_count: int | None = None,
+    extra_count: int | None = None,
+    manual_count: int | None = None,
+    ai_count: int | None = None,
+) -> str:
+    if evaluation is not None:
+        hit_count = int(evaluation.get("hit_count") or 0)
+        missed_count = int(evaluation.get("missed_count") or 0)
+        extra_count = int(evaluation.get("extra_count") or 0)
+        manual_count = int(evaluation.get("manual_count") or 0)
+        ai_count = int(evaluation.get("ai_count") or 0)
+    if None in {hit_count, missed_count, extra_count, manual_count, ai_count}:
+        return "unassessed"
+    if manual_count == 0 and ai_count == 0:
+        return "no_comparable"
+    if missed_count == 0 and extra_count == 0:
+        return "exact"
+    if hit_count and hit_count > 0:
+        return "partial"
+    return "inconsistent"
 
 
 def _require_task_run_owner(conn, user: CurrentUser, run_id: int) -> None:
@@ -3995,13 +4196,12 @@ def create_new_pricing_task_batch(body: NewPricingTaskBatchCreate, user: Current
 
 @router.post("/pricing-task-background-batches")
 def create_background_pricing_task_batch(body: NewPricingTaskBatchCreate, user: CurrentUser = Depends(current_user)):
-    configured = int(os.getenv("PRICING_BACKGROUND_BATCH_CONCURRENCY", "99"))
     return _create_pricing_task_batch_record(
         body,
         "background",
         require_manual_project=True,
         user=user,
-        concurrency_limit=max(1, min(configured, 100)),
+        concurrency_limit=_background_worker_limit(),
     )
 
 
@@ -4151,7 +4351,7 @@ def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(curr
 
 
 def _background_event(conn, batch_id: int, execution_id: int | None, item_run_id: int | None,
-                      boq_item_id: int | None, event_type: str, payload: dict[str, Any]) -> int:
+                      boq_item_id: int | None, event_type: str, payload: dict[str, Any], *, commit: bool = True) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO pricing_task_batch_events(
@@ -4160,7 +4360,8 @@ def _background_event(conn, batch_id: int, execution_id: int | None, item_run_id
             (batch_id, execution_id, item_run_id, boq_item_id, event_type, Json(payload, dumps=_json_dumps)),
         )
         event_id = int(cur.fetchone()[0])
-    conn.commit()
+    if commit:
+        conn.commit()
     return event_id
 
 
@@ -4238,6 +4439,254 @@ def start_background_batch_execution(
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+def _background_workspace_summary(
+    items: list[dict[str, Any]],
+    execution: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status_counts = {key: 0 for key in ("waiting", "processing", "retrying", "completed", "failed")}
+    consistency_counts = {
+        key: 0 for key in ("exact", "partial", "inconsistent", "no_comparable", "unassessed")
+    }
+    hit_count = missed_count = extra_count = manual_count = ai_count = 0
+    for item in items:
+        status_counts[item["execution_status"]] = status_counts.get(item["execution_status"], 0) + 1
+        consistency_counts[item["consistency_status"]] = consistency_counts.get(item["consistency_status"], 0) + 1
+        hit_count += item["hit_count"]
+        missed_count += item["missed_count"]
+        extra_count += item["extra_count"]
+        manual_count += item["manual_count"]
+        ai_count += item["ai_count"]
+
+    elapsed_seconds = 0.0
+    if execution and execution.get("started_at"):
+        finish = execution.get("finished_at") or datetime.now()
+        elapsed_seconds = max(0.0, (finish - execution["started_at"]).total_seconds())
+    completed_count = status_counts["completed"]
+    throughput = completed_count / (elapsed_seconds / 60) if elapsed_seconds > 0 and completed_count else 0.0
+    remaining = status_counts["waiting"] + status_counts["processing"] + status_counts["retrying"]
+    eta_seconds = remaining / (throughput / 60) if throughput > 0 and remaining else None
+    evaluated_count = len(items) - consistency_counts["unassessed"]
+    return {
+        "total_count": len(items),
+        "selected_count": int(execution.get("selected_count") or 0) if execution else 0,
+        "waiting_count": status_counts["waiting"],
+        "running_count": status_counts["processing"],
+        "retrying_count": status_counts["retrying"],
+        "completed_count": completed_count,
+        "failed_count": status_counts["failed"],
+        "evaluated_count": evaluated_count,
+        "exact_count": consistency_counts["exact"],
+        "partial_count": consistency_counts["partial"],
+        "inconsistent_count": consistency_counts["inconsistent"],
+        "no_comparable_count": consistency_counts["no_comparable"],
+        "unassessed_count": consistency_counts["unassessed"],
+        "hit_count": hit_count,
+        "missed_count": missed_count,
+        "extra_count": extra_count,
+        "manual_count": manual_count,
+        "ai_count": ai_count,
+        "hit_rate": round(hit_count / manual_count, 4) if manual_count else None,
+        "elapsed_seconds": round(elapsed_seconds, 1),
+        "throughput_per_minute": round(throughput, 2),
+        "eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,
+    }
+
+
+@router.get("/pricing-task-background-batches/{batch_id}/workspace")
+def get_background_pricing_task_workspace(batch_id: int, user: CurrentUser = Depends(current_user)):
+    """Return a compact monitoring projection; full tool payloads are loaded per focused item."""
+    from db.connection import get_connection, get_connection_pool_metrics
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
+        with conn.cursor() as cur:
+            # Keep the dashboard projection on one short pooled lease. Calling
+            # the public batch endpoint here used to create a nested connection.
+            cur.execute(
+                _batch_select_sql()
+                + """
+                WHERE b.id=%s AND b.status <> 'deleted'
+                GROUP BY b.id, p.project_name, mp.project_name
+                """,
+                (batch_id,),
+            )
+            batch_row = cur.fetchone()
+            if not batch_row:
+                raise HTTPException(status_code=404, detail="批次不存在")
+            batch = _row_to_batch(batch_row)
+            cur.execute("SELECT workflow_version FROM pricing_task_batches WHERE id=%s", (batch_id,))
+            workflow_row = cur.fetchone()
+            if not workflow_row or workflow_row[0] != "background":
+                raise HTTPException(status_code=404, detail="后台批次不存在")
+            cur.execute(
+                """
+                SELECT id,status,concurrency_limit,selected_count,completed_count,failed_count,
+                       created_at,started_at,finished_at
+                FROM pricing_task_batch_executions
+                WHERE batch_id=%s ORDER BY id DESC LIMIT 1
+                """,
+                (batch_id,),
+            )
+            erow = cur.fetchone()
+            execution = None
+            if erow:
+                execution = {
+                    "id": int(erow[0]), "status": erow[1], "concurrency_limit": int(erow[2]),
+                    "selected_count": int(erow[3]), "completed_count": int(erow[4]),
+                    "failed_count": int(erow[5]), "created_at": erow[6], "started_at": erow[7],
+                    "finished_at": erow[8],
+                }
+            cur.execute(
+                """
+                SELECT i.id,i.item_code,i.item_name,i.item_description,i.unit,i.quantity,i.item_seq,
+                       r.id,r.status,r.execution_id,r.attempt_count,r.current_tool,r.current_tool_status,
+                       r.current_tool_output,r.error_message,
+                       COALESCE(
+                           (r.quota_candidates->>'total')::integer,
+                           CASE WHEN jsonb_typeof(r.quota_candidates->'candidates')='array'
+                                THEN jsonb_array_length(r.quota_candidates->'candidates') END,
+                           0
+                       ),
+                       CASE WHEN jsonb_typeof(r.quota_match->'matches')='array'
+                            THEN jsonb_array_length(r.quota_match->'matches') ELSE 0 END,
+                       r.evaluation IS NOT NULL,
+                       COALESCE((r.evaluation->>'hit_count')::integer,0),
+                       COALESCE((r.evaluation->>'missed_count')::integer,0),
+                       COALESCE((r.evaluation->>'extra_count')::integer,0),
+                       COALESCE((r.evaluation->>'manual_count')::integer,0),
+                       COALESCE((r.evaluation->>'ai_count')::integer,0),
+                       r.started_at,r.finished_at,r.updated_at,r.next_attempt_at,r.kb_version_id
+                FROM boq_items i
+                LEFT JOIN LATERAL (
+                    SELECT * FROM pricing_task_batch_item_runs latest
+                    WHERE latest.batch_id=%s AND latest.boq_item_id=i.id
+                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                ) r ON TRUE
+                WHERE i.project_id=%s
+                ORDER BY i.item_seq NULLS LAST,i.id
+                """,
+                (batch_id, int(batch["boq_project_id"])),
+            )
+            items = []
+            now = datetime.now()
+            for row in cur.fetchall():
+                has_evaluation = bool(row[17])
+                consistency_status = _background_consistency_status(
+                    hit_count=int(row[18]), missed_count=int(row[19]), extra_count=int(row[20]),
+                    manual_count=int(row[21]), ai_count=int(row[22]),
+                ) if has_evaluation else "unassessed"
+                end_at = row[24] or (now if row[8] in {"running", "retrying"} else None)
+                duration_ms = None
+                if row[23] and end_at:
+                    duration_ms = max(0, int((end_at - row[23]).total_seconds() * 1000))
+                items.append({
+                    "id": int(row[0]), "item_code": row[1] or "", "item_name": row[2] or "",
+                    "item_description": row[3] or "", "unit": row[4] or "",
+                    "quantity": float(row[5]) if row[5] is not None else None, "item_seq": row[6],
+                    "run_id": int(row[7]) if row[7] is not None else None,
+                    "run_status": row[8] or "idle", "execution_status": _background_execution_status(row[8]),
+                    "execution_id": int(row[9]) if row[9] is not None else None,
+                    "attempt_count": int(row[10] or 0), "current_tool": row[11],
+                    "current_tool_status": row[12], "current_tool_output": row[13],
+                    "error_message": row[14], "candidate_count": int(row[15] or 0),
+                    "match_count": int(row[16] or 0), "hit_count": int(row[18]),
+                    "missed_count": int(row[19]), "extra_count": int(row[20]),
+                    "manual_count": int(row[21]), "ai_count": int(row[22]),
+                    "consistency_status": consistency_status, "duration_ms": duration_ms,
+                    "updated_at": row[25], "next_attempt_at": row[26],
+                    "kb_version_id": int(row[27]) if row[27] is not None else None,
+                })
+            cur.execute(
+                """SELECT COUNT(*) FROM pricing_task_batch_item_runs
+                   WHERE batch_id=%s AND status='failed'
+                     AND error_message ILIKE '%%模型服务限流或配额不足%%'""",
+                (batch_id,),
+            )
+            model_rate_limited_failed_count = int(cur.fetchone()[0] or 0)
+        return {
+            "batch": batch,
+            "execution": execution,
+            "summary": _background_workspace_summary(items, execution),
+            "runtime_metrics": {
+                "model": get_model_gate_metrics(),
+                "database": get_connection_pool_metrics(),
+                "model_rate_limited_failed_count": model_rate_limited_failed_count,
+            },
+            "items": items,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/pricing-task-background-batches/{batch_id}/items/{boq_item_id}")
+def get_background_pricing_task_item_detail(
+    batch_id: int,
+    boq_item_id: int,
+    user: CurrentUser = Depends(current_user),
+):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        require_task_owner(conn, user, batch_id, batch=True)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT b.workflow_version,b.boq_project_id,i.id,i.item_code,i.item_name,i.item_description,
+                       i.unit,i.quantity,i.item_seq
+                FROM pricing_task_batches b
+                JOIN boq_items i ON i.project_id=b.boq_project_id AND i.id=%s
+                WHERE b.id=%s AND b.status<>'deleted'
+                """,
+                (boq_item_id, batch_id),
+            )
+            item_row = cur.fetchone()
+            if not item_row or item_row[0] != "background":
+                raise HTTPException(status_code=404, detail="后台批次清单不存在")
+            item = {
+                "id": int(item_row[2]), "project_id": int(item_row[1]), "item_code": item_row[3] or "",
+                "item_name": item_row[4] or "", "item_description": item_row[5] or "",
+                "unit": item_row[6] or "", "quantity": float(item_row[7]) if item_row[7] is not None else None,
+                "item_seq": item_row[8],
+            }
+            cur.execute(
+                """
+                SELECT id,status,code_check,feature_check,chapter_rule_check,work_procedures,
+                       quota_candidates,quota_match,evaluation,conversion_check,coefficient_check,
+                       step_timings,error_message,created_at,started_at,finished_at,confirmed_results,
+                       kb_version_id,execution_id,attempt_count,current_tool,current_tool_status,
+                       current_tool_output,updated_at,next_attempt_at
+                FROM pricing_task_batch_item_runs
+                WHERE batch_id=%s AND boq_item_id=%s
+                ORDER BY created_at DESC,id DESC LIMIT 1
+                """,
+                (batch_id, boq_item_id),
+            )
+            row = cur.fetchone()
+            run = None
+            if row:
+                run = {
+                    "id": int(row[0]), "status": row[1], "code_check": row[2], "feature_check": row[3],
+                    "chapter_rule_check": row[4], "work_procedures": row[5], "quota_candidates": row[6],
+                    "quota_match": row[7], "evaluation": row[8],
+                    "conversion_check": _hydrate_conversion_for_batch_run(conn, int(row[0]), row[9]),
+                    "coefficient_check": row[10], "step_timings": row[11], "error_message": row[12],
+                    "created_at": row[13], "started_at": row[14], "finished_at": row[15],
+                    "confirmed_results": row[16] or [],
+                    "kb_version_id": int(row[17]) if row[17] is not None else None,
+                    "execution_id": int(row[18]) if row[18] is not None else None,
+                    "attempt_count": int(row[19] or 0), "current_tool": row[20],
+                    "current_tool_status": row[21], "current_tool_output": row[22],
+                    "updated_at": row[23], "next_attempt_at": row[24],
+                }
+        return {"item": item, "run": run}
     finally:
         conn.close()
 
@@ -5351,6 +5800,8 @@ def _batch_coefficient_business_events(items: list[dict[str, Any]], boq_item: di
         )
         result = _normalize_coefficient_check(raw_result, items)
     except Exception as exc:
+        if isinstance(exc, ModelRateLimitError):
+            raise
         print(f"[pricing-task] batch coefficient model result fallback: {exc}", file=sys.stderr, flush=True)
         result = _default_coefficient_check(items, f"模型结构化输出解析失败，已保留系数换算说明待人工复核：{exc}")
     yield "coefficient_check", {"coefficient_check": result}
@@ -5470,6 +5921,7 @@ def _set_background_tool(conn, batch_id: int, execution_id: int, item_run_id: in
         conn, item_run_id, current_tool=tool_id, current_tool_status=status,
         current_tool_output=output, updated_at=datetime.now(),
         lease_expires_at=datetime.now() + timedelta(minutes=15),
+        commit=False,
     )
     _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id,
                       "tool_started" if status == "running" else "tool_completed",
@@ -5493,7 +5945,7 @@ def _execute_background_conversion(conn, batch_id: int, execution_id: int, item_
     timings = _load_batch_step_timings(conn, item_run_id)
     timing = _finish_step_timing(conn, None, timings, 6, "组合换算", started_at, started_perf)
     _update_batch_item_run(
-        conn, item_run_id, conversion_check=result, step_timings=timings, updated_at=datetime.now()
+        conn, item_run_id, conversion_check=result, step_timings=timings, updated_at=datetime.now(), commit=False
     )
     _set_background_tool(
         conn, batch_id, execution_id, item_run_id, boq_item_id, "conversion_check", "success",
@@ -5524,7 +5976,7 @@ def _execute_background_coefficient(conn, batch_id: int, execution_id: int, item
     timings = _load_batch_step_timings(conn, item_run_id)
     timing = _finish_step_timing(conn, None, timings, 7, "系数换算", started_at, started_perf)
     _update_batch_item_run(
-        conn, item_run_id, coefficient_check=result, step_timings=timings, updated_at=datetime.now()
+        conn, item_run_id, coefficient_check=result, step_timings=timings, updated_at=datetime.now(), commit=False
     )
     _set_background_tool(
         conn, batch_id, execution_id, item_run_id, boq_item_id, "coefficient_check", "success",
@@ -5574,11 +6026,12 @@ def _refresh_background_execution(conn, execution_id: int) -> None:
 
 
 def _run_background_item(item_run_id: int, worker_id: str) -> None:
-    from db.connection import get_connection
+    from db.connection import get_connection, release_connections_during_model_calls
 
     conn = get_connection()
     batch_id = execution_id = boq_item_id = None
     try:
+      with release_connections_during_model_calls():
         _ensure_schema(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -5605,7 +6058,7 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                 timings = dict(fields.get("step_timings") or {})
                 timings[str(data["step_no"])] = data
                 fields["step_timings"] = timings
-                _update_batch_item_run(conn, item_run_id, step_timings=timings, updated_at=datetime.now())
+                _update_batch_item_run(conn, item_run_id, step_timings=timings, updated_at=datetime.now(), commit=False)
                 _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "step_timing", data)
                 continue
             if event_type not in _BACKGROUND_TOOL_NEXT and event_type != "evaluation":
@@ -5616,7 +6069,7 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                 continue
             chapter_seen = chapter_seen or event_type == "chapter_rule_check"
             fields[event_type] = data
-            _update_batch_item_run(conn, item_run_id, **{event_type: data, "updated_at": datetime.now()})
+            _update_batch_item_run(conn, item_run_id, commit=False, **{event_type: data, "updated_at": datetime.now()})
             _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, event_type, "success",
                                  _background_tool_output(event_type, data))
             next_tool = _BACKGROUND_TOOL_NEXT.get(event_type)
@@ -5624,16 +6077,24 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                 _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, next_tool, "running")
         matches = (fields.get("quota_match") or {}).get("matches", [])
         confirmed = _confirmed_results_from_matches(conn, matches, int(row[5]))
-        _update_batch_item_run(conn, item_run_id, confirmed_results=confirmed)
+        _update_batch_item_run(conn, item_run_id, confirmed_results=confirmed, commit=False)
         if not matches:
             _update_batch_item_run(conn, item_run_id, status="no_match", current_tool_status="success",
-                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
         else:
             _execute_background_conversion(conn, batch_id, execution_id, item_run_id, boq_item_id)
             _execute_background_coefficient(conn, batch_id, execution_id, item_run_id, boq_item_id)
             _update_batch_item_run(conn, item_run_id, status="confirmed", current_tool_status="success",
-                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
         _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_succeeded", {"status": "confirmed" if matches else "no_match"})
+    except ModelRateLimitError as exc:
+        conn.rollback()
+        if item_run_id and batch_id and execution_id and boq_item_id:
+            _update_batch_item_run(conn, item_run_id, status="failed", error_message=str(exc),
+                                   current_tool_status="error", current_tool_output=str(exc),
+                                   finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
+            _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_failed",
+                              {"error": str(exc), "failure_type": "model_rate_limited"})
     except Exception as exc:
         conn.rollback()
         if item_run_id:
@@ -5651,23 +6112,40 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                            lease_expires_at=NULL,updated_at=NOW() WHERE id=%s""",
                         (str(exc), f"第 {attempt} 次执行失败，{delay} 秒后重试", delay, item_run_id),
                     )
-                conn.commit()
                 if batch_id and execution_id and boq_item_id:
                     _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_retrying",
                                       {"attempt": attempt, "delay_seconds": delay, "error": str(exc)})
+                else:
+                    conn.commit()
             else:
                 _update_batch_item_run(conn, item_run_id, status="failed", error_message=str(exc),
                                        current_tool_status="error", current_tool_output=str(exc),
-                                       finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now())
+                                       finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
                 if batch_id and execution_id and boq_item_id:
                     _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_failed", {"error": str(exc)})
+                else:
+                    conn.commit()
     finally:
-        if execution_id:
-            _refresh_background_execution(conn, execution_id)
+        # The dispatcher refreshes all active execution counters once per tick.
+        # Avoid 99 completed items contending for the same batch row lock.
         conn.close()
 
 
-def _claim_background_items(worker_id: str) -> list[int]:
+def _background_worker_limit() -> int:
+    """Maximum in-flight background items for this API process.
+
+    Model calls have an additional process-wide gate.  Keeping this limit at
+    the same ceiling prevents a large executor from multiplying work across
+    several batches before that gate is reached.
+    """
+    try:
+        configured = int(os.getenv("PRICING_BACKGROUND_BATCH_CONCURRENCY", "99"))
+    except ValueError:
+        configured = 99
+    return max(1, min(configured, 99))
+
+
+def _claim_background_items(worker_id: str, global_limit: int) -> list[int]:
     from db.connection import get_connection
 
     conn = get_connection()
@@ -5684,6 +6162,12 @@ def _claim_background_items(worker_id: str) -> list[int]:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM pricing_task_batch_executions WHERE status IN ('queued','running','stop_requested') ORDER BY id")
             execution_ids = [int(row[0]) for row in cur.fetchall()]
+            cur.execute(
+                """SELECT COUNT(*) FROM pricing_task_batch_item_runs r
+                   JOIN pricing_task_batch_executions e ON e.id=r.execution_id
+                   WHERE e.status IN ('queued','running') AND r.status='running'"""
+            )
+            remaining_capacity = max(0, global_limit - int(cur.fetchone()[0] or 0))
         for execution_id in execution_ids:
             with conn.cursor() as cur:
                 cur.execute("SELECT batch_id,status,concurrency_limit FROM pricing_task_batch_executions WHERE id=%s FOR UPDATE", (execution_id,))
@@ -5701,7 +6185,7 @@ def _claim_background_items(worker_id: str) -> list[int]:
                         cur.execute("UPDATE pricing_task_batches SET status='stopped',finished_at=NOW(),updated_at=NOW() WHERE id=%s", (batch_id,))
                     conn.commit()
                     continue
-                available = max(0, limit - running)
+                available = min(max(0, limit - running), remaining_capacity)
                 if available:
                     cur.execute(
                         """SELECT id FROM pricing_task_batch_item_runs
@@ -5720,6 +6204,7 @@ def _claim_background_items(worker_id: str) -> list[int]:
                             (worker_id, ids),
                         )
                         claimed.extend(ids)
+                        remaining_capacity -= len(ids)
                         cur.execute("UPDATE pricing_task_batch_executions SET status='running',started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE id=%s", (execution_id,))
                         cur.execute("UPDATE pricing_task_batches SET status='running',updated_at=NOW() WHERE id=%s", (batch_id,))
                 conn.commit()
@@ -5731,13 +6216,14 @@ def _claim_background_items(worker_id: str) -> list[int]:
 
 def run_background_pricing_worker(stop_event: Any) -> None:
     worker_id = f"background:{os.getpid()}"
-    executor = ThreadPoolExecutor(max_workers=256, thread_name_prefix="background-pricing")
+    worker_limit = _background_worker_limit()
+    executor = ThreadPoolExecutor(max_workers=worker_limit, thread_name_prefix="background-pricing")
     futures: set[Any] = set()
     try:
         while not stop_event.is_set():
             futures = {future for future in futures if not future.done()}
             try:
-                for item_run_id in _claim_background_items(worker_id):
+                for item_run_id in _claim_background_items(worker_id, worker_limit):
                     futures.add(executor.submit(_run_background_item, item_run_id, worker_id))
             except Exception as exc:
                 print(f"[background-pricing] dispatcher error: {exc}", file=sys.stderr, flush=True)
