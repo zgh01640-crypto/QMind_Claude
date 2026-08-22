@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import re
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -13,6 +14,8 @@ from api import schemas
 from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner
 
 router = APIRouter()
+
+IMPORT_MANUAL_BOQ_SCRIPT = Path(__file__).resolve().parents[2] / "import_manual_boq.py"
 
 
 class ManualBoqProjectRename(BaseModel):
@@ -69,8 +72,10 @@ async def upload_project(
                 require_project_owner(conn, user, int(existing[0]), manual=True)
         finally:
             conn.close()
-        # 调用导入脚本（传原始文件名作为 source_file 标识）
-        cmd = [sys.executable, 'import_manual_boq.py', tmp.name, '--original-name', file.filename]
+        # 使用源码根目录下的绝对路径，避免服务启动目录变化后找不到导入脚本。
+        if not IMPORT_MANUAL_BOQ_SCRIPT.is_file():
+            raise HTTPException(500, f"人工工程导入脚本缺失: {IMPORT_MANUAL_BOQ_SCRIPT}")
+        cmd = [sys.executable, str(IMPORT_MANUAL_BOQ_SCRIPT), tmp.name, '--original-name', file.filename]
         if force:
             cmd.append('--force')
         else:

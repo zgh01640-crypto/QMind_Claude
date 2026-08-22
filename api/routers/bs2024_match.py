@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from typing import Optional
 from db.connection import get_connection
 from api.auth import CurrentUser, current_user, require_project_owner
+from api.services.model_profiles import active_profile, client_for, use_default_profile
 from db.pricing_kb_versions import apply_version_schema
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -355,13 +356,9 @@ def stream_match_bs2024_item_step1(boq_item: dict, system_prompt: str, conn):
     yield ("code_check", dict)
     yield ("judgment", dict)  # 新增：AI 的判断结论
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
-
-    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+    profile = active_profile()
+    model = profile.model
+    client = client_for(profile, timeout=60.0)
 
     # ── 第一轮：调用工具查询 ──
     user_msg = f"""## 待套定额的清单项
@@ -481,13 +478,9 @@ def stream_match_bs2024_item(boq_item: dict, system_prompt: str, max_retries: in
 
     为保证 submit_matches 调用不丢失，改用非流式 API，仅逐行流式显示推理。
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
-
-    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+    profile = active_profile()
+    model = profile.model
+    client = client_for(profile, timeout=120.0)
 
     results = []
     last_error = None
@@ -883,11 +876,12 @@ class SingleMatchRequest(BaseModel):
 
 
 @router.post("/bs2024-match/match-item-stream")
-def bs2024_match_item_stream(req: SingleMatchRequest):
+def bs2024_match_item_stream(req: SingleMatchRequest, user: CurrentUser = Depends(current_user)):
     """单条清单项 Step 1：编码核查（SSE 流式）。"""
 
     def generate():
         conn = get_connection()
+        profile_context = None
         try:
             # 1. 读清单项
             with conn.cursor() as cur:
@@ -899,6 +893,17 @@ def bs2024_match_item_stream(req: SingleMatchRequest):
             if not row:
                 yield f"data: {json.dumps({'type':'error','error':'清单项不存在'})}\n\n"
                 return
+            with conn.cursor() as cur:
+                cur.execute("SELECT i.project_id,p.owner_user_id FROM boq_items i JOIN boq_projects p ON p.id=i.project_id WHERE i.id=%s", (req.boq_item_id,))
+                project_row = cur.fetchone()
+            if not project_row:
+                yield f"data: {json.dumps({'type':'error','error':'清单项不存在'})}\n\n"
+                return
+            require_project_owner(conn, user, int(project_row[0]))
+            if project_row[1] is None:
+                raise HTTPException(status_code=404, detail="工程不存在")
+            profile_context = use_default_profile(int(project_row[1]))
+            profile_context.__enter__()
 
             boq_item = {
                 "id": row[0],
@@ -929,6 +934,8 @@ def bs2024_match_item_stream(req: SingleMatchRequest):
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','error':str(e)})}\n\n"
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -943,14 +950,23 @@ class MatchRunRequest(BaseModel):
 
 
 @router.post("/bs2024-match/runs/stream")
-def start_match_stream(req: MatchRunRequest):
+def start_match_stream(req: MatchRunRequest, user: CurrentUser = Depends(current_user)):
     """批量套定额（SSE 流式）。"""
 
     def generate():
         conn = get_connection()
         run_id = None
+        profile_context = None
         try:
             _ensure_schema(conn)
+            require_project_owner(conn, user, req.project_id)
+            with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM boq_projects WHERE id=%s", (req.project_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="工程不存在")
+            profile_context = use_default_profile(int(owner[0]))
+            profile_context.__enter__()
 
             # 确定章节 ID 列表（支持多选）
             cids = req.chapter_ids if req.chapter_ids else ([req.chapter_id] if req.chapter_id else [])
@@ -1105,6 +1121,8 @@ def start_match_stream(req: MatchRunRequest):
                     pass
             yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(

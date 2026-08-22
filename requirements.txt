@@ -12,6 +12,7 @@ numpy
 opencv-python
 pillow
 argon2-cffi
+cryptography
 paddleocr
 paddlepaddle
 easyocr

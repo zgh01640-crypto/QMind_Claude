@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 from openai import OpenAI
+from api.services.model_profiles import active_profile, client_for
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -323,6 +324,18 @@ def _parse_matches(raw_matches: list, reasoning_chain: str, cache_hit: int) -> l
 
 # ── AI 匹配（单次调用）────────────────────────────────────────────────────────
 
+def _model_client() -> tuple[OpenAI, str]:
+    """Use the active web user's profile; retain env support for offline scripts."""
+    try:
+        profile = active_profile()
+    except RuntimeError:
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("当前用户未配置默认模型")
+        return OpenAI(api_key=api_key, base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta"), timeout=120.0), os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    return client_for(profile, timeout=120.0), profile.model
+
+
 def match_boq_item(boq_item: dict, system_prompt: str) -> list[MatchResult]:
     """
     对单条 BOQ 清单项套定额（同步版本）。
@@ -331,13 +344,7 @@ def match_boq_item(boq_item: dict, system_prompt: str) -> list[MatchResult]:
     system_prompt: build_system_prompt() 构建的含全量定额的 prompt
     返回 list[MatchResult]，可能为空。
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
-
-    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+    client, model = _model_client()
 
     response = client.chat.completions.create(
         model=model,
@@ -380,13 +387,7 @@ def stream_match_boq_item(boq_item: dict, system_prompt: str):
       ("reasoning_token", str)        — 思维链片段（逐 token）
       ("result", list[MatchResult])   — 最终匹配列表（流结束时一次性）
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
-
-    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+    client, model = _model_client()
 
     stream = client.chat.completions.create(
         model=model,

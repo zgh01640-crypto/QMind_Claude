@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from api.routers import auth, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
+from api.routers import auth, model_profiles, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
 from api.auth import SESSION_COOKIE, apply_auth_schema, is_auth_enabled, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
 from db.connection import DatabasePoolBusyError
 
@@ -96,6 +96,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(model_profiles.router, prefix="/api", tags=["model-profiles"], dependencies=[Depends(require_authenticated)])
 for module, tag in ((periods, "periods"), (categories, "categories"), (items, "items"), (quota, "quota"), (quota2024, "quota2024"), (measure, "measure"), (building_standard_2024, "building_standard_2024"), (standard_reference_prices, "standard-reference-prices"), (pricing_kb, "pricing-kb")):
     app.include_router(module.router, prefix="/api", tags=[tag], dependencies=[Depends(require_authenticated)])
 for module, tag in ((upload, "upload"), (prompt_templates, "prompt-templates")):

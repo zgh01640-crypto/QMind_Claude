@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import queue
+from contextvars import copy_context
 
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File as FastAPIFile, Form
 from fastapi.responses import StreamingResponse
@@ -17,6 +18,7 @@ from api.schemas import (
 )
 from importer.boq_matcher import build_system_prompt, match_boq_item, stream_match_boq_item, _build_user_msg, _ROLE_DESC, _MATCH_TOOL
 from api.auth import CurrentUser, current_user, ensure_ownership_schema, require_project_owner
+from api.services.model_profiles import use_default_profile
 
 router = APIRouter()
 
@@ -513,8 +515,14 @@ def match_item(req: MatchItemRequest, user: CurrentUser = Depends(current_user))
     try:
         _ensure_match_schema(conn)
         _require_item_owner(conn, user, req.boq_item_id)
+        with conn.cursor() as cur:
+            cur.execute("SELECT p.owner_user_id FROM boq_items i JOIN boq_projects p ON p.id=i.project_id WHERE i.id=%s", (req.boq_item_id,))
+            owner = cur.fetchone()
+        if not owner or owner[0] is None:
+            raise HTTPException(status_code=404, detail="清单项不存在")
         sp = build_system_prompt(conn, req.standard_id)
-        return _run_match_for_item(conn, req.boq_item_id, req.standard_id, sp, run_id=None)
+        with use_default_profile(int(owner[0])):
+            return _run_match_for_item(conn, req.boq_item_id, req.standard_id, sp, run_id=None)
     except HTTPException:
         raise
     except Exception as e:
@@ -531,6 +539,12 @@ def match_project(req: MatchProjectRequest, user: CurrentUser = Depends(current_
     try:
         _ensure_match_schema(conn)
         require_project_owner(conn, user, req.project_id)
+        with conn.cursor() as cur:
+            cur.execute("SELECT owner_user_id FROM boq_projects WHERE id=%s", (req.project_id,))
+            owner = cur.fetchone()
+        if not owner or owner[0] is None:
+            raise HTTPException(status_code=404, detail="工程不存在")
+        owner_user_id = int(owner[0])
 
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM boq_items WHERE project_id = %s", (req.project_id,))
@@ -554,46 +568,41 @@ def match_project(req: MatchProjectRequest, user: CurrentUser = Depends(current_
     def run_in_background():
         bg_conn = get_connection()
         try:
-            sp = build_system_prompt(bg_conn, req.standard_id)
-            with bg_conn.cursor() as cur:
-                cur.execute("""
-                    SELECT id, item_name FROM boq_items
-                    WHERE project_id = %s ORDER BY item_seq
-                """, (req.project_id,))
-                items = cur.fetchall()
-
-            matched_count = 0
-            for item_id, item_name in items:
-                try:
-                    result = _run_match_for_item(bg_conn, item_id, req.standard_id, sp, run_id=run_id)
-                    matched_count += len(result)
-                except Exception as e:
-                    # 单条失败记录日志但继续，不阻塞整个批次
-                    import sys
-                    print(f"[match_run {run_id}] 跳过 item {item_id} ({item_name}): {e}", file=sys.stderr)
-                    # 回滚本条可能的脏事务
+            with use_default_profile(owner_user_id):
+                sp = build_system_prompt(bg_conn, req.standard_id)
+                with bg_conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT id, item_name FROM boq_items
+                        WHERE project_id = %s ORDER BY item_seq
+                    """, (req.project_id,))
+                    items = cur.fetchall()
+                matched_count = 0
+                for item_id, item_name in items:
                     try:
-                        bg_conn.rollback()
+                        result = _run_match_for_item(bg_conn, item_id, req.standard_id, sp, run_id=run_id)
+                        matched_count += len(result)
+                    except Exception as e:
+                        # 单条失败记录日志但继续，不阻塞整个批次
+                        import sys
+                        print(f"[match_run {run_id}] 跳过 item {item_id} ({item_name}): {e}", file=sys.stderr)
+                        try:
+                            bg_conn.rollback()
+                        except Exception:
+                            pass
+                    try:
+                        with bg_conn.cursor() as cur:
+                            cur.execute("UPDATE boq_match_runs SET matched_items = %s WHERE id = %s", (matched_count, run_id))
+                        bg_conn.commit()
                     except Exception:
                         pass
-                # 每条完成后实时更新进度
-                try:
-                    with bg_conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE boq_match_runs SET matched_items = %s WHERE id = %s",
-                            (matched_count, run_id)
-                        )
-                    bg_conn.commit()
-                except Exception:
-                    pass
 
-            with bg_conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE boq_match_runs
-                    SET status = 'done', matched_items = %s, finished_at = NOW()
-                    WHERE id = %s
-                """, (matched_count, run_id))
-            bg_conn.commit()
+                with bg_conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE boq_match_runs
+                        SET status = 'done', matched_items = %s, finished_at = NOW()
+                        WHERE id = %s
+                    """, (matched_count, run_id))
+                bg_conn.commit()
         except Exception as e:
             import sys
             print(f"[match_run {run_id}] 整体异常: {e}", file=sys.stderr)
@@ -1007,7 +1016,7 @@ def compare_runs(
 # ── 流式套定额端点 ─────────────────────────────────────────────────────────────
 
 @router.post("/boq/match-project-stream")
-def match_project_stream(req: MatchProjectRequest):
+def match_project_stream(req: MatchProjectRequest, user: CurrentUser = Depends(current_user)):
     """
     流式套定额：SSE 实时推送每条清单项的 AI 推理过程，同时写库。
     前端保持连接可看实时推理；切换页面后连接中断，但数据已写库，不影响结果。
@@ -1015,8 +1024,17 @@ def match_project_stream(req: MatchProjectRequest):
     def generate():
         conn = get_connection()
         run_id = None
+        profile_context = None
         try:
             _ensure_match_schema(conn)
+            require_project_owner(conn, user, req.project_id)
+            with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM boq_projects WHERE id=%s", (req.project_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="工程不存在")
+            profile_context = use_default_profile(int(owner[0]))
+            profile_context.__enter__()
 
             # 解析 standard_ids
             std_ids = req.standard_ids if req.standard_ids else ([req.standard_id] if req.standard_id else [])
@@ -1143,6 +1161,8 @@ def match_project_stream(req: MatchProjectRequest):
                 pass
             yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(
@@ -1162,7 +1182,7 @@ class MatchParallelRequest(BaseModel):
 
 
 @router.post("/boq/match-project-parallel")
-def match_project_parallel(req: MatchParallelRequest):
+def match_project_parallel(req: MatchParallelRequest, user: CurrentUser = Depends(current_user)):
     """
     并行套定额：N 个工作槽各自独立跑，前端可看到每个槽当前处理哪条清单项。
     SSE 事件：run_start / slot_start / slot_done / slot_error / run_done / run_error
@@ -1170,8 +1190,17 @@ def match_project_parallel(req: MatchParallelRequest):
     def generate():
         conn = get_connection()
         run_id = None
+        profile_context = None
         try:
             _ensure_match_schema(conn)
+            require_project_owner(conn, user, req.project_id)
+            with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM boq_projects WHERE id=%s", (req.project_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="工程不存在")
+            profile_context = use_default_profile(int(owner[0]))
+            profile_context.__enter__()
 
             std_ids = req.standard_ids if req.standard_ids else []
             if not std_ids:
@@ -1242,7 +1271,8 @@ def match_project_parallel(req: MatchParallelRequest):
                 event_q.put({'_t': 'slot_finished', 'slot': slot})
 
             for slot_idx in range(n_slots):
-                threading.Thread(target=_worker, args=(slot_idx,), daemon=True).start()
+                worker_context = copy_context()
+                threading.Thread(target=lambda ctx=worker_context, slot=slot_idx: ctx.run(_worker, slot), daemon=True).start()
 
             matched_count = 0
             finished_slots = 0
@@ -1320,6 +1350,8 @@ def match_project_parallel(req: MatchParallelRequest):
                 pass
             yield f"data: {json.dumps({'type':'run_error','error':str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(
@@ -1487,7 +1519,7 @@ class DebugMatchRequest(BaseModel):
 
 
 @router.post("/boq/match-item-debug")
-def match_item_debug(req: DebugMatchRequest):
+def match_item_debug(req: DebugMatchRequest, user: CurrentUser = Depends(current_user)):
     """
     单条清单项调试套定额：流式推理，可附带人工标准答案对比。
     若提供 batch_id，推理完成后持久化结果到 debug_item_results。
@@ -1495,6 +1527,7 @@ def match_item_debug(req: DebugMatchRequest):
     """
     def generate():
         conn = get_connection()
+        profile_context = None
         try:
             # ── 1. 获取清单项完整信息 ─────────────────────────────────────────
             with conn.cursor() as cur:
@@ -1506,6 +1539,16 @@ def match_item_debug(req: DebugMatchRequest):
             if not row:
                 yield f"data: {json.dumps({'type':'error','error':'清单项不存在'})}\n\n"
                 return
+            with conn.cursor() as cur:
+                cur.execute("SELECT i.project_id,p.owner_user_id FROM boq_items i JOIN boq_projects p ON p.id=i.project_id WHERE i.id=%s", (req.boq_item_id,))
+                project_row = cur.fetchone()
+            if not project_row:
+                raise HTTPException(status_code=404, detail="清单项不存在")
+            require_project_owner(conn, user, int(project_row[0]))
+            if project_row[1] is None:
+                raise HTTPException(status_code=404, detail="工程不存在")
+            profile_context = use_default_profile(int(project_row[1]))
+            profile_context.__enter__()
 
             boq_item = {
                 "id": row[0], "item_code": row[1], "item_name": row[2],
@@ -1630,6 +1673,8 @@ def match_item_debug(req: DebugMatchRequest):
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','error':str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(

@@ -30,6 +30,7 @@ from db.pricing_kb_versions import apply_version_schema, resolve_version_id
 from db.schema_lock import acquire_schema_transaction_lock
 from api.auth import CurrentUser, current_user, require_project_owner, require_task_owner
 from db.connection import suspend_connections_for_model_call
+from api.services.model_profiles import active_profile, bind_default_profile_iterator, client_for, use_default_profile
 
 router = APIRouter()
 _SCHEMA_LOCK = Lock()
@@ -39,7 +40,6 @@ _MODEL_GATE: BoundedSemaphore | None = None
 _MODEL_GATE_LIMIT = 0
 _MODEL_GATE_RUNNING = 0
 _MODEL_GATE_WAITING = 0
-_MODEL_CLIENTS: dict[bool, "_GatedOpenAIClient"] = {}
 
 
 def _json_dumps(data: Any) -> str:
@@ -909,20 +909,13 @@ class _GatedOpenAIClient:
 
 
 def _client(thinking: bool = True) -> _GatedOpenAIClient:
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY not set")
-    with _MODEL_GATE_LOCK:
-        cached = _MODEL_CLIENTS.get(thinking)
-        if cached is None:
-            base_url = "https://api.deepseek.com" if thinking else "https://api.deepseek.com/beta"
-            cached = _GatedOpenAIClient(OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=1))
-            _MODEL_CLIENTS[thinking] = cached
-        return cached
+    # A process-wide client cache would leak private credentials between users.
+    # The global gate still protects provider capacity for every fresh client.
+    return _GatedOpenAIClient(client_for(active_profile(), timeout=120.0))
 
 
 def _model() -> str:
-    return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    return active_profile().model
 
 _MODEL_CALL_ATTEMPTS = 3
 _MODEL_RETRY_DELAYS = (1.5, 4.0)
@@ -4943,6 +4936,12 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int, user: Cu
         item_run_id = None
         try:
             _ensure_schema(conn)
+            require_task_owner(conn, user, batch_id, batch=True)
+            with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM pricing_task_batches WHERE id=%s", (batch_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="批量任务不存在")
             batch, boq_item = _load_batch_and_item(conn, batch_id, boq_item_id)
             item_run_id = _create_or_reset_batch_item_run(
                 conn, batch_id, boq_item, batch["kb_version_id"]
@@ -5018,7 +5017,7 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int, user: Cu
             conn.close()
 
     return StreamingResponse(
-        generate(),
+        bind_default_profile_iterator(user.id, generate()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, no-transform",
@@ -5161,6 +5160,11 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int, user: CurrentUs
             _ensure_schema(conn)
             require_task_owner(conn, user, task_id)
             with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM pricing_tasks WHERE id=%s", (task_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="组价任务不存在")
+            with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, name, boq_project_id, quota_library_ids, manual_project_id, kb_version_id FROM pricing_tasks WHERE id=%s",
                     (task_id,),
@@ -5228,7 +5232,7 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int, user: CurrentUs
             conn.close()
 
     return StreamingResponse(
-        generate(),
+        bind_default_profile_iterator(user.id, generate()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, no-transform",
@@ -5497,13 +5501,21 @@ def export_background_pricing_task_batch_detail_report(batch_id: int):
 
 
 @router.post("/pricing-task-runs/{run_id}/conversion-check-stream")
-def pricing_task_conversion_check_stream(run_id: int):
+def pricing_task_conversion_check_stream(run_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
         conn = get_connection()
         try:
             _ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT t.id,t.owner_user_id FROM pricing_task_runs r JOIN pricing_tasks t ON t.id=r.task_id WHERE r.id=%s", (run_id,))
+                owner = cur.fetchone()
+            if not owner or owner[1] is None:
+                raise HTTPException(status_code=404, detail="运行记录不存在")
+            require_task_owner(conn, user, int(owner[0]))
+            profile_context = use_default_profile(int(owner[1]))
+            profile_context.__enter__()
             step_timings = _load_step_timings(conn, run_id)
             step_started_at = datetime.now()
             step_started_perf = perf_counter()
@@ -5590,19 +5602,29 @@ def pricing_task_conversion_check_stream(run_id: int):
             print(f"[pricing-task] conversion check SSE error: {exc}", file=sys.stderr, flush=True)
             yield _sse({"type": "error", "error": str(exc)})
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.post("/pricing-task-runs/{run_id}/coefficient-check-stream")
-def pricing_task_coefficient_check_stream(run_id: int):
+def pricing_task_coefficient_check_stream(run_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
         conn = get_connection()
         try:
             _ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT t.id,t.owner_user_id FROM pricing_task_runs r JOIN pricing_tasks t ON t.id=r.task_id WHERE r.id=%s", (run_id,))
+                owner = cur.fetchone()
+            if not owner or owner[1] is None:
+                raise HTTPException(status_code=404, detail="运行记录不存在")
+            require_task_owner(conn, user, int(owner[0]))
+            profile_context = use_default_profile(int(owner[1]))
+            profile_context.__enter__()
             step_timings = _load_step_timings(conn, run_id)
             step_started_at = datetime.now()
             step_started_perf = perf_counter()
@@ -5695,6 +5717,8 @@ def pricing_task_coefficient_check_stream(run_id: int):
             print(f"[pricing-task] coefficient check SSE error: {exc}", file=sys.stderr, flush=True)
             yield _sse({"type": "error", "error": str(exc)})
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -5808,14 +5832,21 @@ def _batch_coefficient_business_events(items: list[dict[str, Any]], boq_item: di
 
 
 @router.post("/pricing-task-batch-item-runs/{item_run_id}/conversion-check-stream")
-def pricing_task_batch_conversion_check_stream(item_run_id: int):
+def pricing_task_batch_conversion_check_stream(item_run_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
         conn = get_connection()
+        profile_context = None
         try:
             _ensure_schema(conn)
             _, _, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+            with conn.cursor() as cur:
+                cur.execute("SELECT b.owner_user_id FROM pricing_task_batch_item_runs r JOIN pricing_task_batches b ON b.id=r.batch_id WHERE r.id=%s", (item_run_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="批量运行记录不存在")
+            require_task_owner(conn, user, _load_batch_item_run_context(conn, item_run_id)[0], batch=True)
             confirmed_items = context["items"]
             step_timings = _load_batch_step_timings(conn, item_run_id)
             step_started_at = datetime.now()
@@ -5842,11 +5873,11 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int):
         finally:
             conn.close()
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(bind_default_profile_iterator(user.id, generate()), media_type="text/event-stream")
 
 
 @router.post("/pricing-task-batch-item-runs/{item_run_id}/coefficient-check-stream")
-def pricing_task_batch_coefficient_check_stream(item_run_id: int):
+def pricing_task_batch_coefficient_check_stream(item_run_id: int, user: CurrentUser = Depends(current_user)):
     from db.connection import get_connection
 
     def generate():
@@ -5854,6 +5885,12 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
         try:
             _ensure_schema(conn)
             batch_id, batch_run, boq_item, context = _load_batch_item_run_context(conn, item_run_id)
+            require_task_owner(conn, user, batch_id, batch=True)
+            with conn.cursor() as cur:
+                cur.execute("SELECT owner_user_id FROM pricing_task_batches WHERE id=%s", (batch_id,))
+                owner = cur.fetchone()
+            if not owner or owner[0] is None:
+                raise HTTPException(status_code=404, detail="批量任务不存在")
             kb_version_id = int(batch_run["kb_version_id"])
             conversion_check = _hydrate_conversion_combo_resources(
                 conn, batch_run.get("conversion_check") or {}, kb_version_id
@@ -5887,7 +5924,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int):
         finally:
             conn.close()
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(bind_default_profile_iterator(user.id, generate()), media_type="text/event-stream")
 
 
 _BACKGROUND_TOOL_NEXT = {
@@ -6030,13 +6067,15 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
 
     conn = get_connection()
     batch_id = execution_id = boq_item_id = None
+    profile_context = None
     try:
       with release_connections_during_model_calls():
         _ensure_schema(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT r.batch_id,r.execution_id,r.boq_item_id,b.quota_library_ids,b.manual_project_id,b.kb_version_id,
-                          i.item_code,i.item_name,i.item_description,i.unit,i.quantity,i.project_id,r.attempt_count
+                          i.item_code,i.item_name,i.item_description,i.unit,i.quantity,i.project_id,r.attempt_count,
+                          b.owner_user_id
                    FROM pricing_task_batch_item_runs r
                    JOIN pricing_task_batches b ON b.id=r.batch_id JOIN boq_items i ON i.id=r.boq_item_id
                    WHERE r.id=%s""",
@@ -6046,6 +6085,10 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
         if not row:
             return
         batch_id, execution_id, boq_item_id = int(row[0]), int(row[1]), int(row[2])
+        if row[13] is None:
+            raise RuntimeError("后台批量任务没有归属用户，无法解析模型配置")
+        profile_context = use_default_profile(int(row[13]))
+        profile_context.__enter__()
         boq_item = {"id": boq_item_id, "item_code": row[6], "item_name": row[7], "item_description": row[8],
                     "unit": row[9], "quantity": float(row[10]) if row[10] is not None else None, "project_id": int(row[11])}
         _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "code_check", "running")
@@ -6126,6 +6169,8 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                 else:
                     conn.commit()
     finally:
+        if profile_context:
+            profile_context.__exit__(None, None, None)
         # The dispatcher refreshes all active execution counters once per tick.
         # Avoid 99 completed items contending for the same batch row lock.
         conn.close()
@@ -6686,13 +6731,14 @@ def reject_pricing_task_run(run_id: int):
 
 
 @router.post("/pricing-task/match-item-stream")
-def pricing_task_match_item_stream(req: dict[str, Any]):
+def pricing_task_match_item_stream(req: dict[str, Any], user: CurrentUser = Depends(current_user)):
     """Compatibility endpoint used by older frontend code."""
     from db.connection import get_connection
 
     def generate():
         conn = get_connection()
         run_id = None
+        profile_context = None
         try:
             _ensure_schema(conn)
             with conn.cursor() as cur:
@@ -6704,6 +6750,9 @@ def pricing_task_match_item_stream(req: dict[str, Any]):
             if not row:
                 yield _sse({"type": "error", "error": "Item not found"})
                 return
+            require_project_owner(conn, user, int(row[6]))
+            profile_context = use_default_profile(user.id)
+            profile_context.__enter__()
             boq_item = {
                 "id": row[0],
                 "item_code": row[1],
@@ -6744,6 +6793,8 @@ def pricing_task_match_item_stream(req: dict[str, Any]):
                 _update_run(conn, run_id, status="failed", error_message=str(exc), finished_at=datetime.now())
             yield _sse({"type": "error", "error": str(exc)})
         finally:
+            if profile_context:
+                profile_context.__exit__(None, None, None)
             conn.close()
 
     return StreamingResponse(generate(), media_type="text/event-stream")

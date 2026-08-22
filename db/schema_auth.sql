@@ -22,6 +22,22 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_valid ON auth_sessions(token_hash, expires_at)
     WHERE revoked_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS user_model_profiles (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name              VARCHAR(80) NOT NULL,
+    provider          VARCHAR(32) NOT NULL,
+    base_url          VARCHAR(500) NOT NULL,
+    model             VARCHAR(160) NOT NULL,
+    encrypted_api_key TEXT NOT NULL,
+    key_hint          VARCHAR(32) NOT NULL,
+    is_default        BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_model_profiles_user ON user_model_profiles(user_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_model_profiles_default ON user_model_profiles(user_id) WHERE is_default;
+
 DO $$ BEGIN
     IF to_regclass('boq_projects') IS NOT NULL THEN
         ALTER TABLE boq_projects ADD COLUMN IF NOT EXISTS owner_user_id INT REFERENCES users(id);
