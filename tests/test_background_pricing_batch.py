@@ -1,4 +1,5 @@
 from api.routers import pricing_task
+from db import connection as db_connection
 
 
 def test_background_pipeline_uses_complete_single_item_tool_sequence():
@@ -85,3 +86,129 @@ def test_model_rate_limit_is_recognized_without_entering_retry_policy():
     assert pricing_task._is_model_rate_limited(RuntimeError("HTTP 429 too many requests"))
     assert pricing_task._is_model_rate_limited(RuntimeError("当前账号余额不足"))
     assert not pricing_task._is_model_rate_limited(TimeoutError("connection timed out"))
+
+
+def test_sse_event_chunk_closes_connection_before_events_are_returned(monkeypatch):
+    rows = [
+        (index, 1, index, index, "tool_completed", {"index": index}, None)
+        for index in range(1, 201)
+    ]
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            return None
+
+        def fetchall(self):
+            return rows
+
+    class Conn:
+        closed = False
+
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            self.closed = True
+
+    conn = Conn()
+    monkeypatch.setattr(db_connection, "get_connection", lambda: conn)
+
+    events = pricing_task._read_background_event_chunk(42, 0)
+
+    assert len(events) == 200
+    assert conn.closed is True
+    assert events[-1]["id"] == 200
+
+
+def test_pool_busy_background_item_is_deferred_without_business_retry(monkeypatch):
+    class BusyConn:
+        rolled_back = False
+        closed = False
+
+        def cursor(self):
+            raise db_connection.DatabasePoolBusyError("数据库连接池繁忙，请稍后重试")
+
+        def rollback(self):
+            self.rolled_back = True
+
+        def close(self):
+            self.closed = True
+
+    conn = BusyConn()
+    deferred = []
+    monkeypatch.setattr(db_connection, "get_connection", lambda: conn)
+    monkeypatch.setattr(pricing_task, "_ensure_schema", lambda _conn: None)
+    monkeypatch.setattr(
+        pricing_task,
+        "_defer_background_item_after_pool_busy",
+        lambda item_run_id, message: deferred.append((item_run_id, message)) or True,
+    )
+
+    pricing_task._run_background_item(123, "worker:test")
+
+    assert deferred == [(123, "数据库连接池繁忙，请稍后重试")]
+    assert conn.rolled_back is True
+    assert conn.closed is True
+
+
+def test_background_item_releases_context_lease_before_loading_model_profile(monkeypatch):
+    row = (42, 13, 99, [], None, 8, "031001001", "测试清单", "", "项", 1, 7, 1, 5)
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args):
+            return None
+
+        def fetchone(self):
+            return row
+
+    class Conn:
+        committed = False
+        closed = False
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    class ProfileContext:
+        def __enter__(self):
+            assert conn.committed is True
+            raise db_connection.DatabasePoolBusyError("stop after ordering assertion")
+
+        def __exit__(self, *_args):
+            return None
+
+    conn = Conn()
+    deferred = []
+    monkeypatch.setattr(db_connection, "get_connection", lambda: conn)
+    monkeypatch.setattr(pricing_task, "_ensure_schema", lambda _conn: None)
+    monkeypatch.setattr(pricing_task, "use_default_profile", lambda _user_id: ProfileContext())
+    monkeypatch.setattr(
+        pricing_task,
+        "_defer_background_item_after_pool_busy",
+        lambda item_run_id, message: deferred.append((item_run_id, message)) or True,
+    )
+
+    pricing_task._run_background_item(123, "worker:test")
+
+    assert deferred == [(123, "stop after ordering assertion")]
+    assert conn.closed is True

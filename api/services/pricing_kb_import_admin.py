@@ -317,6 +317,7 @@ def run_next_job(worker_id: str | None = None) -> int | None:
     job_id = None
     version_id = None
     lock_acquired = False
+    conn.pin()
     try:
         apply_version_schema(conn)
         with conn.cursor() as cur:
@@ -367,4 +368,5 @@ def run_next_job(worker_id: str | None = None) -> int | None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+        conn.unpin()
         conn.close()

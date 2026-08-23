@@ -50,6 +50,7 @@ class PricingTaskToolRetryTests(unittest.TestCase):
 
         with (
             patch.object(pricing_task, "_client", return_value=_client(completions)),
+            patch.object(pricing_task, "_model", return_value="test-model"),
             patch.object(pricing_task, "_wait_before_model_retry") as wait_mock,
         ):
             with self.assertRaises(pricing_task.ModelRateLimitError):
@@ -72,6 +73,7 @@ class PricingTaskToolRetryTests(unittest.TestCase):
 
         with (
             patch.object(pricing_task, "_client", return_value=_client(completions)),
+            patch.object(pricing_task, "_model", return_value="test-model"),
             patch.object(pricing_task, "_wait_before_model_retry") as wait_mock,
         ):
             result = pricing_task._run_tool_fallback(
@@ -94,6 +96,7 @@ class PricingTaskToolRetryTests(unittest.TestCase):
 
         with (
             patch.object(pricing_task, "_client", return_value=_client(completions)),
+            patch.object(pricing_task, "_model", return_value="test-model"),
             patch.object(pricing_task, "_wait_before_model_retry") as wait_mock,
         ):
             events = list(

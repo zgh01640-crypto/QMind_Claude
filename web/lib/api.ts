@@ -1565,7 +1565,14 @@ export interface BackgroundBatchWorkspace {
   summary: BackgroundBatchWorkspaceSummary
   runtime_metrics: {
     model: { limit: number; running: number; waiting: number }
-    database: { max: number; in_use: number; available: number }
+    database: {
+      max: number
+      in_use: number
+      available: number
+      waiting: number
+      longest_lease_seconds: number
+      long_lease_count: number
+    }
     model_rate_limited_failed_count: number
   }
   items: BackgroundBatchWorkspaceItem[]
@@ -2033,9 +2040,11 @@ export async function streamBackgroundPricingTaskBatchEvents(
   batchId: number,
   afterId: number,
   onEvent: (event: BackgroundBatchEvent) => void,
+  signal?: AbortSignal,
 ) {
   const response = await fetch(
     `${API}/api/pricing-task-background-batches/${batchId}/events-stream?after_id=${afterId}`,
+    { signal },
   )
   if (!response.ok || !response.body) throw new Error(`事件流连接失败 ${response.status}`)
   const reader = response.body.getReader()

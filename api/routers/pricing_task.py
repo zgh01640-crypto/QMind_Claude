@@ -29,7 +29,7 @@ from psycopg2.extras import Json
 from db.pricing_kb_versions import apply_version_schema, resolve_version_id
 from db.schema_lock import acquire_schema_transaction_lock
 from api.auth import CurrentUser, current_user, require_project_owner, require_task_owner
-from db.connection import suspend_connections_for_model_call
+from db.connection import DatabasePoolBusyError, suspend_connections_for_model_call
 from api.services.model_profiles import active_profile, bind_default_profile_iterator, client_for, use_default_profile
 
 router = APIRouter()
@@ -4727,30 +4727,59 @@ def stream_background_batch_events(batch_id: int, after_id: int = 0, user: Curre
         cursor_id = max(0, after_id)
         idle_rounds = 0
         while idle_rounds < 30:
-            conn = get_connection()
+            events: list[str] = []
             try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """SELECT id,execution_id,item_run_id,boq_item_id,event_type,payload,created_at
-                           FROM pricing_task_batch_events WHERE batch_id=%s AND id>%s ORDER BY id LIMIT 200""",
-                        (batch_id, cursor_id),
-                    )
-                    rows = cur.fetchall()
+                rows = _read_background_event_chunk(batch_id, cursor_id)
                 if rows:
                     idle_rounds = 0
                     for row in rows:
-                        cursor_id = int(row[0])
-                        yield _sse({"id": cursor_id, "execution_id": row[1], "item_run_id": row[2],
-                                    "boq_item_id": row[3], "event_type": row[4], "payload": row[5] or {},
-                                    "created_at": row[6]})
+                        cursor_id = int(row["id"])
+                        events.append(_sse(row))
                 else:
                     idle_rounds += 1
-                    yield ": keep-alive\n\n"
-            finally:
-                conn.close()
+                    events.append(": keep-alive\n\n")
+            except DatabasePoolBusyError:
+                idle_rounds += 1
+                events.append(_sse({
+                    "id": cursor_id,
+                    "execution_id": None,
+                    "item_run_id": None,
+                    "boq_item_id": None,
+                    "event_type": "database_busy",
+                    "payload": {"retryable": True, "retry_after_seconds": 1},
+                    "created_at": datetime.now(),
+                }))
+            # The physical connection is always returned before streaming any
+            # bytes to a potentially slow or disconnected browser.
+            yield from events
             sleep(1)
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _read_background_event_chunk(batch_id: int, after_id: int) -> list[dict[str, Any]]:
+    """Load and detach one SSE event chunk from its short database lease."""
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id,execution_id,item_run_id,boq_item_id,event_type,payload,created_at
+                   FROM pricing_task_batch_events WHERE batch_id=%s AND id>%s ORDER BY id LIMIT 200""",
+                (batch_id, after_id),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id": int(row[0]), "execution_id": row[1], "item_run_id": row[2],
+                "boq_item_id": row[3], "event_type": row[4], "payload": row[5] or {},
+                "created_at": row[6],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
 
 
 def _load_batch_and_item(conn, batch_id: int, boq_item_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -6062,6 +6091,48 @@ def _refresh_background_execution(conn, execution_id: int) -> None:
                           {"status": final_status, "selected_count": selected, "completed_count": completed, "failed_count": failed})
 
 
+def _defer_background_item_after_pool_busy(item_run_id: int, message: str) -> bool:
+    """Return infrastructure-starved work to the queue without consuming an attempt."""
+    from db.connection import get_connection
+
+    for delay in (0.5, 1.0, 2.0):
+        sleep(delay)
+        retry_conn = get_connection()
+        try:
+            with retry_conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE pricing_task_batch_item_runs
+                       SET status='retrying',attempt_count=GREATEST(attempt_count-1,0),
+                           error_message=NULL,current_tool_status='retrying',
+                           current_tool_output='数据库连接暂时繁忙，已重新排队',
+                           next_attempt_at=NOW()+INTERVAL '2 seconds',lease_owner=NULL,
+                           lease_expires_at=NULL,finished_at=NULL,updated_at=NOW()
+                       WHERE id=%s
+                       RETURNING batch_id,execution_id,boq_item_id""",
+                    (item_run_id,),
+                )
+                row = cur.fetchone()
+            if row:
+                _background_event(
+                    retry_conn, int(row[0]), int(row[1]), item_run_id, int(row[2]),
+                    "item_deferred",
+                    {"reason": "database_pool_busy", "retry_after_seconds": 2},
+                )
+            else:
+                retry_conn.commit()
+            return True
+        except DatabasePoolBusyError:
+            retry_conn.rollback()
+        except Exception as exc:
+            retry_conn.rollback()
+            print(f"[background-pricing] failed to defer item {item_run_id}: {exc}", file=sys.stderr, flush=True)
+            return False
+        finally:
+            retry_conn.close()
+    print(f"[background-pricing] pool remained busy while deferring item {item_run_id}", file=sys.stderr, flush=True)
+    return False
+
+
 def _run_background_item(item_run_id: int, worker_id: str) -> None:
     from db.connection import get_connection, release_connections_during_model_calls
 
@@ -6084,6 +6155,10 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
             row = cur.fetchone()
         if not row:
             return
+        # Model profile resolution opens its own short database connection.
+        # Release the item-context transaction first so 99 workers cannot each
+        # hold one pool slot while waiting for a second slot.
+        conn.commit()
         batch_id, execution_id, boq_item_id = int(row[0]), int(row[1]), int(row[2])
         if row[13] is None:
             raise RuntimeError("后台批量任务没有归属用户，无法解析模型配置")
@@ -6123,13 +6198,18 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
         _update_batch_item_run(conn, item_run_id, confirmed_results=confirmed, commit=False)
         if not matches:
             _update_batch_item_run(conn, item_run_id, status="no_match", current_tool_status="success",
+                                   error_message=None,
                                    finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
         else:
             _execute_background_conversion(conn, batch_id, execution_id, item_run_id, boq_item_id)
             _execute_background_coefficient(conn, batch_id, execution_id, item_run_id, boq_item_id)
             _update_batch_item_run(conn, item_run_id, status="confirmed", current_tool_status="success",
+                                   error_message=None,
                                    finished_at=datetime.now(), lease_owner=None, lease_expires_at=None, updated_at=datetime.now(), commit=False)
         _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "item_succeeded", {"status": "confirmed" if matches else "no_match"})
+    except DatabasePoolBusyError as exc:
+        conn.rollback()
+        _defer_background_item_after_pool_busy(item_run_id, str(exc))
     except ModelRateLimitError as exc:
         conn.rollback()
         if item_run_id and batch_id and execution_id and boq_item_id:
@@ -6244,7 +6324,8 @@ def _claim_background_items(worker_id: str, global_limit: int) -> list[int]:
                         cur.execute(
                             """UPDATE pricing_task_batch_item_runs SET status='running',attempt_count=attempt_count+1,
                                started_at=COALESCE(started_at,NOW()),lease_owner=%s,
-                               lease_expires_at=NOW()+INTERVAL '15 minutes',next_attempt_at=NULL,updated_at=NOW()
+                               lease_expires_at=NOW()+INTERVAL '1 minute',next_attempt_at=NULL,
+                               error_message=NULL,updated_at=NOW()
                                WHERE id=ANY(%s)""",
                             (worker_id, ids),
                         )
@@ -6270,6 +6351,9 @@ def run_background_pricing_worker(stop_event: Any) -> None:
             try:
                 for item_run_id in _claim_background_items(worker_id, worker_limit):
                     futures.add(executor.submit(_run_background_item, item_run_id, worker_id))
+            except DatabasePoolBusyError:
+                stop_event.wait(2.0)
+                continue
             except Exception as exc:
                 print(f"[background-pricing] dispatcher error: {exc}", file=sys.stderr, flush=True)
             stop_event.wait(0.8)

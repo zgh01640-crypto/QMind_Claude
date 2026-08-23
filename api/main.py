@@ -75,9 +75,9 @@ app = FastAPI(title="深圳信息价管理系统", version="1.0.0", lifespan=lif
 
 @app.middleware("http")
 async def attach_authenticated_user(request: Request, call_next):
-    if is_auth_enabled() and request.url.path.startswith("/api/"):
-        request.state.user = resolve_session(request.cookies.get(SESSION_COOKIE))
     try:
+        if is_auth_enabled() and request.url.path.startswith("/api/"):
+            request.state.user = resolve_session(request.cookies.get(SESSION_COOKIE))
         return await call_next(request)
     except DatabasePoolBusyError:
         return JSONResponse(status_code=503, content={"detail": "数据库繁忙，请稍后重试"})

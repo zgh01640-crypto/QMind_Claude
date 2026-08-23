@@ -173,14 +173,25 @@ export default function BackgroundBatchDetailPage() {
   useEffect(() => {
     if (!active) return
     let cancelled = false
+    const controller = new AbortController()
     async function connect() {
       while (!cancelled) {
-        try { await streamBackgroundPricingTaskBatchEvents(batchId, lastEventId.current, event => { lastEventId.current = Math.max(lastEventId.current, event.id); scheduleRefresh() }) } catch { /* polling fallback */ }
+        try {
+          await streamBackgroundPricingTaskBatchEvents(batchId, lastEventId.current, event => {
+            if (event.event_type === 'database_busy') return
+            lastEventId.current = Math.max(lastEventId.current, event.id)
+            scheduleRefresh()
+          }, controller.signal)
+        } catch {
+          if (controller.signal.aborted) return
+          // Keep polling and reconnect after a transient stream failure.
+        }
         if (!cancelled) await new Promise(resolve => window.setTimeout(resolve, 1500))
       }
     }
-    void connect(); return () => { cancelled = true }
+    void connect(); return () => { cancelled = true; controller.abort() }
   }, [active, batchId, scheduleRefresh])
+  useEffect(() => () => { if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current) }, [])
 
   const focused = workspace?.items.find(item => item.id === focusedId)
   useEffect(() => {
@@ -210,7 +221,7 @@ export default function BackgroundBatchDetailPage() {
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto max-w-[1560px] px-6 py-5">
       <div className="flex items-center justify-between gap-6"><div className="min-w-0"><div className="text-xs text-slate-500"><Link href="/pricing-task/background-batch" className="font-semibold text-sky-700 hover:underline">← 后台批次</Link><span className="mx-2 text-slate-300">/</span>{batch.project_name}</div><div className="mt-2 flex flex-wrap items-center gap-2"><h1 className="mr-2 truncate text-2xl font-semibold tracking-tight">{batch.name}</h1><Badge value={`知识库版本 ${batch.kb_version_id ?? '—'}`} meta={['', 'border-sky-200 bg-sky-50 text-sky-700']} /><Badge value={`人工：${batch.manual_project_name || batch.manual_project_id || '—'}`} meta={['', 'border-slate-200 bg-slate-50 text-slate-600']} /></div></div>
         <div className="flex shrink-0 gap-2"><button onClick={() => void exportExcel()} disabled={exporting} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-40">{exporting ? '导出中…' : '导出 Excel'}</button>{active ? <button onClick={() => void stop()} disabled={stopping || execution?.status === 'stop_requested'} className="rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{execution?.status === 'stop_requested' ? '停止中…' : '停止领取'}</button> : <button onClick={() => void start()} disabled={starting || !selected.size} className="rounded-lg bg-sky-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-sky-800 disabled:opacity-40">{starting ? '启动中…' : `后台执行 ${selected.size} 条`}</button>}</div></div>
-      <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Metric label="执行进度" value={`${summary.completed_count} / ${summary.total_count}`} note={`等待 ${summary.waiting_count} · 处理中 ${summary.running_count} · 失败 ${summary.failed_count}`} /><Metric label="全局模型并发" value={`${runtime_metrics.model.running} / ${runtime_metrics.model.limit}`} note={`等待调用 ${runtime_metrics.model.waiting} · 限流失败 ${runtime_metrics.model_rate_limited_failed_count}`} tone="bg-sky-50/60" /><Metric label="数据库连接池" value={`${runtime_metrics.database.in_use} / ${runtime_metrics.database.max}`} note={`可用 ${runtime_metrics.database.available} · 当前批次重试 ${summary.retrying_count}`} /><Metric label="执行节奏" value={duration(summary.elapsed_seconds * 1000)} note={`${summary.throughput_per_minute}/分钟 · 预计剩余 ${duration(summary.eta_seconds == null ? null : summary.eta_seconds * 1000)}`} /></div>
+      <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Metric label="执行进度" value={`${summary.completed_count} / ${summary.total_count}`} note={`等待 ${summary.waiting_count} · 处理中 ${summary.running_count} · 失败 ${summary.failed_count}`} /><Metric label="全局模型并发" value={`${runtime_metrics.model.running} / ${runtime_metrics.model.limit}`} note={`等待调用 ${runtime_metrics.model.waiting} · 限流失败 ${runtime_metrics.model_rate_limited_failed_count}`} tone="bg-sky-50/60" /><Metric label="数据库连接池" value={`${runtime_metrics.database.in_use} / ${runtime_metrics.database.max}`} note={`等待 ${runtime_metrics.database.waiting} · 长租约 ${runtime_metrics.database.long_lease_count} · 最长 ${runtime_metrics.database.longest_lease_seconds.toFixed(1)}秒`} /><Metric label="执行节奏" value={duration(summary.elapsed_seconds * 1000)} note={`${summary.throughput_per_minute}/分钟 · 预计剩余 ${duration(summary.eta_seconds == null ? null : summary.eta_seconds * 1000)}`} /></div>
     </div></header>
 
     <div className="mx-auto grid max-w-[1560px] grid-cols-[340px_minmax(0,1fr)] gap-6 px-6 py-6">
