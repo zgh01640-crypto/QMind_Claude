@@ -19,6 +19,11 @@ _LEASE_LOCK = Lock()
 _LEASE_SEQUENCE = count(1)
 _ACTIVE_LEASES: dict[int, dict[str, float | int]] = {}
 _POOL_WAITING = 0
+_BACKGROUND_POOL_LOCK = Lock()
+_BACKGROUND_POOL_SLOTS: BoundedSemaphore | None = None
+_BACKGROUND_POOL_LIMIT = 0
+_BACKGROUND_POOL_WAITING = 0
+_BACKGROUND_POOL_IN_USE = 0
 
 
 class DatabasePoolBusyError(RuntimeError):
@@ -47,6 +52,25 @@ def _get_pool() -> tuple[ThreadedConnectionPool, BoundedSemaphore, int]:
     return _POOL, _POOL_SLOTS, _POOL_MAX
 
 
+def _background_pool_config() -> int:
+    _, max_connections, _ = _pool_config()
+    try:
+        configured = int(os.getenv("PRICING_BACKGROUND_DB_CONCURRENCY", "16"))
+    except ValueError:
+        configured = 16
+    return max(1, min(configured, max_connections - 1))
+
+
+def _get_background_pool_slots() -> tuple[BoundedSemaphore, int]:
+    global _BACKGROUND_POOL_SLOTS, _BACKGROUND_POOL_LIMIT
+    limit = _background_pool_config()
+    with _BACKGROUND_POOL_LOCK:
+        if _BACKGROUND_POOL_SLOTS is None:
+            _BACKGROUND_POOL_SLOTS = BoundedSemaphore(limit)
+            _BACKGROUND_POOL_LIMIT = limit
+    return _BACKGROUND_POOL_SLOTS, _BACKGROUND_POOL_LIMIT
+
+
 def _thread_connections() -> list["PooledConnection"]:
     connections = getattr(_THREAD_STATE, "connections", None)
     if connections is None:
@@ -57,6 +81,10 @@ def _thread_connections() -> list["PooledConnection"]:
 
 def _model_release_enabled() -> bool:
     return bool(getattr(_THREAD_STATE, "release_before_model", False))
+
+
+def _background_database_enabled() -> bool:
+    return bool(getattr(_THREAD_STATE, "background_database", False))
 
 
 class PooledConnection:
@@ -73,13 +101,43 @@ class PooledConnection:
         self._return_pending = False
         self._pin_depth = 0
         self._closed = False
+        self._background_slot_acquired = False
         _thread_connections().append(self)
+
+    def _acquire_background_slot(self) -> None:
+        if not _background_database_enabled() or self._background_slot_acquired:
+            return
+        background_slots, _ = _get_background_pool_slots()
+        global _BACKGROUND_POOL_WAITING, _BACKGROUND_POOL_IN_USE
+        with _BACKGROUND_POOL_LOCK:
+            _BACKGROUND_POOL_WAITING += 1
+        try:
+            # Background database work queues here without consuming the
+            # ordinary pool wait timeout or a business retry attempt.
+            background_slots.acquire()
+        finally:
+            with _BACKGROUND_POOL_LOCK:
+                _BACKGROUND_POOL_WAITING -= 1
+        with _BACKGROUND_POOL_LOCK:
+            _BACKGROUND_POOL_IN_USE += 1
+        self._background_slot_acquired = True
+
+    def _release_background_slot(self) -> None:
+        if not self._background_slot_acquired:
+            return
+        background_slots, _ = _get_background_pool_slots()
+        self._background_slot_acquired = False
+        global _BACKGROUND_POOL_IN_USE
+        with _BACKGROUND_POOL_LOCK:
+            _BACKGROUND_POOL_IN_USE = max(0, _BACKGROUND_POOL_IN_USE - 1)
+        background_slots.release()
 
     def _acquire(self):
         if self._closed:
             raise RuntimeError("数据库连接已关闭")
         if self._conn is not None:
             return self._conn
+        self._acquire_background_slot()
         pool, slots, _ = _get_pool()
         _, _, wait_seconds = _pool_config()
         global _POOL_WAITING
@@ -87,6 +145,7 @@ class PooledConnection:
             _POOL_WAITING += 1
         try:
             if not slots.acquire(timeout=wait_seconds):
+                self._release_background_slot()
                 raise DatabasePoolBusyError("数据库连接池繁忙，请稍后重试")
         finally:
             with _LEASE_LOCK:
@@ -95,6 +154,7 @@ class PooledConnection:
             conn = pool.getconn()
         except Exception:
             slots.release()
+            self._release_background_slot()
             raise
         lease_id = next(_LEASE_SEQUENCE)
         with _LEASE_LOCK:
@@ -128,6 +188,7 @@ class PooledConnection:
                 with _LEASE_LOCK:
                     _ACTIVE_LEASES.pop(lease_id, None)
             slots.release()
+            self._release_background_slot()
 
     def _finish_transaction(self, action: str, *, suppress_errors: bool = False) -> None:
         conn = self._acquire()
@@ -240,6 +301,17 @@ def release_connections_during_model_calls():
         _THREAD_STATE.release_before_model = previous
 
 
+@contextmanager
+def background_database_connections():
+    """Cap physical leases used by background pricing while reserving API capacity."""
+    previous = getattr(_THREAD_STATE, "background_database", False)
+    _THREAD_STATE.background_database = True
+    try:
+        yield
+    finally:
+        _THREAD_STATE.background_database = previous
+
+
 def suspend_connections_for_model_call() -> None:
     if not _model_release_enabled():
         return
@@ -249,11 +321,15 @@ def suspend_connections_for_model_call() -> None:
 
 def get_connection_pool_metrics() -> dict[str, int | float]:
     _, _, max_connections = _get_pool()
+    _, background_limit = _get_background_pool_slots()
     now = monotonic()
     with _LEASE_LOCK:
         ages = [max(0.0, now - float(lease["started_at"])) for lease in _ACTIVE_LEASES.values()]
         in_use = len(_ACTIVE_LEASES)
         waiting = _POOL_WAITING
+    with _BACKGROUND_POOL_LOCK:
+        background_in_use = _BACKGROUND_POOL_IN_USE
+        background_waiting = _BACKGROUND_POOL_WAITING
     return {
         "max": max_connections,
         "in_use": in_use,
@@ -261,6 +337,9 @@ def get_connection_pool_metrics() -> dict[str, int | float]:
         "waiting": waiting,
         "longest_lease_seconds": round(max(ages), 3) if ages else 0.0,
         "long_lease_count": sum(1 for age in ages if age >= 30.0),
+        "background_limit": background_limit,
+        "background_in_use": background_in_use,
+        "background_waiting": background_waiting,
     }
 
 

@@ -49,6 +49,10 @@ def pool_fixture(monkeypatch):
     slots = BoundedSemaphore(2)
     connection._ACTIVE_LEASES.clear()
     connection._thread_connections().clear()
+    connection._BACKGROUND_POOL_SLOTS = None
+    connection._BACKGROUND_POOL_LIMIT = 0
+    connection._BACKGROUND_POOL_WAITING = 0
+    connection._BACKGROUND_POOL_IN_USE = 0
     monkeypatch.setattr(connection, "_get_pool", lambda: (pool, slots, 2))
     monkeypatch.setattr(connection, "_pool_config", lambda: ("fake", 2, 1))
     return pool
@@ -149,3 +153,51 @@ def test_99_concurrent_tasks_never_use_more_than_24_leases(monkeypatch):
 
     assert pool.peak <= 24
     assert connection.get_connection_pool_metrics()["in_use"] == 0
+
+
+def test_99_background_tasks_leave_eight_pool_slots_for_api(monkeypatch):
+    class StressPool:
+        def __init__(self):
+            self.lock = Lock()
+            self.in_use = 0
+            self.peak = 0
+
+        def getconn(self):
+            with self.lock:
+                self.in_use += 1
+                self.peak = max(self.peak, self.in_use)
+            return FakeRawConnection()
+
+        def putconn(self, _raw, close=False):
+            with self.lock:
+                self.in_use -= 1
+
+    pool = StressPool()
+    slots = BoundedSemaphore(24)
+    connection._ACTIVE_LEASES.clear()
+    connection._BACKGROUND_POOL_SLOTS = None
+    connection._BACKGROUND_POOL_LIMIT = 0
+    connection._BACKGROUND_POOL_WAITING = 0
+    connection._BACKGROUND_POOL_IN_USE = 0
+    monkeypatch.setattr(connection, "_get_pool", lambda: (pool, slots, 24))
+    monkeypatch.setattr(connection, "_pool_config", lambda: ("fake", 24, 2))
+    monkeypatch.setattr(connection, "_background_pool_config", lambda: 16)
+
+    def run_one(_index):
+        with connection.background_database_connections():
+            conn = connection.PooledConnection()
+            try:
+                with conn.cursor():
+                    sleep(0.01)
+            finally:
+                conn.close()
+
+    with ThreadPoolExecutor(max_workers=99) as executor:
+        list(executor.map(run_one, range(99)))
+
+    metrics = connection.get_connection_pool_metrics()
+    assert pool.peak <= 16
+    assert metrics["background_limit"] == 16
+    assert metrics["background_in_use"] == 0
+    assert metrics["background_waiting"] == 0
+    assert metrics["in_use"] == 0

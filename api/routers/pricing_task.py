@@ -1340,9 +1340,9 @@ def exec_fetch_quota_candidates(
 ) -> dict[str, Any]:
     base_code = _base_code(item_code)
     params: list[Any] = [
-        kb_version_id, kb_version_id, base_code,
-        kb_version_id, kb_version_id, base_code,
         kb_version_id, kb_version_id, kb_version_id,
+        kb_version_id, kb_version_id, kb_version_id,
+        base_code, base_code,
     ]
     library_filter = ""
     if quota_library_ids:
@@ -1351,16 +1351,24 @@ def exec_fetch_quota_candidates(
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            WITH candidate_links AS (
+            WITH data_versions AS MATERIALIZED (
+                SELECT pricing_kb_data_version(%s,'TQDK_TQDZM') AS tqdzm,
+                       pricing_kb_data_version(%s,'TQDK_TQDZY') AS tqdzy,
+                       pricing_kb_data_version(%s,'TQDK_TQDZY_SPECIAL') AS tqdzy_special,
+                       pricing_kb_data_version(%s,'TDEK_TDEZM') AS tdezm,
+                       pricing_kb_data_version(%s,'TLibs') AS tlibs,
+                       pricing_kb_data_version(%s,'TDEK_TZJMC') AS tdek_tzjmc
+            ), candidate_links AS (
                 SELECT cand.dekid, cand.dezmid,
                        'TQDK_TQDZY'::TEXT AS source_table,
                        NULL::BIGINT AS typical_group_id,
                        NULL::TEXT AS typical_group_name
-                FROM tqdk_tqdzm zm
-                JOIN tqdk_tqdzy cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
-                WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
-                  AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY')
-                  AND zm.zmbh=%s
+                FROM data_versions versions
+                JOIN tqdk_tqdzm zm ON zm.kb_version_id=versions.tqdzm
+                JOIN tqdk_tqdzy cand
+                  ON cand.kb_version_id=versions.tqdzy
+                 AND cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+                WHERE zm.zmbh=%s
 
                 UNION ALL
 
@@ -1368,16 +1376,17 @@ def exec_fetch_quota_candidates(
                        'TQDK_TQDZY_SPECIAL'::TEXT AS source_table,
                        cand.pid AS typical_group_id,
                        parent.zmmc AS typical_group_name
-                FROM tqdk_tqdzm zm
-                JOIN tqdk_tqdzy_special cand ON cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
+                FROM data_versions versions
+                JOIN tqdk_tqdzm zm ON zm.kb_version_id=versions.tqdzm
+                JOIN tqdk_tqdzy_special cand
+                  ON cand.kb_version_id=versions.tqdzy_special
+                 AND cand.qdkid=zm.qdkid AND cand.qdzmid=zm.id
                 LEFT JOIN tqdk_tqdzy_special parent
                   ON parent.kb_version_id=cand.kb_version_id
                  AND parent.qdkid=cand.qdkid
                  AND parent.qdzmid=cand.qdzmid
                  AND parent.id=cand.pid
-                WHERE zm.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZM')
-                  AND cand.kb_version_id=pricing_kb_data_version(%s,'TQDK_TQDZY_SPECIAL')
-                  AND zm.zmbh=%s
+                WHERE zm.zmbh=%s
                   AND cand.dekid IS NOT NULL
                   AND cand.dezmid IS NOT NULL
             ), merged_candidates AS (
@@ -1392,13 +1401,16 @@ def exec_fetch_quota_candidates(
             )
             SELECT q.id, q.dekid, l.mc, q.zmbh, q.zmmc, q.dw, q.gznr, c.zjmc,
                    merged.source_tables, merged.typical_group_ids, merged.typical_group_names
-            FROM merged_candidates merged
-            JOIN tdek_tdezm q ON q.dekid=merged.dekid AND q.id=merged.dezmid
-            JOIN tlibs l ON l.id=q.dekid
-            LEFT JOIN tdek_tzjmc c ON c.dekid=q.dekid AND c.id=q.zjh
-            WHERE q.kb_version_id=pricing_kb_data_version(%s,'TDEK_TDEZM')
-              AND l.kb_version_id=pricing_kb_data_version(%s,'TLibs')
-              AND (c.kb_version_id IS NULL OR c.kb_version_id=pricing_kb_data_version(%s,'TDEK_TZJMC'))
+            FROM data_versions versions
+            JOIN merged_candidates merged ON TRUE
+            JOIN tdek_tdezm q
+              ON q.kb_version_id=versions.tdezm
+             AND q.dekid=merged.dekid AND q.id=merged.dezmid
+            JOIN tlibs l ON l.kb_version_id=versions.tlibs AND l.id=q.dekid
+            LEFT JOIN tdek_tzjmc c
+              ON c.kb_version_id=versions.tdek_tzjmc
+             AND c.dekid=q.dekid AND c.id=q.zjh
+            WHERE TRUE
               {library_filter}
             ORDER BY q.dekid, q.zmbh NULLS LAST, q.id
             """,
@@ -6140,7 +6152,8 @@ def _defer_background_item_after_pool_busy(item_run_id: int, message: str) -> bo
     """Return infrastructure-starved work to the queue without consuming an attempt."""
     from db.connection import get_connection
 
-    for delay in (0.5, 1.0, 2.0):
+    delay = 0.5
+    while True:
         sleep(delay)
         retry_conn = get_connection()
         try:
@@ -6157,30 +6170,50 @@ def _defer_background_item_after_pool_busy(item_run_id: int, message: str) -> bo
                     (item_run_id,),
                 )
                 row = cur.fetchone()
+                if row:
+                    # One event per busy episode is enough for observability;
+                    # hundreds of duplicate events only add more write pressure.
+                    cur.execute(
+                        """INSERT INTO pricing_task_batch_events(
+                               batch_id,execution_id,item_run_id,boq_item_id,event_type,payload
+                           )
+                           SELECT %s,%s,%s,%s,'item_deferred',%s
+                           WHERE NOT EXISTS (
+                               SELECT 1 FROM pricing_task_batch_events
+                               WHERE item_run_id=%s AND event_type='item_deferred'
+                                 AND created_at>NOW()-INTERVAL '1 minute'
+                           )""",
+                        (
+                            int(row[0]), int(row[1]), item_run_id, int(row[2]),
+                            Json({"reason": "database_pool_busy", "retry_after_seconds": 2}, dumps=_json_dumps),
+                            item_run_id,
+                        ),
+                    )
+            retry_conn.commit()
             if row:
-                _background_event(
-                    retry_conn, int(row[0]), int(row[1]), item_run_id, int(row[2]),
-                    "item_deferred",
-                    {"reason": "database_pool_busy", "retry_after_seconds": 2},
-                )
-            else:
-                retry_conn.commit()
-            return True
+                return True
+            return False
         except DatabasePoolBusyError:
             retry_conn.rollback()
+            delay = min(delay * 2, 15.0)
+            continue
         except Exception as exc:
             retry_conn.rollback()
             print(f"[background-pricing] failed to defer item {item_run_id}: {exc}", file=sys.stderr, flush=True)
             return False
         finally:
             retry_conn.close()
-    print(f"[background-pricing] pool remained busy while deferring item {item_run_id}", file=sys.stderr, flush=True)
-    return False
 
 
 def _run_background_item(item_run_id: int, worker_id: str) -> None:
-    from db.connection import get_connection, release_connections_during_model_calls
+    from db.connection import (
+        background_database_connections,
+        get_connection,
+        release_connections_during_model_calls,
+    )
 
+    database_context = background_database_connections()
+    database_context.__enter__()
     conn = get_connection()
     batch_id = execution_id = boq_item_id = None
     profile_context = None
@@ -6298,7 +6331,10 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
             profile_context.__exit__(None, None, None)
         # The dispatcher refreshes all active execution counters once per tick.
         # Avoid 99 completed items contending for the same batch row lock.
-        conn.close()
+        try:
+            conn.close()
+        finally:
+            database_context.__exit__(None, None, None)
 
 
 def _background_worker_limit() -> int:
@@ -6386,6 +6422,8 @@ def _claim_background_items(worker_id: str, global_limit: int) -> list[int]:
 
 
 def run_background_pricing_worker(stop_event: Any) -> None:
+    from db.connection import background_database_connections
+
     worker_id = f"background:{os.getpid()}"
     worker_limit = _background_worker_limit()
     executor = ThreadPoolExecutor(max_workers=worker_limit, thread_name_prefix="background-pricing")
@@ -6394,7 +6432,9 @@ def run_background_pricing_worker(stop_event: Any) -> None:
         while not stop_event.is_set():
             futures = {future for future in futures if not future.done()}
             try:
-                for item_run_id in _claim_background_items(worker_id, worker_limit):
+                with background_database_connections():
+                    claimed = _claim_background_items(worker_id, worker_limit)
+                for item_run_id in claimed:
                     futures.add(executor.submit(_run_background_item, item_run_id, worker_id))
             except DatabasePoolBusyError:
                 stop_event.wait(2.0)

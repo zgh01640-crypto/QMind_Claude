@@ -61,6 +61,8 @@ class SpecialCandidateTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["typical_group_names"], ["沥青涂料加强级防腐层"])
         self.assertIn("tqdk_tqdzy_special", conn.cursor_instance.sql.lower())
         self.assertIn("group by dekid, dezmid", conn.cursor_instance.sql.lower())
+        self.assertIn("with data_versions as materialized", conn.cursor_instance.sql.lower())
+        self.assertIn("c.kb_version_id=versions.tdek_tzjmc", conn.cursor_instance.sql.lower())
         self.assertNotIn(" limit ", conn.cursor_instance.sql.lower())
         self.assertEqual(conn.cursor_instance.params[-1], [1020206])
 

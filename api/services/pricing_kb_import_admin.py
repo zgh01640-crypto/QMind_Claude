@@ -272,9 +272,12 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
             completed += 1
             _progress(conn, job_id, table, completed, processed_rows, {"last_table_rows": total})
 
+        # Refresh planner statistics for every typed knowledge table.  A release
+        # may inherit physical rows from an older version, and those inherited
+        # tables are still queried immediately after activation.
         with conn.cursor() as cur:
-            for table in sorted(selected):
-                cur.execute(f"ANALYZE {SQLITE_TABLES[table][0]}")
+            for pg_table in sorted({SQLITE_TABLES[table][0] for table in KNOWN_TABLES}):
+                cur.execute(f"ANALYZE {pg_table}")
         conn.commit()
 
         with conn.cursor() as cur:

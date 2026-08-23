@@ -1573,6 +1573,9 @@ export interface BackgroundBatchWorkspace {
       waiting: number
       longest_lease_seconds: number
       long_lease_count: number
+      background_limit: number
+      background_in_use: number
+      background_waiting: number
     }
     model_rate_limited_failed_count: number
   }
