@@ -11,11 +11,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from api.routers import auth, model_profiles, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
+from api.routers import auth, ai_usage, model_profiles, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
 from api.auth import SESSION_COOKIE, apply_auth_schema, is_auth_enabled, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
 from db.connection import DatabasePoolBusyError
 
 from api.services.pricing_kb_import_admin import run_next_job
+from api.services.ai_usage import apply_usage_schema
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ def _pricing_kb_worker_loop(stop_event: threading.Event) -> None:
 async def lifespan(_: FastAPI):
     if is_auth_enabled():
         apply_auth_schema()
+        apply_usage_schema()
     pricing_task.initialize_schema()
     stop_event = threading.Event()
     worker_thread: threading.Thread | None = None
@@ -97,6 +99,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(model_profiles.router, prefix="/api", tags=["model-profiles"], dependencies=[Depends(require_authenticated)])
+app.include_router(ai_usage.router, prefix="/api", tags=["ai-usage"], dependencies=[Depends(require_authenticated)])
 for module, tag in ((periods, "periods"), (categories, "categories"), (items, "items"), (quota, "quota"), (quota2024, "quota2024"), (measure, "measure"), (building_standard_2024, "building_standard_2024"), (standard_reference_prices, "standard-reference-prices"), (pricing_kb, "pricing-kb")):
     app.include_router(module.router, prefix="/api", tags=[tag], dependencies=[Depends(require_authenticated)])
 for module, tag in ((upload, "upload"), (prompt_templates, "prompt-templates")):

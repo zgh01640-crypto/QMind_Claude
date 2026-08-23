@@ -7,6 +7,7 @@ import socket
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import Decimal
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -35,6 +36,9 @@ class ModelProfile:
     base_url: str
     model: str
     api_key: str
+    input_price_per_million: Decimal = Decimal("0")
+    cached_input_price_per_million: Decimal | None = None
+    output_price_per_million: Decimal = Decimal("0")
 
 
 def _fernet() -> Fernet:
@@ -96,7 +100,8 @@ def profile_dict(row) -> dict:
     return {
         "id": int(row[0]), "name": row[1], "provider": row[2], "base_url": row[3],
         "model": row[4], "key_hint": row[5], "is_default": bool(row[6]),
-        "created_at": row[7], "updated_at": row[8],
+        "input_price_per_million": row[7], "cached_input_price_per_million": row[8],
+        "output_price_per_million": row[9], "created_at": row[10], "updated_at": row[11],
     }
 
 
@@ -104,7 +109,8 @@ def list_profiles(user_id: int) -> list[dict]:
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,name,provider,base_url,model,key_hint,is_default,created_at,updated_at
+            cur.execute("""SELECT id,name,provider,base_url,model,key_hint,is_default,input_price_per_million,
+                                  cached_input_price_per_million,output_price_per_million,created_at,updated_at
                            FROM user_model_profiles WHERE user_id=%s ORDER BY is_default DESC,updated_at DESC,id DESC""", (user_id,))
             return [profile_dict(row) for row in cur.fetchall()]
     finally:
@@ -112,14 +118,15 @@ def list_profiles(user_id: int) -> list[dict]:
 
 
 def _profile_from_row(row) -> ModelProfile:
-    return ModelProfile(id=int(row[0]), user_id=int(row[1]), name=row[2], provider=row[3], base_url=row[4], model=row[5], api_key=decrypt_api_key(row[6]))
+    return ModelProfile(id=int(row[0]), user_id=int(row[1]), name=row[2], provider=row[3], base_url=row[4], model=row[5], api_key=decrypt_api_key(row[6]), input_price_per_million=row[7], cached_input_price_per_million=row[8], output_price_per_million=row[9])
 
 
 def resolve_default_profile(user_id: int) -> ModelProfile:
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,user_id,name,provider,base_url,model,encrypted_api_key
+            cur.execute("""SELECT id,user_id,name,provider,base_url,model,encrypted_api_key,input_price_per_million,
+                                  cached_input_price_per_million,output_price_per_million
                            FROM user_model_profiles WHERE user_id=%s AND is_default""", (user_id,))
             row = cur.fetchone()
     finally:
@@ -129,16 +136,27 @@ def resolve_default_profile(user_id: int) -> ModelProfile:
     return _profile_from_row(row)
 
 
-def client_for(profile: ModelProfile, *, timeout: float = 120.0) -> OpenAI:
-    return OpenAI(api_key=profile.api_key, base_url=profile.base_url, timeout=timeout, max_retries=1)
+def client_for(profile: ModelProfile, *, timeout: float = 120.0, track_usage: bool = True) -> OpenAI:
+    client = OpenAI(api_key=profile.api_key, base_url=profile.base_url, timeout=timeout, max_retries=1)
+    if not track_usage:
+        return client
+    from api.services.ai_usage import MeteredClient
+    return MeteredClient(client, profile)  # type: ignore[return-value]
 
 
 @contextmanager
-def use_default_profile(user_id: int):
+def use_default_profile(user_id: int, **usage_context):
     token = _active_profile.set(resolve_default_profile(user_id))
+    usage_manager = None
     try:
+        if usage_context:
+            from api.services.ai_usage import use_usage_context
+            usage_manager = use_usage_context(**usage_context)
+            usage_manager.__enter__()
         yield _active_profile.get()
     finally:
+        if usage_manager:
+            usage_manager.__exit__(None, None, None)
         _active_profile.reset(token)
 
 
@@ -149,7 +167,7 @@ def active_profile() -> ModelProfile:
     return profile
 
 
-def bind_default_profile_iterator(user_id: int, iterator):
+def bind_default_profile_iterator(user_id: int, iterator, **usage_context):
     """Keep a profile attached to every ``next`` of a sync SSE iterator.
 
     Starlette may advance a streaming generator on different worker threads.
@@ -159,10 +177,17 @@ def bind_default_profile_iterator(user_id: int, iterator):
     profile = resolve_default_profile(user_id)
     while True:
         token = _active_profile.set(profile)
+        usage_manager = None
         try:
+            if usage_context:
+                from api.services.ai_usage import use_usage_context
+                usage_manager = use_usage_context(**usage_context)
+                usage_manager.__enter__()
             item = next(iterator)
         except StopIteration:
             return
         finally:
+            if usage_manager:
+                usage_manager.__exit__(None, None, None)
             _active_profile.reset(token)
         yield item

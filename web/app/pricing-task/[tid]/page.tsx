@@ -34,6 +34,7 @@ import {
   updatePricingTaskManualComparison,
 } from '@/lib/api'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
+import AiUsageSummary from '@/components/AiUsageSummary'
 
 interface CodeCheck {
   item_code: string
@@ -1613,6 +1614,7 @@ export default function PricingTaskDetailPage() {
                 </span>
               )}
             </div>
+            <div className="mt-2"><AiUsageSummary taskId={taskId} /></div>
           </div>
 
           <div className="w-full lg:w-auto lg:flex-none">

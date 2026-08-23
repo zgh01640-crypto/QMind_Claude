@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS user_model_profiles (
     encrypted_api_key TEXT NOT NULL,
     key_hint          VARCHAR(32) NOT NULL,
     is_default        BOOLEAN NOT NULL DEFAULT FALSE,
+    input_price_per_million NUMERIC(20,8) NOT NULL DEFAULT 0,
+    cached_input_price_per_million NUMERIC(20,8),
+    output_price_per_million NUMERIC(20,8) NOT NULL DEFAULT 0,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
 import BatchPricingResultDetailModal from '@/components/pricing-task/BatchPricingResultDetailModal'
+import AiUsageSummary from '@/components/AiUsageSummary'
 import {
   BackgroundBatchConsistencyStatus,
   BackgroundBatchExecutionStatus,
@@ -275,7 +276,7 @@ export default function BackgroundBatchDetailPage() {
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto max-w-[1560px] px-6 py-4">
       <div className="flex items-center justify-between gap-6"><div className="min-w-0"><div className="text-xs text-slate-500"><Link href="/pricing-task/background-batch" className="font-semibold text-sky-700 hover:underline">← 后台批次</Link><span className="mx-2 text-slate-300">/</span>{batch.project_name}</div><div className="mt-2 flex flex-wrap items-center gap-2"><h1 className="mr-2 truncate text-2xl font-semibold tracking-tight">{batch.name}</h1><Badge value={`知识库版本 ${batch.kb_version_id ?? '—'}`} meta={['', 'border-sky-200 bg-sky-50 text-sky-700']} /><Badge value={`人工：${batch.manual_project_name || batch.manual_project_id || '—'}`} meta={['', 'border-slate-200 bg-slate-50 text-slate-600']} /></div></div>
         <div className="flex shrink-0 gap-2"><button onClick={() => void exportExcel()} disabled={exporting} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-40">{exporting ? '导出中…' : '导出 Excel'}</button>{active ? <button onClick={() => void stop()} disabled={stopping || execution?.status === 'stop_requested'} className="rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{execution?.status === 'stop_requested' ? '停止中…' : '停止领取'}</button> : <button onClick={() => void start()} disabled={starting || !selected.size} className="rounded-lg bg-sky-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-sky-800 disabled:opacity-40">{starting ? '启动中…' : `后台执行 ${selected.size} 条`}</button>}</div></div>
-      <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-slate-100 pt-2.5 text-[10px]">
+      <div className="mt-3"><AiUsageSummary batchId={batchId} /></div><div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-slate-100 pt-2.5 text-[10px]">
         <span className="font-semibold tracking-[0.12em] text-slate-300">资源观测</span>
         <ResourceObservation label="进度" value={`${summary.completed_count}/${summary.total_count}`} detail={`待 ${summary.waiting_count} · 运行 ${summary.running_count} · 失败 ${summary.failed_count}`} status={summary.failed_count > 0 ? 'warning' : summary.running_count > 0 ? 'active' : 'idle'} />
         <ResourceObservation label="模型" value={`${runtime_metrics.model.running}/${runtime_metrics.model.limit}`} detail={`等待 ${runtime_metrics.model.waiting} · 限流 ${runtime_metrics.model_rate_limited_failed_count}`} status={runtime_metrics.model_rate_limited_failed_count > 0 ? 'warning' : runtime_metrics.model.running > 0 ? 'active' : 'idle'} />

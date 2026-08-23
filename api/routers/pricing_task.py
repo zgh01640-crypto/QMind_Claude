@@ -31,6 +31,7 @@ from db.schema_lock import acquire_schema_transaction_lock
 from api.auth import CurrentUser, current_user, require_project_owner, require_task_owner
 from db.connection import DatabasePoolBusyError, suspend_connections_for_model_call
 from api.services.model_profiles import active_profile, bind_default_profile_iterator, client_for, use_default_profile
+from api.services.ai_usage import use_usage_context
 
 router = APIRouter()
 _SCHEMA_LOCK = Lock()
@@ -5103,7 +5104,7 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int, user: Cu
             conn.close()
 
     return StreamingResponse(
-        bind_default_profile_iterator(user.id, generate()),
+        bind_default_profile_iterator(user.id, generate(), business_type="pricing_batch", batch_id=batch_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, no-transform",
@@ -5318,7 +5319,7 @@ def pricing_task_run_item_stream(task_id: int, boq_item_id: int, user: CurrentUs
             conn.close()
 
     return StreamingResponse(
-        bind_default_profile_iterator(user.id, generate()),
+        bind_default_profile_iterator(user.id, generate(), business_type="pricing_task", task_id=task_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, no-transform",
@@ -5600,7 +5601,7 @@ def pricing_task_conversion_check_stream(run_id: int, user: CurrentUser = Depend
             if not owner or owner[1] is None:
                 raise HTTPException(status_code=404, detail="运行记录不存在")
             require_task_owner(conn, user, int(owner[0]))
-            profile_context = use_default_profile(int(owner[1]))
+            profile_context = use_default_profile(int(owner[1]), business_type="pricing_task_conversion", task_id=int(owner[0]), run_id=run_id)
             profile_context.__enter__()
             step_timings = _load_step_timings(conn, run_id)
             step_started_at = datetime.now()
@@ -5709,7 +5710,7 @@ def pricing_task_coefficient_check_stream(run_id: int, user: CurrentUser = Depen
             if not owner or owner[1] is None:
                 raise HTTPException(status_code=404, detail="运行记录不存在")
             require_task_owner(conn, user, int(owner[0]))
-            profile_context = use_default_profile(int(owner[1]))
+            profile_context = use_default_profile(int(owner[1]), business_type="pricing_task_coefficient", task_id=int(owner[0]), run_id=run_id)
             profile_context.__enter__()
             step_timings = _load_step_timings(conn, run_id)
             step_started_at = datetime.now()
@@ -5959,7 +5960,7 @@ def pricing_task_batch_conversion_check_stream(item_run_id: int, user: CurrentUs
         finally:
             conn.close()
 
-    return StreamingResponse(bind_default_profile_iterator(user.id, generate()), media_type="text/event-stream")
+    return StreamingResponse(bind_default_profile_iterator(user.id, generate(), business_type="pricing_batch_conversion", item_run_id=item_run_id), media_type="text/event-stream")
 
 
 @router.post("/pricing-task-batch-item-runs/{item_run_id}/coefficient-check-stream")
@@ -6010,7 +6011,7 @@ def pricing_task_batch_coefficient_check_stream(item_run_id: int, user: CurrentU
         finally:
             conn.close()
 
-    return StreamingResponse(bind_default_profile_iterator(user.id, generate()), media_type="text/event-stream")
+    return StreamingResponse(bind_default_profile_iterator(user.id, generate(), business_type="pricing_batch_coefficient", item_run_id=item_run_id), media_type="text/event-stream")
 
 
 _BACKGROUND_TOOL_NEXT = {
@@ -6217,6 +6218,7 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
     conn = get_connection()
     batch_id = execution_id = boq_item_id = None
     profile_context = None
+    usage_context = None
     try:
       with release_connections_during_model_calls():
         _ensure_schema(conn)
@@ -6242,6 +6244,8 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
             raise RuntimeError("后台批量任务没有归属用户，无法解析模型配置")
         profile_context = use_default_profile(int(row[13]))
         profile_context.__enter__()
+        usage_context = use_usage_context(business_type="background_pricing_batch", batch_id=batch_id, item_run_id=item_run_id, execution_id=execution_id)
+        usage_context.__enter__()
         boq_item = {"id": boq_item_id, "item_code": row[6], "item_name": row[7], "item_description": row[8],
                     "unit": row[9], "quantity": float(row[10]) if row[10] is not None else None, "project_id": int(row[11])}
         _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "code_check", "running")
@@ -6327,6 +6331,8 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
                 else:
                     conn.commit()
     finally:
+        if usage_context:
+            usage_context.__exit__(None, None, None)
         if profile_context:
             profile_context.__exit__(None, None, None)
         # The dispatcher refreshes all active execution counters once per tick.
@@ -6920,7 +6926,7 @@ def pricing_task_match_item_stream(req: dict[str, Any], user: CurrentUser = Depe
                 yield _sse({"type": "error", "error": "Item not found"})
                 return
             require_project_owner(conn, user, int(row[6]))
-            profile_context = use_default_profile(user.id)
+            profile_context = use_default_profile(user.id, business_type="pricing_match", run_id=run_id)
             profile_context.__enter__()
             boq_item = {
                 "id": row[0],

@@ -25,6 +25,7 @@ import {
 } from '@/lib/api'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
 import BatchPricingResultDetailModal from '@/components/pricing-task/BatchPricingResultDetailModal'
+import AiUsageSummary from '@/components/AiUsageSummary'
 
 interface CodeCheck {
   item_code: string
@@ -1154,6 +1155,7 @@ export default function PricingTaskBatchPage() {
               新批量组价 · {batch.project_name} · {batch.quota_library_names.length > 0 ? batch.quota_library_names.join('、') : '全部定额库'}
               {batch.manual_project_id ? ` · 对比工程：${batch.manual_project_name || `#${batch.manual_project_id}`}` : ''}
             </div>
+            <div className="mt-2"><AiUsageSummary batchId={batchId} /></div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
             <div className="flex flex-wrap items-center gap-2 rounded-md border border-gray-200 bg-white px-2.5 py-2 shadow-sm shadow-gray-100/70">

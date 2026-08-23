@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from decimal import Decimal
 
 from api.auth import CurrentUser, current_user
 from api.services.model_profiles import (
@@ -20,6 +21,9 @@ class ModelProfileCreate(BaseModel):
     model: str = Field(min_length=1, max_length=160)
     api_key: str = Field(min_length=1, max_length=1000)
     is_default: bool = False
+    input_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    cached_input_price_per_million: Decimal | None = Field(default=None, ge=0)
+    output_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
 
 
 class ModelProfileUpdate(BaseModel):
@@ -29,6 +33,9 @@ class ModelProfileUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=160)
     api_key: str | None = Field(default=None, max_length=1000)
     is_default: bool | None = None
+    input_price_per_million: Decimal | None = Field(default=None, ge=0)
+    cached_input_price_per_million: Decimal | None = Field(default=None, ge=0)
+    output_price_per_million: Decimal | None = Field(default=None, ge=0)
 
 
 def _require_access(user: CurrentUser) -> CurrentUser:
@@ -39,7 +46,7 @@ def _require_access(user: CurrentUser) -> CurrentUser:
 
 def _get_owned_profile(conn, user_id: int, profile_id: int):
     with conn.cursor() as cur:
-        cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,created_at,updated_at FROM user_model_profiles WHERE id=%s AND user_id=%s FOR UPDATE", (profile_id, user_id))
+        cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million,created_at,updated_at FROM user_model_profiles WHERE id=%s AND user_id=%s FOR UPDATE", (profile_id, user_id))
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="模型配置不存在")
@@ -47,7 +54,7 @@ def _get_owned_profile(conn, user_id: int, profile_id: int):
 
 
 def _as_dict(row) -> dict:
-    return {"id": int(row[0]), "name": row[1], "provider": row[2], "base_url": row[3], "model": row[4], "key_hint": row[6], "is_default": bool(row[7]), "created_at": row[8], "updated_at": row[9]}
+    return {"id": int(row[0]), "name": row[1], "provider": row[2], "base_url": row[3], "model": row[4], "key_hint": row[6], "is_default": bool(row[7]), "input_price_per_million": row[8], "cached_input_price_per_million": row[9], "output_price_per_million": row[10], "created_at": row[11], "updated_at": row[12]}
 
 
 def _set_default(cur, user_id: int, profile_id: int) -> None:
@@ -73,14 +80,14 @@ def create_model_profile(body: ModelProfileCreate, user: CurrentUser = Depends(c
         with conn.cursor() as cur:
             cur.execute("SELECT EXISTS(SELECT 1 FROM user_model_profiles WHERE user_id=%s)", (user.id,))
             has_profiles = bool(cur.fetchone()[0])
-            cur.execute("""INSERT INTO user_model_profiles(user_id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                           RETURNING id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,created_at,updated_at""",
-                        (user.id, name, provider, base_url, model, encrypt_api_key(api_key), key_hint(api_key), body.is_default or not has_profiles))
+            cur.execute("""INSERT INTO user_model_profiles(user_id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million)
+                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           RETURNING id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million,created_at,updated_at""",
+                        (user.id, name, provider, base_url, model, encrypt_api_key(api_key), key_hint(api_key), body.is_default or not has_profiles, body.input_price_per_million, body.cached_input_price_per_million, body.output_price_per_million))
             row = cur.fetchone()
             if row[7]:
                 _set_default(cur, user.id, int(row[0]))
-                cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,created_at,updated_at FROM user_model_profiles WHERE id=%s", (row[0],))
+                cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million,created_at,updated_at FROM user_model_profiles WHERE id=%s", (row[0],))
                 row = cur.fetchone()
         conn.commit()
         return _as_dict(row)
@@ -102,19 +109,22 @@ def update_model_profile(profile_id: int, body: ModelProfileUpdate, user: Curren
         if not name:
             raise HTTPException(status_code=422, detail="配置名称不能为空")
         encrypted_key, hint = existing[5], existing[6]
+        input_price = body.input_price_per_million if body.input_price_per_million is not None else existing[8]
+        cached_input_price = body.cached_input_price_per_million if "cached_input_price_per_million" in body.model_fields_set else existing[9]
+        output_price = body.output_price_per_million if body.output_price_per_million is not None else existing[10]
         if body.api_key is not None:
             if not body.api_key.strip():
                 raise HTTPException(status_code=422, detail="API Key 不能为空")
             encrypted_key, hint = encrypt_api_key(body.api_key.strip()), key_hint(body.api_key.strip())
         with conn.cursor() as cur:
-            cur.execute("""UPDATE user_model_profiles SET name=%s,provider=%s,base_url=%s,model=%s,encrypted_api_key=%s,key_hint=%s,updated_at=NOW()
+            cur.execute("""UPDATE user_model_profiles SET name=%s,provider=%s,base_url=%s,model=%s,encrypted_api_key=%s,key_hint=%s,input_price_per_million=%s,cached_input_price_per_million=%s,output_price_per_million=%s,updated_at=NOW()
                            WHERE id=%s AND user_id=%s
-                           RETURNING id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,created_at,updated_at""",
-                        (name, provider, base_url, model, encrypted_key, hint, profile_id, user.id))
+                           RETURNING id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million,created_at,updated_at""",
+                        (name, provider, base_url, model, encrypted_key, hint, input_price, cached_input_price, output_price, profile_id, user.id))
             row = cur.fetchone()
             if body.is_default is True:
                 _set_default(cur, user.id, profile_id)
-                cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,created_at,updated_at FROM user_model_profiles WHERE id=%s", (profile_id,))
+                cur.execute("SELECT id,name,provider,base_url,model,encrypted_api_key,key_hint,is_default,input_price_per_million,cached_input_price_per_million,output_price_per_million,created_at,updated_at FROM user_model_profiles WHERE id=%s", (profile_id,))
                 row = cur.fetchone()
         conn.commit()
         return _as_dict(row)
@@ -162,11 +172,11 @@ def test_model_profile(profile_id: int, user: CurrentUser = Depends(current_user
     try:
         row = _get_owned_profile(conn, user.id, profile_id)
         from api.services.model_profiles import ModelProfile, decrypt_api_key
-        profile = ModelProfile(int(row[0]), user.id, row[1], row[2], row[3], row[4], decrypt_api_key(row[5]))
+        profile = ModelProfile(int(row[0]), user.id, row[1], row[2], row[3], row[4], decrypt_api_key(row[5]), row[8], row[9], row[10])
     finally:
         conn.close()
     try:
-        client_for(profile, timeout=20.0).chat.completions.create(model=profile.model, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
+        client_for(profile, timeout=20.0, track_usage=False).chat.completions.create(model=profile.model, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
         return {"ok": True, "message": "连接成功"}
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"连接失败：{str(exc)[:300]}") from exc
