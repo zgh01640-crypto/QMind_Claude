@@ -16,6 +16,23 @@ import openpyxl
 _SKIP_PATTERNS = re.compile(r'^(本页小计|合计|分部小计)$')
 
 
+def _detect_unit_quantity_columns(ws):
+    """Return zero-based unit/quantity indexes from the workbook header.
+
+    BOQ exports are not consistent about whether “单位” or “工程量” comes
+    first.  The legacy parser assumed E=单位 and F=工程量, which silently
+    swapped these fields for files that use E=工程量 and F=单位.
+    """
+    unit_index, quantity_index = 4, 5
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True):
+        normalized = [re.sub(r'\s+', '', str(value or '')) for value in row]
+        detected_unit = next((index for index, value in enumerate(normalized) if value in {'单位', '计量单位'}), None)
+        detected_quantity = next((index for index, value in enumerate(normalized) if value in {'工程量', '数量'}), None)
+        if detected_unit is not None and detected_quantity is not None:
+            return detected_unit, detected_quantity
+    return unit_index, quantity_index
+
+
 def _parse_project_info(ws):
     """从第1、2行提取工程名和标段。"""
     row2 = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
@@ -75,12 +92,16 @@ def parse_boq_workbook(path):
     items = []
     current_section_seq = 0
     section_seq_counter = 0
+    unit_index, quantity_index = _detect_unit_quantity_columns(ws)
 
     for row in ws.iter_rows(min_row=5, values_only=True):
         # 取前9列，不足则补 None
         r = list(row) + [None] * 9
         r = r[:9]
-        seq, code, name, desc, unit, qty, unit_price, total_price, prov_price = r
+        seq, code, name, desc = r[:4]
+        unit = row[unit_index] if unit_index < len(row) else None
+        qty = row[quantity_index] if quantity_index < len(row) else None
+        unit_price, total_price, prov_price = r[6:9]
 
         name_s = str(name).strip() if name else ''
 

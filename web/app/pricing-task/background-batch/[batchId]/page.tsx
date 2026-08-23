@@ -66,6 +66,62 @@ function Metric({ label, value, note, tone = '' }: { label: string; value: React
     {note && <div className="truncate text-[9px] text-slate-400">{note}</div>}
   </div>
 }
+function ResourceObservation({ label, value, detail, status = 'idle' }: { label: string; value: ReactNode; detail: string; status?: 'idle' | 'active' | 'warning' }) {
+  const dot = status === 'warning' ? 'bg-amber-400' : status === 'active' ? 'bg-sky-400' : 'bg-slate-300'
+  return <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
+    <span className="text-slate-400">{label}</span>
+    <span className="font-semibold tabular-nums text-slate-600">{value}</span>
+    <span className="text-slate-400">{detail}</span>
+  </div>
+}
+function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summary'] }) {
+  const quotaRate = summary.hit_rate == null ? null : Math.max(0, Math.min(1, summary.hit_rate))
+  const itemConsistencyRate = summary.selected_count > 0
+    ? Math.max(0, Math.min(1, summary.exact_count / summary.selected_count))
+    : null
+  return <section className="overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-sm">
+    <div className="grid lg:grid-cols-[390px_minmax(0,1fr)]">
+      <div className="relative overflow-hidden bg-emerald-950 px-5 py-3 text-white">
+        <div className="absolute -right-8 -top-12 h-28 w-28 rounded-full border-[20px] border-emerald-800/60" />
+        <div className="relative">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-300">结果评估</div>
+          <div className="mt-2 grid grid-cols-2 gap-4">
+            <div>
+              <div className="text-2xl font-bold tabular-nums tracking-tight">{percent(itemConsistencyRate)}</div>
+              <div className="mt-0.5 text-[11px] font-semibold text-cyan-200">清单一致率</div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-cyan-300 transition-all duration-700" style={{ width: `${(itemConsistencyRate ?? 0) * 100}%` }} /></div>
+              <div className="mt-1 text-[9px] leading-3 text-emerald-400">完全一致清单数 ÷ 套取清单总数</div>
+            </div>
+            <div className="border-l border-emerald-800 pl-4">
+              <div className="text-2xl font-bold tabular-nums tracking-tight">{percent(quotaRate)}</div>
+              <div className="mt-0.5 text-[11px] font-semibold text-emerald-200">定额命中率</div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-emerald-300 transition-all duration-700" style={{ width: `${(quotaRate ?? 0) * 100}%` }} /></div>
+              <div className="mt-1 text-[9px] leading-3 text-emerald-400">命中定额数 ÷ 人工定额数</div>
+            </div>
+          </div>
+          <div className="mt-2 text-[9px] text-emerald-300">已评测 {summary.evaluated_count} / {summary.selected_count} 条套取清单</div>
+        </div>
+      </div>
+      <div className="px-4 py-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+          <Metric label="命中定额" value={summary.hit_count} tone="border-emerald-100 bg-emerald-50/70 text-emerald-800" />
+          <Metric label="漏项定额" value={summary.missed_count} tone="border-amber-100 bg-amber-50/70 text-amber-800" />
+          <Metric label="多项定额" value={summary.extra_count} tone="border-rose-100 bg-rose-50/70 text-rose-800" />
+          <Metric label="人工定额" value={summary.manual_count} />
+          <Metric label="AI 定额" value={summary.ai_count} />
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2 text-[11px]">
+          <span className="mr-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">清单一致性</span>
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">完全一致 {summary.exact_count}</span>
+          <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">部分一致 {summary.partial_count}</span>
+          <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700">不一致 {summary.inconsistent_count}</span>
+          {summary.failed_count > 0 && <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-600">执行失败 {summary.failed_count}</span>}
+        </div>
+      </div>
+    </div>
+  </section>
+}
 function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
@@ -166,6 +222,8 @@ export default function BackgroundBatchDetailPage() {
   }, [batchId])
   useEffect(() => { void load() }, [load])
   const active = !!workspace?.execution && ACTIVE.has(workspace.execution.status)
+  const finished = !!workspace?.execution && ['completed', 'stopped'].includes(workspace.execution.status)
+  useEffect(() => { if (finished) setView('results') }, [finished, workspace?.execution?.id])
   useEffect(() => { const timer = window.setInterval(() => void load(true), active ? 4000 : 15000); return () => window.clearInterval(timer) }, [active, load])
 
   const scheduleRefresh = useCallback(() => {
@@ -220,11 +278,19 @@ export default function BackgroundBatchDetailPage() {
   if (!workspace) return <div className="min-h-screen bg-slate-100 py-24 text-center text-rose-600">{error || '批次不存在'}</div>
   const { batch, execution, summary, runtime_metrics } = workspace
   return <main className="min-h-screen bg-[#f6f7f8] text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto max-w-[1560px] px-6 py-5">
+    <header className="border-b border-slate-200 bg-white"><div className="mx-auto max-w-[1560px] px-6 py-4">
       <div className="flex items-center justify-between gap-6"><div className="min-w-0"><div className="text-xs text-slate-500"><Link href="/pricing-task/background-batch" className="font-semibold text-sky-700 hover:underline">← 后台批次</Link><span className="mx-2 text-slate-300">/</span>{batch.project_name}</div><div className="mt-2 flex flex-wrap items-center gap-2"><h1 className="mr-2 truncate text-2xl font-semibold tracking-tight">{batch.name}</h1><Badge value={`知识库版本 ${batch.kb_version_id ?? '—'}`} meta={['', 'border-sky-200 bg-sky-50 text-sky-700']} /><Badge value={`人工：${batch.manual_project_name || batch.manual_project_id || '—'}`} meta={['', 'border-slate-200 bg-slate-50 text-slate-600']} /></div></div>
         <div className="flex shrink-0 gap-2"><button onClick={() => void exportExcel()} disabled={exporting} className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-slate-50 disabled:opacity-40">{exporting ? '导出中…' : '导出 Excel'}</button>{active ? <button onClick={() => void stop()} disabled={stopping || execution?.status === 'stop_requested'} className="rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{execution?.status === 'stop_requested' ? '停止中…' : '停止领取'}</button> : <button onClick={() => void start()} disabled={starting || !selected.size} className="rounded-lg bg-sky-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-sky-800 disabled:opacity-40">{starting ? '启动中…' : `后台执行 ${selected.size} 条`}</button>}</div></div>
-      <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Metric label="执行进度" value={`${summary.completed_count} / ${summary.total_count}`} note={`等待 ${summary.waiting_count} · 处理中 ${summary.running_count} · 失败 ${summary.failed_count}`} /><Metric label="全局模型并发" value={`${runtime_metrics.model.running} / ${runtime_metrics.model.limit}`} note={`等待调用 ${runtime_metrics.model.waiting} · 限流失败 ${runtime_metrics.model_rate_limited_failed_count}`} tone="bg-sky-50/60" /><Metric label="数据库连接池" value={`${runtime_metrics.database.in_use} / ${runtime_metrics.database.max}`} note={`等待 ${runtime_metrics.database.waiting} · 长租约 ${runtime_metrics.database.long_lease_count} · 最长 ${runtime_metrics.database.longest_lease_seconds.toFixed(1)}秒`} /><Metric label="执行节奏" value={duration(summary.elapsed_seconds * 1000)} note={`${summary.throughput_per_minute}/分钟 · 预计剩余 ${duration(summary.eta_seconds == null ? null : summary.eta_seconds * 1000)}`} /></div>
+      <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-slate-100 pt-2.5 text-[10px]">
+        <span className="font-semibold tracking-[0.12em] text-slate-300">资源观测</span>
+        <ResourceObservation label="进度" value={`${summary.completed_count}/${summary.total_count}`} detail={`待 ${summary.waiting_count} · 运行 ${summary.running_count} · 失败 ${summary.failed_count}`} status={summary.failed_count > 0 ? 'warning' : summary.running_count > 0 ? 'active' : 'idle'} />
+        <ResourceObservation label="模型" value={`${runtime_metrics.model.running}/${runtime_metrics.model.limit}`} detail={`等待 ${runtime_metrics.model.waiting} · 限流 ${runtime_metrics.model_rate_limited_failed_count}`} status={runtime_metrics.model_rate_limited_failed_count > 0 ? 'warning' : runtime_metrics.model.running > 0 ? 'active' : 'idle'} />
+        <ResourceObservation label="连接池" value={`${runtime_metrics.database.in_use}/${runtime_metrics.database.max}`} detail={`等待 ${runtime_metrics.database.waiting} · 长租约 ${runtime_metrics.database.long_lease_count} · ${runtime_metrics.database.longest_lease_seconds.toFixed(1)}秒`} status={runtime_metrics.database.waiting > 0 || runtime_metrics.database.long_lease_count > 0 ? 'warning' : runtime_metrics.database.in_use > 0 ? 'active' : 'idle'} />
+        <ResourceObservation label="耗时" value={duration(summary.elapsed_seconds * 1000)} detail={`${summary.throughput_per_minute}/分钟 · 剩余 ${duration(summary.eta_seconds == null ? null : summary.eta_seconds * 1000)}`} />
+      </div>
     </div></header>
+
+    {finished && summary.evaluated_count > 0 && <div className="mx-auto max-w-[1560px] px-6 pt-4"><ResultAssessment summary={summary} /></div>}
 
     <div className="mx-auto grid max-w-[1560px] grid-cols-[340px_minmax(0,1fr)] gap-6 px-6 py-6">
       <aside className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-200 p-4">
