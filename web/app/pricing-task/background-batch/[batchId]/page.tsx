@@ -80,43 +80,37 @@ function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summ
   const itemConsistencyRate = summary.selected_count > 0
     ? Math.max(0, Math.min(1, summary.exact_count / summary.selected_count))
     : null
-  return <section className="overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-sm">
-    <div className="grid lg:grid-cols-[390px_minmax(0,1fr)]">
-      <div className="relative overflow-hidden bg-emerald-950 px-5 py-3 text-white">
-        <div className="absolute -right-8 -top-12 h-28 w-28 rounded-full border-[20px] border-emerald-800/60" />
-        <div className="relative">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-300">结果评估</div>
-          <div className="mt-2 grid grid-cols-2 gap-4">
-            <div>
-              <div className="text-2xl font-bold tabular-nums tracking-tight">{percent(itemConsistencyRate)}</div>
-              <div className="mt-0.5 text-[11px] font-semibold text-cyan-200">清单一致率</div>
-              <div className="mt-1 h-1 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-cyan-300 transition-all duration-700" style={{ width: `${(itemConsistencyRate ?? 0) * 100}%` }} /></div>
-              <div className="mt-1 text-[9px] leading-3 text-emerald-400">完全一致清单数 ÷ 套取清单总数</div>
-            </div>
-            <div className="border-l border-emerald-800 pl-4">
-              <div className="text-2xl font-bold tabular-nums tracking-tight">{percent(quotaRate)}</div>
-              <div className="mt-0.5 text-[11px] font-semibold text-emerald-200">定额命中率</div>
-              <div className="mt-1 h-1 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-emerald-300 transition-all duration-700" style={{ width: `${(quotaRate ?? 0) * 100}%` }} /></div>
-              <div className="mt-1 text-[9px] leading-3 text-emerald-400">命中定额数 ÷ 人工定额数</div>
-            </div>
-          </div>
-          <div className="mt-2 text-[9px] text-emerald-300">已评测 {summary.evaluated_count} / {summary.selected_count} 条套取清单</div>
+  return <section className="overflow-hidden rounded-xl border border-emerald-200 bg-white">
+    <div className="grid xl:grid-cols-[390px_minmax(0,1fr)]">
+      <div className="flex items-center gap-4 bg-emerald-950 px-4 py-2 text-white">
+        <div className="shrink-0 border-r border-emerald-800 pr-4">
+          <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-emerald-300">结果评估</div>
+          <div className="mt-0.5 text-[9px] text-emerald-400">{summary.evaluated_count}/{summary.selected_count} 条</div>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline justify-between gap-2"><span className="text-[10px] font-semibold text-cyan-200">清单一致率</span><span className="text-lg font-bold tabular-nums">{percent(itemConsistencyRate)}</span></div>
+          <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-cyan-300 transition-all duration-700" style={{ width: `${(itemConsistencyRate ?? 0) * 100}%` }} /></div>
+          <div className="mt-0.5 truncate text-[8px] text-emerald-500">完全一致清单数 ÷ 套取清单总数</div>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline justify-between gap-2"><span className="text-[10px] font-semibold text-emerald-200">定额命中率</span><span className="text-lg font-bold tabular-nums">{percent(quotaRate)}</span></div>
+          <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-emerald-300 transition-all duration-700" style={{ width: `${(quotaRate ?? 0) * 100}%` }} /></div>
+          <div className="mt-0.5 truncate text-[8px] text-emerald-500">命中定额数 ÷ 人工定额数</div>
         </div>
       </div>
-      <div className="px-4 py-3">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <Metric label="命中定额" value={summary.hit_count} tone="border-emerald-100 bg-emerald-50/70 text-emerald-800" />
-          <Metric label="漏项定额" value={summary.missed_count} tone="border-amber-100 bg-amber-50/70 text-amber-800" />
-          <Metric label="多项定额" value={summary.extra_count} tone="border-rose-100 bg-rose-50/70 text-rose-800" />
-          <Metric label="人工定额" value={summary.manual_count} />
-          <Metric label="AI 定额" value={summary.ai_count} />
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2 text-[11px]">
-          <span className="mr-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">清单一致性</span>
-          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">完全一致 {summary.exact_count}</span>
-          <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-700">部分一致 {summary.partial_count}</span>
-          <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-semibold text-rose-700">不一致 {summary.inconsistent_count}</span>
-          {summary.failed_count > 0 && <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-600">执行失败 {summary.failed_count}</span>}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2 text-[10px]">
+        <div className="flex items-baseline gap-1 text-emerald-700"><span className="text-slate-400">命中</span><strong className="text-base tabular-nums">{summary.hit_count}</strong></div>
+        <div className="flex items-baseline gap-1 text-amber-700"><span className="text-slate-400">漏项</span><strong className="text-base tabular-nums">{summary.missed_count}</strong></div>
+        <div className="flex items-baseline gap-1 text-rose-700"><span className="text-slate-400">多项</span><strong className="text-base tabular-nums">{summary.extra_count}</strong></div>
+        <div className="flex items-baseline gap-1 text-slate-700"><span className="text-slate-400">人工</span><strong className="text-base tabular-nums">{summary.manual_count}</strong></div>
+        <div className="flex items-baseline gap-1 text-slate-700"><span className="text-slate-400">AI</span><strong className="text-base tabular-nums">{summary.ai_count}</strong></div>
+        <span className="hidden h-5 w-px bg-slate-200 2xl:block" />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-slate-400">清单一致性</span>
+          <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">完全 {summary.exact_count}</span>
+          <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700">部分 {summary.partial_count}</span>
+          <span className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700">不一致 {summary.inconsistent_count}</span>
+          {summary.failed_count > 0 && <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-semibold text-slate-600">失败 {summary.failed_count}</span>}
         </div>
       </div>
     </div>
@@ -296,11 +290,11 @@ export default function BackgroundBatchDetailPage() {
       <aside className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-200 p-4">
         <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">清单范围</h2><span className="text-xs text-slate-400">显示 {visible.length} 条</span></div>
         <div className="flex gap-2"><div className="relative flex-1"><input value={query} onChange={event => setQuery(event.target.value)} placeholder="查询编码或名称" className="w-full rounded-lg border border-slate-300 px-3 py-2.5 pr-10 text-xs outline-none focus:border-sky-500" />{query && <button onClick={() => setQuery('')} className="absolute right-2 top-2.5 text-[11px] text-slate-400">清除</button>}</div><select value={differenceFilter} onChange={event => setDifferenceFilter(event.target.value as typeof differenceFilter)} className="w-28 rounded-lg border border-slate-300 px-2 text-xs"><option value="all">全部差异</option><option value="exact">完全一致</option><option value="partial">部分一致</option><option value="inconsistent">不一致</option><option value="no_comparable">无可比</option><option value="unassessed">未评测</option></select></div>
-        <div className="mt-3 flex flex-wrap gap-1.5">{(['all', 'waiting', 'processing', 'retrying', 'completed', 'failed', 'review'] as StatusFilter[]).map(value => <button key={value} onClick={() => setStatusFilter(value)} className={`rounded-full border px-2.5 py-1 text-[11px] ${statusFilter === value ? 'border-slate-800 bg-slate-800 text-white' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{value === 'all' ? '全部' : value === 'review' ? '待复核' : EXECUTION[value][0]}</button>)}</div>
+        <div className="mt-3 flex flex-wrap gap-1.5">{(['all', 'waiting', 'processing', 'retrying', 'completed', 'failed', 'review'] as StatusFilter[]).map(value => <button key={value} onClick={() => setStatusFilter(value)} className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${statusFilter === value ? 'border-sky-300 bg-sky-50 font-semibold text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-200 hover:bg-sky-50/60 hover:text-sky-700'}`}>{value === 'all' ? '全部' : value === 'review' ? '待复核' : EXECUTION[value][0]}</button>)}</div>
         <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 border-t border-slate-100 pt-3 text-[11px]"><span className="mr-1 text-slate-400">选择</span>{[['全部', () => selectWhere(() => true)], ['清空', () => setSelected(new Set())], ['反选', invert], ['等待', () => selectWhere(item => item.execution_status === 'waiting')], ['失败', () => selectWhere(item => item.execution_status === 'failed')], ['待复核', () => selectWhere(item => ['partial', 'inconsistent'].includes(item.consistency_status))]].map(([label, action]) => <button key={label as string} disabled={active} onClick={action as () => void} className="font-medium text-sky-700 disabled:text-slate-300">{label as string}</button>)}</div>
       </div><div className="max-h-[calc(100vh-350px)] overflow-y-auto">{visible.map(item => <ItemCard key={item.id} item={item} focused={item.id === focusedId} selected={selected.has(item.id)} disabled={active} onFocus={() => { setFocusedId(item.id); setView('process') }} onCheck={checked => setSelected(current => { const next = new Set(current); checked ? next.add(item.id) : next.delete(item.id); return next })} />)}{!visible.length && <div className="py-16 text-center text-xs text-slate-400">没有符合条件的清单</div>}</div></aside>
 
-      <section className="min-w-0"><div className="mb-4 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-2 shadow-sm"><div className="flex gap-1"><button onClick={() => setView('process')} className={`rounded-lg px-4 py-2.5 text-sm font-semibold ${view === 'process' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>过程监控</button><button onClick={() => setView('results')} className={`rounded-lg px-4 py-2.5 text-sm font-semibold ${view === 'results' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>结果汇总</button></div>{error && <span className="max-w-xl truncate px-3 text-xs text-rose-600">{error}</span>}</div>
+      <section className="min-w-0"><div className="mb-4 flex items-center justify-between rounded-xl border border-slate-200 bg-white p-2 shadow-sm"><div className="flex gap-1"><button onClick={() => setView('process')} className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${view === 'process' ? 'bg-sky-700 text-white shadow-sm' : 'text-slate-600 hover:bg-sky-50 hover:text-sky-700'}`}>过程监控</button><button onClick={() => setView('results')} className={`rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${view === 'results' ? 'bg-sky-700 text-white shadow-sm' : 'text-slate-600 hover:bg-sky-50 hover:text-sky-700'}`}>结果汇总</button></div>{error && <span className="max-w-xl truncate px-3 text-xs text-rose-600">{error}</span>}</div>
         {view === 'results' ? <Results items={workspace.items} onOpen={id => { setFocusedId(id); setResultDetailOpen(true) }} /> : !focused ? <Empty>请选择左侧清单</Empty> : <div className="space-y-5"><div className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm"><div className="flex items-start justify-between gap-6"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs text-sky-700">{focused.item_code}</span><Badge value="" meta={EXECUTION[focused.execution_status]} /><Badge value="" meta={CONSISTENCY[focused.consistency_status]} /></div><h2 className="mt-2 truncate text-xl font-semibold tracking-tight">{focused.item_name}</h2><div className="mt-2 text-sm text-slate-500">单位 {focused.unit || '—'} <span className="mx-2 text-slate-300">·</span> 工程量 {focused.quantity ?? '—'} <span className="mx-2 text-slate-300">·</span> 候选 {focused.candidate_count} <span className="mx-2 text-slate-300">·</span> 定额结果 {focused.match_count} <span className="mx-2 text-slate-300">·</span> 耗时 {duration(focused.duration_ms)}</div></div>{reviewable && <button onClick={() => setReviewOpen(true)} className="shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 hover:bg-amber-100">复核差异并修正人工工程</button>}</div></div>
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-4 flex items-center justify-between"><h3 className="text-sm font-semibold">工具调用</h3><span className="text-xs text-slate-400">仅显示工具、状态、耗时和输出</span></div><ToolFeed run={detail?.run || null} /></div>
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-5 flex flex-wrap gap-2 border-b border-slate-100 pb-4">{([['item', '清单与特征'], ['candidates', '章节与候选'], ['quota', '定额与人工对比'], ['conversion', '换算与系数']] as Array<[Stage, string]>).map(([value, label]) => <button key={value} onClick={() => setStage(value)} className={`rounded-lg px-3.5 py-2 text-xs font-semibold ${stage === value ? 'bg-sky-700 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{label}</button>)}</div><StageResult stage={stage} detail={detail} /></div></div>}
