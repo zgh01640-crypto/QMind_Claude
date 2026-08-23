@@ -3789,6 +3789,7 @@ def _row_to_task(row) -> dict[str, Any]:
         "latest_run_count": row[10],
         "accuracy_report": row[11] if len(row) > 11 else None,
         "kb_version_id": int(row[12]) if len(row) > 12 and row[12] is not None else None,
+        "consistency_rate": float(row[13]) if len(row) > 13 and row[13] is not None else None,
     }
 
 
@@ -3891,7 +3892,20 @@ def list_pricing_tasks(user: CurrentUser = Depends(current_user)):
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
-                       , t.accuracy_report, t.kb_version_id
+                       , t.accuracy_report, t.kb_version_id,
+                       (
+                           SELECT ROUND(
+                               SUM(COALESCE((latest.evaluation->>'hit_count')::numeric, 0))
+                               / NULLIF(SUM(COALESCE((latest.evaluation->>'manual_count')::numeric, 0)), 0),
+                               4
+                           )
+                           FROM (
+                               SELECT DISTINCT ON (r.boq_item_id) r.evaluation
+                               FROM pricing_task_runs r
+                               WHERE r.task_id=t.id AND r.evaluation IS NOT NULL
+                               ORDER BY r.boq_item_id, r.created_at DESC, r.id DESC
+                           ) latest
+                       ) AS consistency_rate
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
@@ -3998,7 +4012,20 @@ def get_pricing_task(task_id: int, user: CurrentUser = Depends(current_user)):
                        t.quota_library_ids, COALESCE(array_agg(l.mc ORDER BY l.id) FILTER (WHERE l.id IS NOT NULL), '{}') AS library_names,
                        t.legacy_local_id, t.created_at,
                        (SELECT COUNT(*) FROM pricing_task_runs r WHERE r.task_id=t.id) AS run_count
-                       , t.accuracy_report, t.kb_version_id
+                       , t.accuracy_report, t.kb_version_id,
+                       (
+                           SELECT ROUND(
+                               SUM(COALESCE((latest.evaluation->>'hit_count')::numeric, 0))
+                               / NULLIF(SUM(COALESCE((latest.evaluation->>'manual_count')::numeric, 0)), 0),
+                               4
+                           )
+                           FROM (
+                               SELECT DISTINCT ON (r.boq_item_id) r.evaluation
+                               FROM pricing_task_runs r
+                               WHERE r.task_id=t.id AND r.evaluation IS NOT NULL
+                               ORDER BY r.boq_item_id, r.created_at DESC, r.id DESC
+                           ) latest
+                       ) AS consistency_rate
                 FROM pricing_tasks t
                 JOIN boq_projects p ON p.id = t.boq_project_id
                 LEFT JOIN manual_boq_projects mp ON mp.id = t.manual_project_id
@@ -4013,6 +4040,24 @@ def get_pricing_task(task_id: int, user: CurrentUser = Depends(current_user)):
             if not row:
                 raise HTTPException(status_code=404, detail="task not found")
             return _row_to_task(row)
+    finally:
+        conn.close()
+
+
+@router.delete("/pricing-tasks/{task_id}", status_code=204)
+def delete_pricing_task(task_id: int, user: CurrentUser = Depends(current_user)):
+    from db.connection import get_connection
+
+    conn = get_connection()
+    try:
+        _ensure_schema(conn)
+        require_task_owner(conn, user, task_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE pricing_tasks SET status='deleted', updated_at=NOW() WHERE id=%s",
+                (task_id,),
+            )
+        conn.commit()
     finally:
         conn.close()
 

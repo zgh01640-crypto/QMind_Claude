@@ -9,6 +9,7 @@ import {
   PricingKbLibrary,
   PricingTask,
   createPricingTask,
+  deletePricingTask,
   fetchBoqProjects,
   fetchManualBoqProjects,
   fetchPricingKbLibraries,
@@ -29,6 +30,7 @@ export default function PricingTaskPage() {
   const [selectedManualProject, setSelectedManualProject] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [modalLoading, setModalLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     bootstrap()
@@ -76,6 +78,7 @@ export default function PricingTaskPage() {
       setProjects(projectsRes)
       setLibraries(libsRes)
       setManualProjects(manualRes)
+      if (!taskName) setTaskName(`单条组价 ${new Date().toLocaleString()}`)
     } finally {
       setModalLoading(false)
     }
@@ -86,14 +89,25 @@ export default function PricingTaskPage() {
       alert('请填写工程和任务名称')
       return
     }
-    const created = await createPricingTask({
-      name: taskName.trim(),
-      boq_project_id: selectedProject,
-      quota_library_ids: Array.from(selectedLibraries),
-      manual_project_id: selectedManualProject,
-    })
-    setShowModal(false)
-    router.push(`/pricing-task/${created.id}`)
+    setSaving(true)
+    try {
+      const created = await createPricingTask({
+        name: taskName.trim(),
+        boq_project_id: selectedProject,
+        quota_library_ids: Array.from(selectedLibraries),
+        manual_project_id: selectedManualProject,
+      })
+      setShowModal(false)
+      router.push(`/pricing-task/${created.id}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeTask = async (id: number) => {
+    if (!confirm('确定删除该单条组价任务？')) return
+    await deletePricingTask(id)
+    await bootstrap()
   }
 
   if (loading) {
@@ -117,48 +131,72 @@ export default function PricingTaskPage() {
         </div>
 
         {tasks.length === 0 ? (
-          <div className="text-center py-16">
-            <p className="text-gray-500 text-lg mb-4">暂无任务，点击新增开始</p>
+          <div className="rounded-lg bg-white py-16 text-center shadow">
+            <p className="text-sm text-gray-500">暂无单条组价任务，创建后可逐条调试并回看结果。</p>
+            <button onClick={handleOpenModal} className="mt-4 rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700">
+              新建第一个任务
+            </button>
           </div>
         ) : (
-          <div className="grid gap-4">
-            {tasks.map(task => (
-              <div key={task.id} className="bg-white rounded-lg shadow p-6 hover:shadow-lg transition-shadow">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <h3 className="text-lg font-semibold text-gray-900">{task.name}</h3>
-                      <span className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700">
-                        {'\u77e5\u8bc6\u5e93\u7248\u672c\uff1a'}{task.kb_version_id ?? '-'}
-                      </span>
-                    </div>
-                    <div className="text-sm text-gray-600 space-y-1">
-                      <p>工程：{task.project_name}</p>
-                      <p>
-                        定额库：
+          <div className="overflow-x-auto rounded-lg bg-white shadow">
+            <table className="w-full min-w-[1100px] text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-500">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium">任务</th>
+                  <th className="px-4 py-3 text-left font-medium">工程</th>
+                  <th className="px-4 py-3 text-left font-medium">定额库</th>
+                  <th className="px-4 py-3 text-left font-medium">对比工程</th>
+                  <th className="px-4 py-3 text-left font-medium">运行次数</th>
+                  <th className="px-4 py-3 text-left font-medium">组价一致率</th>
+                  <th className="px-4 py-3 text-left font-medium">创建时间</th>
+                  <th className="px-4 py-3 text-right font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {tasks.map(task => {
+                  const consistencyRate = task.consistency_rate
+                  return (
+                    <tr key={task.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-gray-900">{task.name}</div>
+                        <span className="mt-1 inline-flex rounded border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700">
+                          {'\u77e5\u8bc6\u5e93\u7248\u672c\uff1a'}{task.kb_version_id ?? '-'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-gray-700">{task.project_name}</td>
+                      <td className="px-4 py-3 text-gray-600">
                         {task.quota_library_names.length > 0 ? task.quota_library_names.join('、') : '全部定额库'}
-                      </p>
-                      {task.manual_project_id && (
-                        <p>对比工程：{task.manual_project_name || `#${task.manual_project_id}`}</p>
-                      )}
-                      <p className="text-xs text-gray-400 mt-2">
-                        创建于 {new Date(task.created_at).toLocaleString()} · 运行 {task.latest_run_count} 次
-                      </p>
-                    </div>
-                  </div>
-                  <div className="ml-4 flex shrink-0 flex-col items-end gap-2">
-                    <Link href={`/pricing-task/${task.id}`}>
-                      <button className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors whitespace-nowrap">
-                        进入
-                      </button>
-                    </Link>
-                    <Link href={`/pricing-task/${task.id}/preview`} className="text-xs text-cyan-600 hover:text-cyan-700">
-                      试行皮肤
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            ))}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600">
+                        {task.manual_project_id ? task.manual_project_name || `#${task.manual_project_id}` : '不对比'}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600 tabular-nums">{task.latest_run_count}</td>
+                      <td className="px-4 py-3">
+                        {consistencyRate == null ? (
+                          <span className="text-xs text-gray-400">待计算</span>
+                        ) : (
+                          <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold tabular-nums ${
+                            consistencyRate >= 0.9
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : consistencyRate >= 0.6
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-rose-50 text-rose-700'
+                          }`}>
+                            {(consistencyRate * 100).toFixed(1)}%
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-500">{new Date(task.created_at).toLocaleString()}</td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <Link href={`/pricing-task/${task.id}`} className="mr-3 text-blue-600 hover:text-blue-700">进入</Link>
+                        <Link href={`/pricing-task/${task.id}/preview`} className="mr-3 text-cyan-600 hover:text-cyan-700">预览</Link>
+                        <button onClick={() => removeTask(task.id)} className="text-gray-400 hover:text-red-600">删除</button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
 
@@ -250,10 +288,10 @@ export default function PricingTaskPage() {
                 </button>
                 <button
                   onClick={handleCreateTask}
-                  disabled={modalLoading}
+                  disabled={modalLoading || saving || !taskName.trim() || !selectedProject}
                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
-                  创建并进入
+                  {saving ? '创建中...' : '创建并进入'}
                 </button>
               </div>
             </div>

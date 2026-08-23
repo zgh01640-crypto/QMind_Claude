@@ -1379,6 +1379,7 @@ export interface PricingTask {
   created_at: string
   latest_run_count: number
   kb_version_id?: number | null
+  consistency_rate: number | null
 }
 
 export interface PricingTaskBatch {
@@ -2091,6 +2092,14 @@ export async function createPricingTask(body: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+}
+
+export async function deletePricingTask(id: number) {
+  const res = await fetch(`${API}/api/pricing-tasks/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `请求失败 ${res.status}`)
+  }
 }
 
 export async function importLocalPricingTasks(tasks: LocalPricingTask[]) {
