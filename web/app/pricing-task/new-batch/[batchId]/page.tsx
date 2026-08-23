@@ -24,6 +24,7 @@ import {
   updatePricingTaskBatchManualComparison,
 } from '@/lib/api'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
+import BatchPricingResultDetailModal from '@/components/pricing-task/BatchPricingResultDetailModal'
 
 interface CodeCheck {
   item_code: string
@@ -1390,7 +1391,19 @@ export default function PricingTaskBatchPage() {
       </section>
 
       {detailItem && detailResult?.quotaMatch && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 px-4" onClick={() => setDetailItemId(null)}>
+        <BatchPricingResultDetailModal
+          item={detailItem}
+          result={detailResult}
+          onClose={() => setDetailItemId(null)}
+          onReview={hasReviewDifferences(detailResult) ? () => {
+            setReviewItemId(detailItem.id)
+            setDetailItemId(null)
+          } : undefined}
+        />
+      )}
+
+      {detailItem && detailResult?.quotaMatch && (
+        <div className="hidden fixed inset-0 z-50 items-center justify-center bg-gray-950/40 px-4" onClick={() => setDetailItemId(null)}>
           <div className="max-h-[86vh] w-full max-w-4xl overflow-hidden rounded-lg bg-white shadow-xl" onClick={event => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
               <div className="min-w-0">
