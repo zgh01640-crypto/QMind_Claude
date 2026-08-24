@@ -401,9 +401,11 @@ function StepCards({ result }: { result?: ItemResult }) {
       )}
       {result.evaluation && (
         <section className="rounded border border-purple-200 bg-purple-50 px-3 py-2 text-xs">
-          <div className="font-semibold text-purple-900">6. 人工对比</div>
-          <div className="mt-1 text-purple-800">
-            命中 {result.evaluation.hit_count}，遗漏 {result.evaluation.missed_count}，额外 {result.evaluation.extra_count}
+          <div className="flex items-center justify-between gap-3">
+            <div className="shrink-0 font-semibold text-purple-900">6. 人工对比</div>
+            <div className="whitespace-nowrap text-purple-800">
+              命中 {result.evaluation.hit_count}，遗漏 {result.evaluation.missed_count}，额外 {result.evaluation.extra_count}
+            </div>
           </div>
         </section>
       )}
