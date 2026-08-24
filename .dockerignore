@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+.data
+.codex
+.claude
+.agents
+.github
+*.log
+*.tmp
+web/node_modules
+web/.next
+mydoc
+tests
+__pycache__
+*.py[cod]

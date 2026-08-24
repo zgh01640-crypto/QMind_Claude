@@ -1,0 +1,57 @@
+name: QMind CI and Tencent Cloud deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production Compose
+        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml config -q
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t qmind-api:ci .
+      - name: Build Web image
+        run: docker build --build-arg NEXT_PUBLIC_API_URL=. -f web/Dockerfile -t qmind-web:ci web
+
+  deploy:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      TENCENT_HOST: ${{ secrets.TENCENT_HOST }}
+      TENCENT_USER: ${{ secrets.TENCENT_USER }}
+      TENCENT_PORT: ${{ vars.TENCENT_PORT || '22' }}
+      TENCENT_APP_DIR: ${{ vars.TENCENT_APP_DIR || '/opt/qmind' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package release
+        run: git archive --format=tar.gz --output=qmind-release.tgz HEAD
+      - name: Configure SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' '${{ secrets.TENCENT_SSH_KEY }}' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$TENCENT_PORT" "$TENCENT_HOST" >> ~/.ssh/known_hosts
+      - name: Upload and activate release
+        run: |
+          release_id="${GITHUB_SHA}"
+          remote_archive="/tmp/qmind-${release_id}.tgz"
+          scp -P "$TENCENT_PORT" qmind-release.tgz "$TENCENT_USER@$TENCENT_HOST:$remote_archive"
+          ssh -p "$TENCENT_PORT" "$TENCENT_USER@$TENCENT_HOST" "APP_DIR='$TENCENT_APP_DIR' RELEASE_ID='$release_id' REMOTE_ARCHIVE='$remote_archive' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          release_dir="$APP_DIR/releases/$RELEASE_ID"
+          mkdir -p "$release_dir" "$APP_DIR/releases" "$APP_DIR/shared" "$APP_DIR/data"
+          test -f "$APP_DIR/shared/.env.production"
+          tar -xzf "$REMOTE_ARCHIVE" -C "$release_dir"
+          ln -sfn "$release_dir" "$APP_DIR/current.next"
+          mv -Tf "$APP_DIR/current.next" "$APP_DIR/current"
+          APP_DIR="$APP_DIR" RELEASE_DIR="$APP_DIR/current" ENV_FILE="$APP_DIR/shared/.env.production" bash "$APP_DIR/current/deploy/tencent-cloud/deploy.sh"
+          rm -f "$REMOTE_ARCHIVE"
+          REMOTE
