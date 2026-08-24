@@ -12,6 +12,7 @@ ALTER TABLE tlibs DROP CONSTRAINT IF EXISTS tlibs_source_file_sha256_source_rowi
 ALTER TABLE tqdk_tzjmc DROP CONSTRAINT IF EXISTS tqdk_tzjmc_source_file_sha256_source_rowid_key;
 ALTER TABLE tdek_tzjmc DROP CONSTRAINT IF EXISTS tdek_tzjmc_source_file_sha256_source_rowid_key;
 ALTER TABLE tqdk_tqdzm DROP CONSTRAINT IF EXISTS tqdk_tqdzm_source_file_sha256_source_rowid_key;
+ALTER TABLE tqdk_tqdxmtz DROP CONSTRAINT IF EXISTS tqdk_tqdxmtz_source_file_sha256_source_rowid_key;
 ALTER TABLE tdek_tdezm DROP CONSTRAINT IF EXISTS tdek_tdezm_source_file_sha256_source_rowid_key;
 ALTER TABLE tdek_tzmgc DROP CONSTRAINT IF EXISTS tdek_tzmgc_source_file_sha256_source_rowid_key;
 ALTER TABLE tdek_tznhs DROP CONSTRAINT IF EXISTS tdek_tznhs_source_file_sha256_source_rowid_key;

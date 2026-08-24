@@ -9,6 +9,7 @@ from db.schema_lock import acquire_schema_transaction_lock
 
 MIGRATIONS = (
     ("20260824_pricing_kb_schema_contract", Path(__file__).with_name("migrations") / "20260824_pricing_kb_schema_contract.sql"),
+    ("20260824_tqdk_tqdxmtz_version_uniqueness", Path(__file__).with_name("migrations") / "20260824_tqdk_tqdxmtz_version_uniqueness.sql"),
 )
 
 
