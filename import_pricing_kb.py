@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from psycopg2.extras import execute_values
 
 from db.connection import get_connection
+from db.pricing_kb_schema_contract import SQLITE_SCHEMA_CONTRACT, SQLiteSchemaContractError, schema_contract_diff
 from db.pricing_kb_versions import apply_version_schema
 
 
@@ -21,33 +23,40 @@ DEFAULT_SOURCE = Path("mydoc") / "智能组价系统库.db"
 
 
 SQLITE_TABLES = {
-    "TLibs": ("tlibs", ["id", "mc"], "SELECT rowid, ID, MC FROM TLibs"),
+    "TLibs": ("tlibs", ["id", "mc", "isqdk"], "SELECT rowid, ID, MC, isQDK FROM TLibs"),
     "TQDK_TZJMC": ("tqdk_tzjmc", ["qdkid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, QDKID, ID, PID, ZJMC, ZJSM FROM TQDK_TZJMC"),
     "TDEK_TZJMC": ("tdek_tzjmc", ["dekid", "id", "pid", "zjmc", "zjsm"], "SELECT rowid, DEKID, ID, PID, ZJMC, ZJSM FROM TDEK_TZJMC"),
-    "TQDK_TQDZM": ("tqdk_tqdzm", ["qdkid", "id", "zmbh", "zmmc", "dw", "zjh"], "SELECT rowid, QDKID, ID, ZMBH, ZMMC, DW, ZJH FROM TQDK_TQDZM"),
+    "TQDK_TQDZM": ("tqdk_tqdzm", ["qdkid", "id", "zmbh", "zmmc", "dw", "zjh", "gznr", "locked"], "SELECT rowid, QDKID, ID, ZMBH, ZMMC, DW, ZJH, GZNR, Locked FROM TQDK_TQDZM"),
     "TQDK_TQDXMTZ": (
         "tqdk_tqdxmtz",
-        ["qdkid", "qdzmid", "tzmc", "defaulttzms", "zytz", "bctz", "remark"],
-        "SELECT rowid, QDKID, QDZMID, TZMC, DEFAULTTZMS, ZYTZ, BCTZ, REMARK FROM TQDK_TQDXMTZ",
+        ["qdkid", "qdzmid", "tzmc", "defaulttzms", "zytz", "bctz", "id", "remark"],
+        "SELECT rowid, QDKID, QDZMID, TZMC, DEFAULTTZMS, ZYTZ, BCTZ, ID, REMARK FROM TQDK_TQDXMTZ",
     ),
     "TDEK_TDEZM": (
         "tdek_tdezm",
         ["dekid", "id", "zmbh", "zmmc", "dw", "gznr", "zjh", "dj", "rgf", "clf", "jxf", "zcf", "sbf", "glf", "lr", "aqwmsgf", "qtcsf", "gf", "sj"],
         "SELECT rowid, DEKID, ID, ZMBH, ZMMC, DW, GZNR, ZJH, DJ, RGF, CLF, JXF, ZCF, SBF, GLF, LR, AQWMSGF, QTCSF, GF, SJ FROM TDEK_TDEZM",
     ),
-    "TDEK_TZMGC": ("tdek_tzmgc", ["dekid", "dezmid", "zmbh", "zmmc", "dw", "gcl", "lx"], "SELECT rowid, DEKID, DEZMID, ZMBH, ZMMC, DW, GCL, LX FROM TDEK_TZMGC"),
-    "TDEK_TZNHS": ("tdek_tznhs", ["dekid", "dezmid", "tsxx", "hssm", "groupno"], "SELECT rowid, DEKID, DEZMID, TSXX, HSSM, GROUPNO FROM TDEK_TZNHS"),
+    "TDEK_TZMGC": ("tdek_tzmgc", ["dekid", "dezmid", "zmbh", "zmmc", "dw", "gcl", "lx", "dj", "zycl", "id"], "SELECT rowid, DEKID, DEZMID, ZMBH, ZMMC, DW, GCL, LX, DJ, ZYCL, ID FROM TDEK_TZMGC"),
+    "TDEK_TZNHS": ("tdek_tznhs", ["dekid", "dezmid", "tsxx", "hssm", "groupno", "id"], "SELECT rowid, DEKID, DEZMID, TSXX, HSSM, GROUPNO, ID FROM TDEK_TZNHS"),
     "TDEK_TZHHS": (
         "tdek_tzhhs",
         ["dekid", "dezmid", "tsxx", "zmbh", "jcz", "zjdw"],
         "SELECT rowid, DEKID, DEZMID, TSXX, ZMBH, JCZ, ZJDW FROM TDEK_TZHHS",
     ),
-    "TQDK_TQDZY": ("tqdk_tqdzy", ["qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"], "SELECT rowid, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY"),
+    "TQDK_TQDZY": ("tqdk_tqdzy", ["id", "qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"], "SELECT rowid, ID, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY"),
     "TQDK_TQDZY_SPECIAL": (
         "tqdk_tqdzy_special",
         ["id", "pid", "qdkid", "qdzmid", "dekid", "dezmid", "zmbh", "zmmc", "dw"],
         "SELECT rowid, ID, PID, QDKID, QDZMID, DEKID, DEZMID, ZMBH, ZMMC, DW FROM TQDK_TQDZY_SPECIAL",
     ),
+}
+
+BOOLEAN_COLUMNS = {
+    "TLibs": {"isqdk"},
+    "TQDK_TQDZM": {"locked"},
+    "TQDK_TQDXMTZ": {"zytz", "bctz"},
+    "TDEK_TZMGC": {"zycl"},
 }
 
 
@@ -78,6 +87,126 @@ def sqlite_connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def sqlite_table_schema(sqlite_cur: sqlite3.Cursor, source_table: str) -> list[dict[str, Any]]:
+    return [
+        {"name": str(row[1]), "type": str(row[2] or ""), "not_null": bool(row[3])}
+        for row in sqlite_cur.execute(f'PRAGMA table_info("{source_table.replace(chr(34), chr(34) * 2)}")')
+    ]
+
+
+def validate_source_table_schema(sqlite_cur: sqlite3.Cursor, source_table: str) -> None:
+    if source_table not in SQLITE_SCHEMA_CONTRACT:
+        return
+    diff = schema_contract_diff(
+        ({"name": source_table, "columns": sqlite_table_schema(sqlite_cur, source_table)},),
+        table_names=(source_table,),
+    )
+    if diff:
+        raise SQLiteSchemaContractError(diff)
+
+
+def validate_sqlite_source_contract(source: Path) -> None:
+    """Validate every governed table before a full command-line import."""
+    conn = sqlite_connect(source)
+    try:
+        cur = conn.cursor()
+        table_names = [str(row[0]) for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        tables = [
+            {"name": table_name, "columns": sqlite_table_schema(cur, table_name)}
+            for table_name in table_names
+            if table_name in SQLITE_SCHEMA_CONTRACT
+        ]
+        diff = schema_contract_diff(tables)
+        if diff:
+            raise SQLiteSchemaContractError(diff)
+    finally:
+        conn.close()
+
+
+def normalize_sqlite_boolean(value: Any, *, source_table: str, column: str, source_rowid: int) -> bool | None:
+    """Normalize legacy SQLite boolean encodings without accepting ambiguity."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value in (-1, 1):
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"-1", "1", "true"}:
+            return True
+        if normalized in {"0", "false"}:
+            return False
+    raise ValueError(
+        f"invalid SQLite boolean value in {source_table}.{column} at source_rowid={source_rowid}: {value!r}"
+    )
+
+
+def _canonical_digest_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    if isinstance(value, Decimal):
+        value = format(value, "f")
+    if isinstance(value, float):
+        value = str(value)
+    if isinstance(value, str):
+        try:
+            decimal_value = Decimal(value)
+        except Exception:
+            return value
+        normalized = decimal_value.normalize()
+        return format(normalized, "f") if normalized == normalized.to_integral() else format(normalized, "f").rstrip("0").rstrip(".")
+    if isinstance(value, bytes):
+        return {"$type": "blob", "hex": value.hex()}
+    return str(value)
+
+
+def _digest_record(digest: "hashlib._Hash", values: tuple[Any, ...]) -> None:
+    payload = [_canonical_digest_value(value) for value in values]
+    digest.update(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    digest.update(b"\n")
+
+
+def source_table_digest(sqlite_cur: sqlite3.Cursor, source_table: str) -> tuple[int, str]:
+    """Digest normalized source business values in immutable source-row order."""
+    validate_source_table_schema(sqlite_cur, source_table)
+    _, columns, _ = SQLITE_TABLES[source_table]
+    sqlite_cur.execute(f'SELECT rowid, {", ".join(column.upper() for column in columns)} FROM "{source_table}" ORDER BY rowid')
+    digest = hashlib.sha256()
+    count = 0
+    boolean_columns = BOOLEAN_COLUMNS.get(source_table, set())
+    while rows := sqlite_cur.fetchmany(10000):
+        for row in rows:
+            values = []
+            for column in columns:
+                value = row[column.upper()]
+                if column in boolean_columns:
+                    value = normalize_sqlite_boolean(value, source_table=source_table, column=column, source_rowid=int(row["rowid"]))
+                values.append(value)
+            _digest_record(digest, (int(row["rowid"]), *values))
+            count += 1
+    return count, digest.hexdigest()
+
+
+def postgres_table_digest(pg, version_id: int, source_table: str) -> tuple[int, str]:
+    pg_table, columns, _ = SQLITE_TABLES[source_table]
+    digest = hashlib.sha256()
+    count = 0
+    with pg.cursor() as cur:
+        cur.execute(
+            f"SELECT source_rowid, {', '.join(columns)} FROM {pg_table} WHERE kb_version_id=%s ORDER BY source_rowid",
+            (version_id,),
+        )
+        while rows := cur.fetchmany(10000):
+            for row in rows:
+                _digest_record(digest, tuple(row))
+                count += 1
+    return count, digest.hexdigest()
 
 
 def sqlite_count(cur: sqlite3.Cursor, table: str) -> int:
@@ -327,6 +456,7 @@ def import_source_table(
     source_table: str,
 ) -> int:
     pg_table, pg_columns, select_sql = SQLITE_TABLES[source_table]
+    validate_source_table_schema(sqlite_cur, source_table)
     all_columns = pg_columns + ["kb_version_id", "source_file_sha256", "source_rowid"]
     insert_sql = f"""
         INSERT INTO {pg_table} ({", ".join(all_columns)})
@@ -335,24 +465,25 @@ def import_source_table(
     """
 
     total = 0
-    source_columns = {
-        str(row[1]).upper()
-        for row in sqlite_cur.execute(f"PRAGMA table_info({source_table})")
-    }
-    select_columns = [
-        col.upper() if col.upper() in source_columns else f"NULL AS {col.upper()}"
-        for col in pg_columns
-    ]
-    sqlite_cur.execute(f"SELECT rowid, {', '.join(select_columns)} FROM {source_table}")
+    sqlite_cur.execute(f'SELECT rowid, {", ".join(column.upper() for column in pg_columns)} FROM "{source_table}"')
+    boolean_columns = BOOLEAN_COLUMNS.get(source_table, set())
     while True:
         rows = sqlite_cur.fetchmany(10000)
         if not rows:
             break
         values = []
         for row in rows:
+            source_rowid = int(row["rowid"])
+            business_values = []
+            for column in pg_columns:
+                value = row[column.upper()]
+                if column in boolean_columns:
+                    value = normalize_sqlite_boolean(
+                        value, source_table=source_table, column=column, source_rowid=source_rowid
+                    )
+                business_values.append(value)
             values.append(
-                tuple(row[col.upper()] for col in pg_columns)
-                + (version_id, source_hash, row["rowid"])
+                tuple(business_values) + (version_id, source_hash, source_rowid)
             )
         with pg.cursor() as cur:
             execute_values(cur, insert_sql, values, page_size=10000)
@@ -368,6 +499,7 @@ def load_replacement_staging(
     staging_table: str,
 ) -> int:
     _, pg_columns, _ = SQLITE_TABLES[source_table]
+    validate_source_table_schema(sqlite_cur, source_table)
     all_columns = pg_columns + ["source_file_sha256", "source_rowid"]
     source_columns = {
         str(row[1]).upper()
@@ -708,6 +840,7 @@ def import_pricing_kb(source: Path, force: bool, report_only: bool, should_link:
     source = resolve_source(source).resolve()
     if not source.exists():
         raise FileNotFoundError(source)
+    validate_sqlite_source_contract(source)
     source_hash = sha256_file(source)
     inspection = inspect_sqlite(source)
     if inspection["quick_check"] != "ok":

@@ -14,8 +14,15 @@ from fastapi import HTTPException, Request
 from psycopg2.extras import Json, execute_values
 
 from db.connection import get_connection
+from db.pricing_kb_schema_contract import SQLiteSchemaContractError, schema_contract_diff
 from db.pricing_kb_versions import apply_version_schema
-from import_pricing_kb import SQLITE_TABLES, import_source_table, sqlite_connect
+from import_pricing_kb import (
+    SQLITE_TABLES,
+    import_source_table,
+    postgres_table_digest,
+    source_table_digest,
+    sqlite_connect,
+)
 
 
 KNOWN_TABLES = tuple(SQLITE_TABLES)
@@ -79,7 +86,17 @@ def inspect_sqlite(path: Path) -> dict[str, Any]:
         signature = hashlib.sha256(
             json.dumps(tables, ensure_ascii=True, sort_keys=True).encode()
         ).hexdigest()
-        return {"quick_check": quick_check, "schema_signature": signature, "tables": tables}
+        schema_diff = schema_contract_diff(tables)
+        return {
+            "quick_check": quick_check,
+            "schema_signature": signature,
+            "tables": tables,
+            "schema_diff": schema_diff,
+            "contract_valid": not schema_diff,
+            "out_of_scope_tables": sorted(
+                table["name"] for table in tables if not table["known"]
+            ),
+        }
     finally:
         conn.close()
 
@@ -182,12 +199,15 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
     job_id, upload_id, parent_id, config, change_note, stored_path, source_hash, inspection = job
     selected = set(config.get("selected_tables") or [])
     unknown = {k for k, v in (config.get("unknown_tables") or {}).items() if v == "raw"}
+    schema_diff = inspection.get("schema_diff") or {}
+    if schema_diff:
+        raise SQLiteSchemaContractError(schema_diff)
     manifest_payload = {
         "parent_version_id": parent_id,
         "source_file_sha256": source_hash,
         "selected_tables": sorted(selected),
         "unknown_tables": sorted(unknown),
-        "adapter_version": "pricing-kb-import-v1",
+        "adapter_version": "pricing-kb-import-v2-schema-contract",
     }
     manifest = hashlib.sha256(json.dumps(manifest_payload, sort_keys=True).encode()).hexdigest()
     with conn.cursor() as cur:
@@ -233,12 +253,25 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
     sqlite_conn = sqlite_connect(Path(stored_path))
     completed = 0
     processed_rows = 0
+    integrity: dict[str, Any] = {}
     try:
         sqlite_cur = sqlite_conn.cursor()
         for table in sorted(selected):
             if _job_cancelled(conn, job_id):
                 raise InterruptedError("cancel requested")
             count = import_source_table(sqlite_cur, conn, version_id, source_hash, table)
+            source_count, source_digest = source_table_digest(sqlite_cur, table)
+            stored_count, stored_digest = postgres_table_digest(conn, version_id, table)
+            table_integrity = {
+                "source_rows": source_count,
+                "stored_rows": stored_count,
+                "source_digest": source_digest,
+                "stored_digest": stored_digest,
+                "ok": source_count == stored_count and source_digest == stored_digest,
+            }
+            integrity[table] = table_integrity
+            if not table_integrity["ok"]:
+                raise RuntimeError(f"typed import integrity validation failed for {table}: {table_integrity}")
             processed_rows += count
             completed += 1
             _progress(conn, job_id, table, completed, processed_rows, {"last_table_rows": count})
@@ -303,9 +336,14 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
         validation = _validate_effective_version(conn, version_id)
         if any(validation.values()):
             raise RuntimeError(f"effective version validation failed: {validation}")
+        validation_report = {
+            "relations": validation,
+            "schema_contract": {"valid": True, "schema_diff": {}},
+            "integrity": integrity,
+        }
         with conn.cursor() as cur:
             cur.execute("""UPDATE pricing_kb_versions SET status='validated',validation_report=%s,
-                validated_at=NOW(),updated_at=NOW() WHERE id=%s""", (Json(validation), version_id))
+                validated_at=NOW(),updated_at=NOW() WHERE id=%s""", (Json(validation_report), version_id))
             cur.execute("""UPDATE pricing_kb_import_jobs SET status='validated',current_table=NULL,
                 completed_tables=total_tables,finished_at=NOW(),updated_at=NOW() WHERE id=%s""", (job_id,))
         conn.commit()

@@ -178,11 +178,28 @@ def create_import_job(body: ImportJobCreate):
     conn = _conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status,inspection_json FROM pricing_kb_uploads WHERE id=%s", (body.upload_id,))
+            cur.execute("SELECT status,inspection_json,stored_path FROM pricing_kb_uploads WHERE id=%s", (body.upload_id,))
             upload = cur.fetchone()
             if not upload or upload[0] != "inspected":
                 raise HTTPException(status_code=409, detail="upload is not ready")
             inspection = upload[1] or {}
+            # Uploads created before schema governance do not have a contract
+            # report. Reinspect them before allowing a new version to use them.
+            if "schema_diff" not in inspection:
+                inspection = inspect_sqlite(Path(upload[2]))
+                cur.execute(
+                    "UPDATE pricing_kb_uploads SET inspection_json=%s,schema_signature=%s,quick_check=%s WHERE id=%s",
+                    (Json(inspection), inspection.get("schema_signature"), inspection.get("quick_check"), body.upload_id),
+                )
+            schema_diff = inspection.get("schema_diff") or {}
+            if schema_diff:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": "SQLite knowledge-base schema does not match the governed contract",
+                        "schema_diff": schema_diff,
+                    },
+                )
             available = {t["name"] for t in inspection.get("tables", [])}
             selected = set(body.selected_tables)
             if body.profile_id:
