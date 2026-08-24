@@ -74,11 +74,35 @@ async def upload_pricing_kb(file: UploadFile = File(...)):
         conn = _conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id,inspection_json FROM pricing_kb_uploads WHERE file_sha256=%s", (file_hash,))
+                cur.execute("SELECT id,stored_path,inspection_json FROM pricing_kb_uploads WHERE file_sha256=%s", (file_hash,))
                 existing = cur.fetchone()
                 if existing:
-                    temp.unlink(missing_ok=True)
-                    return {"id": existing[0], "duplicate": True, "inspection": existing[1]}
+                    existing_id, existing_path, existing_inspection = existing
+                    if Path(existing_path).exists():
+                        temp.unlink(missing_ok=True)
+                        return {"id": existing_id, "duplicate": True, "restored": False, "inspection": existing_inspection}
+                    final_path = root / f"{file_hash}.db"
+                    temp.replace(final_path)
+                    try:
+                        inspection = inspect_sqlite(final_path)
+                        status = "inspected" if inspection["quick_check"] == "ok" else "failed"
+                        error = None if status == "inspected" else inspection["quick_check"]
+                    except Exception as exc:
+                        inspection, status, error = {}, "failed", str(exc)
+                    cur.execute(
+                        """UPDATE pricing_kb_uploads
+                           SET stored_path=%s,size_bytes=%s,status=%s,quick_check=%s,
+                               schema_signature=%s,inspection_json=%s,error_message=%s
+                           WHERE id=%s""",
+                        (
+                            str(final_path), size, status, inspection.get("quick_check"),
+                            inspection.get("schema_signature"), Json(inspection), error, existing_id,
+                        ),
+                    )
+                    conn.commit()
+                    if status == "failed":
+                        raise HTTPException(status_code=422, detail=error)
+                    return {"id": existing_id, "duplicate": True, "restored": True, "inspection": inspection}
             final_path = root / f"{file_hash}.db"
             temp.replace(final_path)
             try:
