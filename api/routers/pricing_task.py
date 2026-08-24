@@ -2595,7 +2595,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 if combo_dezmid:
                     cur.execute(
                         """
-                        SELECT zmbh, zmmc, dw, gcl, lx
+                        SELECT zmbh, zmmc, dw, gcl, lx, zycl
                         FROM tdek_tzmgc
                         WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                         ORDER BY lx NULLS LAST, source_rowid
@@ -2609,6 +2609,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                             "unit": rr[2] or "",
                             "quantity": float(rr[3]) if rr[3] is not None else None,
                             "type": int(rr[4]) if rr[4] is not None else None,
+                            "zycl": bool(rr[5]) if rr[5] is not None else None,
                         }
                         for rr in cur.fetchall()
                     ]
@@ -2631,7 +2632,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                 )
             cur.execute(
                 """
-                SELECT zmbh, zmmc, dw, gcl, lx
+                SELECT zmbh, zmmc, dw, gcl, lx, zycl
                 FROM tdek_tzmgc
                 WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
@@ -2645,6 +2646,7 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
                     "unit": r[2] or "",
                     "quantity": float(r[3]) if r[3] is not None else None,
                     "type": int(r[4]) if r[4] is not None else None,
+                    "zycl": bool(r[5]) if r[5] is not None else None,
                 }
                 for r in cur.fetchall()
             ]
@@ -2727,7 +2729,7 @@ def _confirmed_items_from_matches(
                 )
             cur.execute(
                 """
-                SELECT zmbh, zmmc, dw, gcl, lx
+                SELECT zmbh, zmmc, dw, gcl, lx, zycl
                 FROM tdek_tzmgc
                 WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
                 ORDER BY lx NULLS LAST, source_rowid
@@ -2741,6 +2743,7 @@ def _confirmed_items_from_matches(
                     "unit": r[2] or "",
                     "quantity": float(r[3]) if r[3] is not None else None,
                     "type": int(r[4]) if r[4] is not None else None,
+                    "zycl": bool(r[5]) if r[5] is not None else None,
                 }
                 for r in cur.fetchall()
             ]
@@ -3106,7 +3109,7 @@ def _load_combo_resources(
             return []
         cur.execute(
             """
-            SELECT zmbh, zmmc, dw, gcl, lx
+            SELECT zmbh, zmmc, dw, gcl, lx, zycl
             FROM tdek_tzmgc
             WHERE kb_version_id=pricing_kb_data_version(%s,'TDEK_TZMGC') AND dekid=%s AND dezmid=%s
             ORDER BY lx NULLS LAST, source_rowid
@@ -3120,6 +3123,7 @@ def _load_combo_resources(
                 "unit": r[2] or "",
                 "quantity": float(r[3]) if r[3] is not None else None,
                 "type": int(r[4]) if r[4] is not None else None,
+                "zycl": bool(r[5]) if r[5] is not None else None,
             }
             for r in cur.fetchall()
         ]

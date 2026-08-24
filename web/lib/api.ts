@@ -1758,6 +1758,7 @@ export interface PricingTaskConversionResource {
   name: string
   unit: string
   type: number | null
+  zycl?: boolean | null
   original_quantity?: number | null
   confirmed_quantity?: number | null
   quantity?: number | null

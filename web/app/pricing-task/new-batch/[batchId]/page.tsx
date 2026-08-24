@@ -1508,7 +1508,7 @@ export default function PricingTaskBatchPage() {
                           <div className="px-3 py-4 text-center text-xs text-gray-400">暂无工料机明细</div>
                         ) : (
                           <div className="overflow-x-auto">
-                            <table className="min-w-[720px] w-full text-left text-xs">
+                            <table className="min-w-[800px] w-full text-left text-xs">
                               <thead className="bg-white text-gray-500">
                                 <tr>
                                   <th className="px-3 py-2 font-medium">类别</th>
@@ -1516,6 +1516,7 @@ export default function PricingTaskBatchPage() {
                                   <th className="px-3 py-2 font-medium">名称</th>
                                   <th className="px-3 py-2 font-medium">单位</th>
                                   <th className="px-3 py-2 text-right font-medium">含量</th>
+                                  <th className="px-3 py-2 text-center font-medium">是否主材</th>
                                   <th className="px-3 py-2 font-medium">换算</th>
                                 </tr>
                               </thead>
@@ -1529,6 +1530,9 @@ export default function PricingTaskBatchPage() {
                                       <td className="px-3 py-2 text-gray-900">{resource.name || '-'}</td>
                                       <td className="px-3 py-2 text-gray-500">{resource.unit || '-'}</td>
                                       <td className="px-3 py-2 text-right text-gray-700">{resource.confirmed_quantity ?? resource.quantity ?? resource.original_quantity ?? '-'}</td>
+                                      <td className="px-3 py-2 text-center">
+                                        {resource.zycl === true ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">是</span> : resource.zycl === false ? <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">否</span> : <span className="text-gray-400">-</span>}
+                                      </td>
                                       <td className="px-3 py-2 text-gray-500">
                                         {matchedRules.length === 0 ? '-' : (
                                           <div className="flex flex-wrap gap-1">
