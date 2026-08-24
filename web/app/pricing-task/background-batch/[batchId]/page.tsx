@@ -81,9 +81,9 @@ function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summ
   const itemConsistencyRate = summary.selected_count > 0
     ? Math.max(0, Math.min(1, summary.exact_count / summary.selected_count))
     : null
-  return <section className="overflow-hidden rounded-xl border border-emerald-200 bg-white">
-    <div className="grid xl:grid-cols-[390px_minmax(0,1fr)]">
-      <div className="flex items-center gap-4 bg-emerald-950 px-4 py-2 text-white">
+  return <section className="overflow-x-auto rounded-xl border border-emerald-200 bg-white">
+    <div className="flex min-w-[1040px] items-stretch">
+      <div className="flex w-[390px] shrink-0 items-center gap-4 bg-emerald-950 px-4 py-2 text-white">
         <div className="shrink-0 border-r border-emerald-800 pr-4">
           <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-emerald-300">结果评估</div>
           <div className="mt-0.5 text-[9px] text-emerald-400">{summary.evaluated_count}/{summary.selected_count} 条</div>
@@ -99,14 +99,14 @@ function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summ
           <div className="mt-0.5 truncate text-[8px] text-emerald-500">命中定额数 ÷ 人工定额数</div>
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2 text-[10px]">
+      <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-5 px-4 py-2 text-[10px]">
         <div className="flex items-baseline gap-1 text-emerald-700"><span className="text-slate-400">命中</span><strong className="text-base tabular-nums">{summary.hit_count}</strong></div>
         <div className="flex items-baseline gap-1 text-amber-700"><span className="text-slate-400">漏项</span><strong className="text-base tabular-nums">{summary.missed_count}</strong></div>
         <div className="flex items-baseline gap-1 text-rose-700"><span className="text-slate-400">多项</span><strong className="text-base tabular-nums">{summary.extra_count}</strong></div>
         <div className="flex items-baseline gap-1 text-slate-700"><span className="text-slate-400">人工</span><strong className="text-base tabular-nums">{summary.manual_count}</strong></div>
         <div className="flex items-baseline gap-1 text-slate-700"><span className="text-slate-400">AI</span><strong className="text-base tabular-nums">{summary.ai_count}</strong></div>
-        <span className="hidden h-5 w-px bg-slate-200 2xl:block" />
-        <div className="flex flex-wrap items-center gap-1.5">
+        <span className="h-5 w-px shrink-0 bg-slate-200" />
+        <div className="flex shrink-0 flex-nowrap items-center gap-1.5">
           <span className="text-slate-400">清单一致性</span>
           <span className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700">完全 {summary.exact_count}</span>
           <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-700">部分 {summary.partial_count}</span>
