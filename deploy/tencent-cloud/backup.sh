@@ -8,9 +8,15 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$APP_DIR/backups/$STAMP"
 COMPOSE_FILE="$RELEASE_DIR/docker-compose.prod.yml"
 
+set -a
+source "$ENV_FILE"
+set +a
+DB_USER="${POSTGRES_USER:-qmind}"
+DB_NAME="${POSTGRES_DB:-qmind}"
+
 mkdir -p "$BACKUP_DIR"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T db \
-  pg_dump -U qmind -d qmind -Fc > "$BACKUP_DIR/qmind.dump"
+  pg_dump -U "$DB_USER" -d "$DB_NAME" -Fc > "$BACKUP_DIR/qmind.dump"
 
 if [[ -d "$APP_DIR/data/api/pricing-kb-uploads" ]]; then
   tar -czf "$BACKUP_DIR/pricing-kb-uploads.tgz" \
