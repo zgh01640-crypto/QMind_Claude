@@ -2991,6 +2991,7 @@ def _normalize_adjustment_rules(
                         "unit": str(resource.get("unit") or ""),
                         "quantity": resource.get("quantity"),
                         "type": resource.get("type"),
+                        "zycl": resource.get("zycl"),
                     }
                     for resource in rule.get("combo_resources", [])
                     if isinstance(resource, dict)
@@ -3076,6 +3077,7 @@ def _normalize_conversion_check(
                         "unit": str(resource.get("unit") or ""),
                         "quantity": resource.get("quantity"),
                         "type": resource.get("type"),
+                        "zycl": resource.get("zycl"),
                     }
                     for resource in confirmed.get("resources", [])
                 ],
@@ -3129,6 +3131,37 @@ def _load_combo_resources(
         ]
 
 
+def _hydrate_resource_main_material_flags(
+    resources: Any, source_resources: list[dict[str, Any]],
+) -> None:
+    """Backfill absent main-material flags in legacy result snapshots."""
+    if not isinstance(resources, list):
+        return
+
+    flags_by_key: dict[tuple[str, str, str, Any], list[bool | None]] = {}
+    for source in source_resources:
+        key = (
+            str(source.get("code") or ""),
+            str(source.get("name") or ""),
+            str(source.get("unit") or ""),
+            source.get("type"),
+        )
+        flags_by_key.setdefault(key, []).append(source.get("zycl"))
+
+    for resource in resources:
+        if not isinstance(resource, dict) or "zycl" in resource:
+            continue
+        key = (
+            str(resource.get("code") or ""),
+            str(resource.get("name") or ""),
+            str(resource.get("unit") or ""),
+            resource.get("type"),
+        )
+        flags = flags_by_key.get(key)
+        if flags:
+            resource["zycl"] = flags.pop(0)
+
+
 def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_id: int) -> Any:
     if not isinstance(conversion_check, dict):
         return conversion_check
@@ -3141,20 +3174,40 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_
             dekid = 0
         if not dekid:
             continue
+        try:
+            dezmid = int(item.get("dezmid") or 0)
+        except Exception:
+            dezmid = 0
+        if dezmid and isinstance(item.get("resources"), list) and any(
+            isinstance(resource, dict) and "zycl" not in resource
+            for resource in item["resources"]
+        ):
+            source_resources = _load_combo_resources(conn, kb_version_id, dekid, dezmid, None)
+            _hydrate_resource_main_material_flags(item["resources"], source_resources)
         for rule in item.get("adjustment_rules", []) or []:
-            if not isinstance(rule, dict) or rule.get("combo_resources"):
+            if not isinstance(rule, dict):
                 continue
             try:
                 combo_dezmid = int(rule.get("combo_dezmid") or 0)
             except Exception:
                 combo_dezmid = 0
-            rule["combo_resources"] = _load_combo_resources(
+            combo_resources = rule.get("combo_resources")
+            if isinstance(combo_resources, list) and not any(
+                isinstance(resource, dict) and "zycl" not in resource
+                for resource in combo_resources
+            ):
+                continue
+            source_resources = _load_combo_resources(
                 conn,
                 kb_version_id,
                 dekid,
                 combo_dezmid,
                 str(rule.get("combo_code") or ""),
             )
+            if not combo_resources:
+                rule["combo_resources"] = source_resources
+            else:
+                _hydrate_resource_main_material_flags(combo_resources, source_resources)
     return conversion_check
 
 
