@@ -3162,6 +3162,48 @@ def _hydrate_resource_main_material_flags(
             resource["zycl"] = flags.pop(0)
 
 
+def _load_resources_with_main_material_fallback(
+    conn,
+    kb_version_id: int,
+    dekid: int,
+    dezmid: int | None,
+    quota_code: str | None,
+) -> list[dict[str, Any]]:
+    """Read legacy flags from an active successor built from the same source file.
+
+    Older knowledge-base versions are immutable and may predate the ``zycl``
+    import.  This only enriches API output; it never updates the old version or
+    its historical result snapshot.
+    """
+    source_resources = _load_combo_resources(conn, kb_version_id, dekid, dezmid, quota_code)
+    if not source_resources or any(resource.get("zycl") is not None for resource in source_resources):
+        return source_resources
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT successor.id
+            FROM pricing_kb_versions origin
+            JOIN pricing_kb_versions successor
+              ON successor.source_file_sha256 = origin.source_file_sha256
+            WHERE origin.id=%s
+              AND successor.id > origin.id
+              AND successor.status='active'
+            ORDER BY successor.id DESC
+            LIMIT 1
+            """,
+            (kb_version_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return source_resources
+
+    successor_resources = _load_combo_resources(
+        conn, int(row[0]), dekid, dezmid, quota_code
+    )
+    return successor_resources or source_resources
+
+
 def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_id: int) -> Any:
     if not isinstance(conversion_check, dict):
         return conversion_check
@@ -3182,7 +3224,9 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_
             isinstance(resource, dict) and "zycl" not in resource
             for resource in item["resources"]
         ):
-            source_resources = _load_combo_resources(conn, kb_version_id, dekid, dezmid, None)
+            source_resources = _load_resources_with_main_material_fallback(
+                conn, kb_version_id, dekid, dezmid, None
+            )
             _hydrate_resource_main_material_flags(item["resources"], source_resources)
         for rule in item.get("adjustment_rules", []) or []:
             if not isinstance(rule, dict):
@@ -3197,7 +3241,7 @@ def _hydrate_conversion_combo_resources(conn, conversion_check: Any, kb_version_
                 for resource in combo_resources
             ):
                 continue
-            source_resources = _load_combo_resources(
+            source_resources = _load_resources_with_main_material_fallback(
                 conn,
                 kb_version_id,
                 dekid,

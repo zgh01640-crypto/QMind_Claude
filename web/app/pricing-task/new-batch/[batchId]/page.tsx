@@ -1524,7 +1524,7 @@ export default function PricingTaskBatchPage() {
                                 {group.resources.map((resource, index) => {
                                   const matchedRules = coefficientRulesForResource(resource, group.rules)
                                   return (
-                                    <tr key={`${resource.code}-${resource.name}-${index}`} className={matchedRules.length > 0 ? 'bg-amber-50/70' : undefined}>
+                                    <tr key={`${resource.code}-${resource.name}-${index}`} className={resource.zycl === true ? 'bg-emerald-50/80' : matchedRules.length > 0 ? 'bg-amber-50/70' : undefined}>
                                       <td className="px-3 py-2 text-gray-500">{resourceTypeLabel(resource.type)}</td>
                                       <td className="px-3 py-2 font-mono text-gray-600">{resource.code || '-'}</td>
                                       <td className="px-3 py-2 text-gray-900">{resource.name || '-'}</td>
