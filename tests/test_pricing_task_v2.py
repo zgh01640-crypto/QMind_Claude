@@ -58,6 +58,31 @@ class PricingTaskV2Tests(unittest.TestCase):
         self.assertEqual(captured[0]["tool_choice"]["function"]["name"], "submit_quota_match")
         self.assertTrue(captured[0]["stream"])
         self.assertEqual(events[-1], ("tool_result", {"matches": [], "issues": []}))
+        properties = captured[0]["tools"][0]["function"]["parameters"]["properties"]
+        self.assertIn("analysis_summary", properties)
+        self.assertIn("candidate_decisions", properties)
+        self.assertIn("combination_reason", properties)
+        self.assertIn("unit_factor_analysis", properties)
+        self.assertIn("rule_compliance", properties)
+
+    def test_normalize_preserves_explanation_and_filters_candidate_decisions(self):
+        result = pricing_task_v2._normalize_matches_v2({
+            "analysis_summary": "  整体判断  ",
+            "candidate_decisions": [
+                {"dekid": 12, "dezmid": 34, "decision": "accepted", "reason": "匹配工作内容"},
+                {"dekid": 99, "dezmid": 88, "decision": "accepted", "reason": "候选外"},
+            ],
+            "combination_reason": "无需组合",
+            "unit_factor_analysis": "单位一致，系数1",
+            "rule_compliance": "符合章节规则",
+            "matches": [],
+            "issues": [],
+        }, self.candidates)
+
+        self.assertEqual(result["analysis_summary"], "整体判断")
+        self.assertEqual(len(result["candidate_decisions"]), 1)
+        self.assertEqual(result["candidate_decisions"][0]["zmbh"], "A-1")
+        self.assertTrue(any("候选决策包含候选外定额" in issue for issue in result["issues"]))
 
     def test_v2_schema_uses_only_v2_management_tables(self):
         source = Path(pricing_task_v2.__file__).read_text(encoding="utf-8")

@@ -21,6 +21,42 @@ from db.pricing_kb_versions import resolve_version_id
 
 router = APIRouter(prefix="/pricing-task-v2")
 
+_TOOL_SUBMIT_QUOTA_MATCH_V2 = {
+    "type": "function",
+    "function": {
+        "name": "submit_quota_match",
+        "description": "提交新版套定额的业务决策说明和最终结构化结果。只能选择候选定额。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "analysis_summary": {"type": "string", "description": "整体套定额判断摘要"},
+                "candidate_decisions": {
+                    "type": "array",
+                    "description": "对每条候选定额的采用或排除决定",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dekid": {"type": "integer"}, "dezmid": {"type": "integer"},
+                            "decision": {"type": "string", "enum": ["accepted", "rejected"]},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["dekid", "dezmid", "decision", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+                "combination_reason": {"type": "string", "description": "是否需要组合多条定额及原因"},
+                "unit_factor_analysis": {"type": "string", "description": "单位和工程量系数判断"},
+                "rule_compliance": {"type": "string", "description": "章节规则落实情况"},
+                "matches": core._TOOL_SUBMIT_QUOTA_MATCH["function"]["parameters"]["properties"]["matches"],
+                "issues": core._TOOL_SUBMIT_QUOTA_MATCH["function"]["parameters"]["properties"]["issues"],
+            },
+            "required": ["analysis_summary", "candidate_decisions", "combination_reason", "unit_factor_analysis", "rule_compliance", "matches", "issues"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def _require_task_owner(conn, user: CurrentUser, task_id: int) -> None:
     with conn.cursor() as cur:
@@ -185,7 +221,37 @@ def _normalize_matches_v2(raw: Any, candidates: list[dict[str, Any]]) -> dict[st
         matches.append({"dekid": key[0], "dezmid": key[1], "zmbh": candidate.get("zmbh"), "zmmc": candidate.get("zmmc"),
                         "dw": candidate.get("dw"), "library_name": candidate.get("library_name"), "chapter_name": candidate.get("chapter_name"),
                         "qty_factor": factor, "confidence": confidence, "match_reason": str(value.get("match_reason") or "").strip()})
-    return {"matches": matches, "issues": list(dict.fromkeys(issues))}
+    decisions = []
+    decision_seen: set[tuple[int, int]] = set()
+    raw_decisions = raw.get("candidate_decisions", [])
+    for value in raw_decisions if isinstance(raw_decisions, list) else []:
+        if not isinstance(value, dict):
+            continue
+        try:
+            key = (int(value.get("dekid")), int(value.get("dezmid")))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if key not in allowed:
+            issues.append(f"候选决策包含候选外定额 {key[0]}/{key[1]}，已忽略")
+            continue
+        if key in decision_seen:
+            continue
+        decision_seen.add(key)
+        candidate = allowed[key]
+        decisions.append({
+            "dekid": key[0], "dezmid": key[1], "zmbh": candidate.get("zmbh"), "zmmc": candidate.get("zmmc"),
+            "decision": value.get("decision") if value.get("decision") in {"accepted", "rejected"} else "rejected",
+            "reason": str(value.get("reason") or "").strip(),
+        })
+    return {
+        "analysis_summary": str(raw.get("analysis_summary") or "").strip(),
+        "candidate_decisions": decisions,
+        "combination_reason": str(raw.get("combination_reason") or "").strip(),
+        "unit_factor_analysis": str(raw.get("unit_factor_analysis") or "").strip(),
+        "rule_compliance": str(raw.get("rule_compliance") or "").strip(),
+        "matches": matches,
+        "issues": list(dict.fromkeys(issues)),
+    }
 
 
 def _combined_match_messages(system_prompt: str, boq_item: dict[str, Any], code_check: dict[str, Any], feature_result: dict[str, Any], chapter_rule_check: dict[str, Any], candidates_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -194,7 +260,7 @@ def _combined_match_messages(system_prompt: str, boq_item: dict[str, Any], code_
         f"[{i+1}] dekid={c['dekid']} dezmid={c['dezmid']} 编码={c['zmbh']} 名称={c['zmmc']} 单位={c['dw']} 库={c['library_name']} 章节={c.get('chapter_name') or ''} 来源={'、'.join(c.get('source_tables') or [])}"
         + (f"\n    工作内容：{c['gznr']}" if c.get("gznr") else "") for i,c in enumerate(candidates))
     prompt = (
-        "请对候选定额完成分析后，直接调用 submit_quota_match 提交最终结构化结果。不得输出候选外定额。\n"
+        "请对候选定额完成分析，并通过 submit_quota_match 一次性提交业务决策说明和最终结构化结果。不得输出候选外定额。\n"
         "提交前必须检查：候选逐项取舍、名称与工作内容覆盖、单位及纯工程量换算系数、是否需组合多条定额、"
         "章节规则是否落实、置信度与待复核问题。工程量系数必须为有限正数。\n\n"
         f"【清单项】\n编码：{boq_item['item_code']}\n名称：{boq_item['item_name']}\n项目特征：{boq_item.get('item_description') or '（未填写）'}\n单位：{boq_item.get('unit') or '无'}\n"
@@ -211,8 +277,8 @@ def _stream_combined_match(messages: list[dict[str, Any]]) -> Iterable[tuple[str
         raw = ""
         try:
             stream = core._client(thinking=True).chat.completions.create(
-                model=core._model(), messages=messages, tools=[core._TOOL_SUBMIT_QUOTA_MATCH],
-                tool_choice=core._required_tool_choice(core._TOOL_SUBMIT_QUOTA_MATCH),
+                model=core._model(), messages=messages, tools=[_TOOL_SUBMIT_QUOTA_MATCH_V2],
+                tool_choice=core._required_tool_choice(_TOOL_SUBMIT_QUOTA_MATCH_V2),
                 reasoning_effort="high", extra_body={"thinking":{"type":"enabled"}},
                 max_tokens=8000, stream=True,
             )
@@ -234,7 +300,7 @@ def _stream_combined_match(messages: list[dict[str, Any]]) -> Iterable[tuple[str
             last_error = exc
             core._wait_before_model_retry(attempt, "v2 combined quota match", exc)
     try:
-        yield "tool_result", core._run_tool_fallback(messages, core._TOOL_SUBMIT_QUOTA_MATCH, 8000)
+        yield "tool_result", core._run_tool_fallback(messages, _TOOL_SUBMIT_QUOTA_MATCH_V2, 8000)
     except Exception as exc:
         raise exc from last_error
 
@@ -291,12 +357,12 @@ def _stream_pricing_item_v2(conn, boq_item: dict[str, Any], quota_library_ids: l
     candidates_data=core.exec_fetch_quota_candidates(conn,boq_item["item_code"],kb_version_id,quota_library_ids)
     yield "quota_candidates",candidates_data; _update_run(conn,run_id,quota_candidates=candidates_data); yield "step_timing",_finish_timing(conn,run_id,timings,4,"定额候选",started,perf)
 
-    started=datetime.now(); perf=perf_counter(); candidates=candidates_data["candidates"]; raw_match={"matches":[],"issues":["未找到候选定额子目"]}
+    started=datetime.now(); perf=perf_counter(); candidates=candidates_data["candidates"]
+    raw_match={"analysis_summary":"未找到候选定额，未调用匹配模型。","candidate_decisions":[],"combination_reason":"无候选定额，无法组合。","unit_factor_analysis":"无候选定额，无需判断工程量系数。","rule_compliance":"无候选定额，章节规则需人工复核。","matches":[],"issues":["未找到候选定额子目"]}
     if candidates:
-        yield "reasoning_token","\n\n[第五步：套定额分析与结构化提交（合并流程）]\n"
+        yield "quota_match_started", {"message": "正在进行套定额分析，完成后将一次性展示推理说明和匹配结果。"}
         for event,data in _stream_combined_match(_combined_match_messages(system_prompt,boq_item,code_check,feature,chapter,candidates_data)):
-            if event=="reasoning_token": yield event,data
-            else: raw_match=data
+            if event=="tool_result": raw_match=data
     match=_normalize_matches_v2(raw_match,candidates)
     try: chapter["validation"]=core._validate_chapter_rules(chapter,match["matches"])
     except core.ModelRateLimitError: raise
