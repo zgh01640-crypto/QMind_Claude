@@ -22,6 +22,7 @@ const links = [
   { href: '/new-boq', label: '工程管理' },
   { href: '/manual-boq', label: '工程管理（人工）' },
   { href: '/pricing-task', label: '单条组价' },
+  { href: '/pricing-task-v2', label: '新版单条组价' },
   { href: '/pricing-task/new-batch', label: '批量组价' },
   { href: '/pricing-task/background-batch', label: '后台批量组价' },
 ]
@@ -32,6 +33,7 @@ function isActive(pathname: string, href: string) {
   if (href === '/boq') return /^\/boq\/\d/.test(pathname)
   if (href === '/new-boq') return /^\/new-boq(\/|$)/.test(pathname)
   if (href === '/pricing-task') return /^\/pricing-task(\/\d+)?$/.test(pathname)
+  if (href === '/pricing-task-v2') return /^\/pricing-task-v2(\/\d+)?$/.test(pathname)
   if (href === '/pricing-task/batch') return pathname.startsWith('/pricing-task/batch')
   if (href === '/pricing-task/new-batch') return pathname.startsWith('/pricing-task/new-batch')
   if (href === '/pricing-task/background-batch') return pathname.startsWith('/pricing-task/background-batch')

@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from api.routers import auth, ai_usage, model_profiles, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task
+from api.routers import auth, ai_usage, model_profiles, periods, categories, items, upload, quota, measure, boq, manual_boq, quota2024, building_standard_2024, bs2024_match, prompt_templates, standard_reference_prices, pricing_kb, pricing_kb_admin, pricing_task, pricing_task_v2
 from api.auth import SESSION_COOKIE, apply_auth_schema, is_auth_enabled, require_authenticated, require_business_access, require_admin, require_system_access, resolve_session
 from db.connection import DatabasePoolBusyError
 
@@ -104,6 +104,6 @@ for module, tag in ((periods, "periods"), (categories, "categories"), (items, "i
     app.include_router(module.router, prefix="/api", tags=[tag], dependencies=[Depends(require_authenticated)])
 for module, tag in ((upload, "upload"), (prompt_templates, "prompt-templates")):
     app.include_router(module.router, prefix="/api", tags=[tag], dependencies=[Depends(require_system_access)])
-for module, tag in ((boq, "boq"), (manual_boq, "manual_boq"), (bs2024_match, "bs2024-match"), (pricing_task, "pricing-task")):
+for module, tag in ((boq, "boq"), (manual_boq, "manual_boq"), (bs2024_match, "bs2024-match"), (pricing_task, "pricing-task"), (pricing_task_v2, "pricing-task-v2")):
     app.include_router(module.router, prefix="/api", tags=[tag], dependencies=[Depends(require_business_access)])
 app.include_router(pricing_kb_admin.router, prefix="/api", tags=["pricing-kb-admin"], dependencies=[Depends(require_admin)])

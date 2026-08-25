@@ -227,6 +227,89 @@ def _apply_schema(conn):
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pricing_task_v2_tasks (
+                id                  SERIAL PRIMARY KEY,
+                name                TEXT NOT NULL,
+                boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                quota_library_ids   JSONB NOT NULL DEFAULT '[]'::jsonb,
+                manual_project_id   INTEGER REFERENCES manual_boq_projects(id) ON DELETE SET NULL,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
+                owner_user_id       INTEGER REFERENCES users(id),
+                accuracy_report     JSONB,
+                status              VARCHAR(16) NOT NULL DEFAULT 'active',
+                created_at          TIMESTAMP DEFAULT NOW(),
+                updated_at          TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS pricing_task_v2_runs (
+                id                  BIGSERIAL PRIMARY KEY,
+                task_id             INTEGER NOT NULL REFERENCES pricing_task_v2_tasks(id) ON DELETE CASCADE,
+                boq_item_id         INTEGER NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
+                boq_project_id      INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                kb_version_id       BIGINT REFERENCES pricing_kb_versions(id),
+                status              VARCHAR(16) NOT NULL DEFAULT 'running',
+                reasoning_text      TEXT,
+                code_check          JSONB,
+                feature_check       JSONB,
+                chapter_rule_check  JSONB,
+                work_procedures     JSONB,
+                quota_candidates    JSONB,
+                quota_match         JSONB,
+                evaluation          JSONB,
+                conversion_check    JSONB,
+                coefficient_check   JSONB,
+                accuracy_report     JSONB,
+                step_timings        JSONB,
+                error_message       TEXT,
+                created_at          TIMESTAMP DEFAULT NOW(),
+                finished_at         TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS pricing_task_v2_results (
+                id                          BIGSERIAL PRIMARY KEY,
+                task_id                     INTEGER NOT NULL REFERENCES pricing_task_v2_tasks(id) ON DELETE CASCADE,
+                run_id                      BIGINT NOT NULL REFERENCES pricing_task_v2_runs(id) ON DELETE CASCADE,
+                boq_item_id                 INTEGER NOT NULL REFERENCES boq_items(id) ON DELETE CASCADE,
+                boq_project_id              INTEGER NOT NULL REFERENCES boq_projects(id) ON DELETE CASCADE,
+                dezmid                      BIGINT NOT NULL,
+                dekid                       BIGINT NOT NULL,
+                subitem_code                VARCHAR(64),
+                subitem_name                TEXT,
+                qty_factor                  NUMERIC(20, 6) DEFAULT 1,
+                work_procedure              TEXT,
+                confidence                  VARCHAR(16),
+                missing_info                TEXT,
+                ai_reasoning                TEXT,
+                match_reason                TEXT,
+                evaluation                  JSONB,
+                status                      VARCHAR(16) DEFAULT 'pending',
+                conversion_confirmed        BOOLEAN NOT NULL DEFAULT FALSE,
+                conversion_note             TEXT,
+                conversion_confirmed_at     TIMESTAMP,
+                conversion_resources        JSONB,
+                conversion_resource_changes JSONB,
+                created_at                  TIMESTAMP DEFAULT NOW(),
+                updated_at                  TIMESTAMP DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS pricing_task_v2_manual_comparison_reviews (
+                id                          BIGSERIAL PRIMARY KEY,
+                run_id                      BIGINT NOT NULL REFERENCES pricing_task_v2_runs(id) ON DELETE CASCADE,
+                manual_project_id           INTEGER NOT NULL,
+                manual_item_id              INTEGER NOT NULL,
+                before_manual_quotas         JSONB NOT NULL,
+                after_manual_quotas          JSONB NOT NULL,
+                before_evaluation            JSONB NOT NULL,
+                after_evaluation             JSONB NOT NULL,
+                retained_manual_quota_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,
+                accepted_ai_quotas           JSONB NOT NULL DEFAULT '[]'::jsonb,
+                operator_name                TEXT NOT NULL DEFAULT '系统',
+                created_at                   TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS task_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS run_id INTEGER")
         cur.execute("ALTER TABLE pricing_task_results ADD COLUMN IF NOT EXISTS match_reason TEXT")
@@ -295,6 +378,9 @@ def _apply_schema(conn):
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_task_item ON pricing_task_runs(task_id, boq_item_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_kb_version ON pricing_tasks(kb_version_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_runs_kb_version ON pricing_task_runs(kb_version_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_v2_tasks_owner ON pricing_task_v2_tasks(owner_user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_v2_runs_task_item ON pricing_task_v2_runs(task_id, boq_item_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_v2_results_run ON pricing_task_v2_results(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_project ON pricing_task_batches(boq_project_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_tasks_owner ON pricing_tasks(owner_user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pricing_task_batches_owner ON pricing_task_batches(owner_user_id)")
@@ -2669,8 +2755,73 @@ def _confirmed_conversion_context(conn, run_id: int) -> tuple[dict[str, Any], li
     return boq_item, items
 
 
+_MAIN_MATERIAL_NAME_KEYS = ("主材名称", "材料名称", "设备名称", "名称", "品种", "类型", "类别")
+_MAIN_MATERIAL_SPEC_KEYS = ("规格型号", "型号规格", "规格、型号", "型号、规格", "规格", "型号")
+_MAIN_MATERIAL_MATERIAL_KEYS = ("材质", "材料")
+_PRODUCT_SUFFIXES = (
+    "管", "阀", "表", "泵", "风机", "电缆", "导线", "桥架", "灯", "箱", "柜",
+    "门", "窗", "板", "砖", "龙骨", "涂料", "砂浆", "混凝土", "设备", "管件",
+)
+
+
+def _project_feature_pairs(description: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for part in re.split(r"[\r\n;；]+", description or ""):
+        text = re.sub(r"^\s*\d+[.、]\s*", "", part).strip()
+        match = re.match(r"^\s*([^:：]+?)\s*[:：]\s*(.+?)\s*$", text)
+        if match:
+            pairs.append((match.group(1).strip(), match.group(2).strip()))
+    return pairs
+
+
+def _first_feature_value(pairs: list[tuple[str, str]], keys: tuple[str, ...]) -> str:
+    for wanted in keys:
+        for key, value in pairs:
+            if key.replace(" ", "") == wanted and value:
+                return value
+    return ""
+
+
+def _material_name_match_score(feature_name: str, quota_name: str) -> int:
+    left = re.sub(r"\s+", "", feature_name).lower()
+    right = re.sub(r"\s+", "", quota_name).lower()
+    if not left or not right:
+        return 0
+    if left in right or right in left:
+        return 100 + min(len(left), len(right))
+    return sum(1 for char in set(left) if char in right)
+
+
+def _enrich_main_material_resources(resources: list[dict[str, Any]], description: str) -> None:
+    """Attach feature-derived main-material data without changing quota resource identity."""
+    main_resources = [resource for resource in resources if resource.get("zycl") is True]
+    if not main_resources:
+        return
+    pairs = _project_feature_pairs(description)
+    material = _first_feature_value(pairs, _MAIN_MATERIAL_MATERIAL_KEYS)
+    specification = _first_feature_value(pairs, _MAIN_MATERIAL_SPEC_KEYS)
+    feature_name = _first_feature_value(pairs, _MAIN_MATERIAL_NAME_KEYS)
+    if not feature_name and material and any(suffix in material for suffix in _PRODUCT_SUFFIXES):
+        feature_name = material
+
+    selected: dict[str, Any] | None = None
+    if feature_name:
+        selected = max(
+            main_resources,
+            key=lambda resource: _material_name_match_score(feature_name, str(resource.get("name") or "")),
+        )
+    for resource in main_resources:
+        quota_name = str(resource.get("name") or "")
+        uses_feature = resource is selected
+        resource["main_material_name"] = feature_name if uses_feature else quota_name
+        resource["main_material_specification"] = specification if uses_feature else ""
+        resource["main_material_material"] = material if uses_feature else ""
+        resource["main_material_name_source"] = "project_feature" if uses_feature else "quota"
+
+
 def _confirmed_items_from_matches(
-    conn, matches: list[dict[str, Any]], kb_version_id: int
+    conn, matches: list[dict[str, Any]], kb_version_id: int,
+    item_description: str = "",
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     with conn.cursor() as cur:
@@ -2747,6 +2898,7 @@ def _confirmed_items_from_matches(
                 }
                 for r in cur.fetchall()
             ]
+            _enrich_main_material_resources(resources, item_description)
             items.append(
                 {
                     "dekid": dekid,
@@ -2767,7 +2919,8 @@ def _confirmed_items_from_matches(
 
 
 def _confirmed_results_from_matches(
-    conn, matches: list[dict[str, Any]], kb_version_id: int
+    conn, matches: list[dict[str, Any]], kb_version_id: int,
+    item_description: str = "",
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -2783,7 +2936,7 @@ def _confirmed_results_from_matches(
             "conversion_resources": item.get("resources", []),
             "conversion_resource_changes": [],
         }
-        for item in _confirmed_items_from_matches(conn, matches, kb_version_id)
+        for item in _confirmed_items_from_matches(conn, matches, kb_version_id, item_description)
     ]
 
 
@@ -5111,7 +5264,9 @@ def _load_batch_item_run_context(conn, item_run_id: int) -> tuple[int, dict[str,
         "project_id": row[12],
     }
     matches = batch_run["quota_match"].get("matches", []) if isinstance(batch_run["quota_match"], dict) else []
-    confirmed_items = _confirmed_items_from_matches(conn, matches, int(row[13]))
+    confirmed_items = _confirmed_items_from_matches(
+        conn, matches, int(row[13]), boq_item["item_description"]
+    )
     return batch_id, batch_run, boq_item, {"items": confirmed_items}
 
 
@@ -5179,7 +5334,7 @@ def pricing_task_batch_run_item_stream(batch_id: int, boq_item_id: int, user: Cu
             quota_match = fields.get("quota_match") or {}
             matches = quota_match.get("matches", []) if isinstance(quota_match, dict) else []
             confirmed_results = _confirmed_results_from_matches(
-                conn, matches, batch["kb_version_id"]
+                conn, matches, batch["kb_version_id"], boq_item.get("item_description") or ""
             )
             final_status = "no_match" if not matches else "completed"
             if had_error:
@@ -6377,7 +6532,9 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
             if next_tool:
                 _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, next_tool, "running")
         matches = (fields.get("quota_match") or {}).get("matches", [])
-        confirmed = _confirmed_results_from_matches(conn, matches, int(row[5]))
+        confirmed = _confirmed_results_from_matches(
+            conn, matches, int(row[5]), boq_item.get("item_description") or ""
+        )
         _update_batch_item_run(conn, item_run_id, confirmed_results=confirmed, commit=False)
         if not matches:
             _update_batch_item_run(conn, item_run_id, status="no_match", current_tool_status="success",

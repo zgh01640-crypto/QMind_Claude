@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   BoqProject,
   ManualBoqProject,
@@ -15,10 +15,15 @@ import {
   fetchPricingKbLibraries,
   fetchPricingTasks,
   importLocalPricingTasks,
+  createPricingTaskV2,
+  deletePricingTaskV2,
+  fetchPricingTaskV2Tasks,
 } from '@/lib/api'
 
 export default function PricingTaskPage() {
   const router = useRouter()
+  const pathname = usePathname()
+  const v2 = pathname.startsWith('/pricing-task-v2')
   const [tasks, setTasks] = useState<PricingTask[]>([])
   const [showModal, setShowModal] = useState(false)
   const [projects, setProjects] = useState<BoqProject[]>([])
@@ -39,8 +44,8 @@ export default function PricingTaskPage() {
   const bootstrap = async () => {
     setLoading(true)
     try {
-      await migrateLocalTasks()
-      const data = await fetchPricingTasks()
+      if (!v2) await migrateLocalTasks()
+      const data = await (v2 ? fetchPricingTaskV2Tasks() : fetchPricingTasks())
       setTasks(data)
     } finally {
       setLoading(false)
@@ -78,7 +83,7 @@ export default function PricingTaskPage() {
       setProjects(projectsRes)
       setLibraries(libsRes)
       setManualProjects(manualRes)
-      if (!taskName) setTaskName(`单条组价 ${new Date().toLocaleString()}`)
+      if (!taskName) setTaskName(`${v2 ? '新版单条组价' : '单条组价'} ${new Date().toLocaleString()}`)
     } finally {
       setModalLoading(false)
     }
@@ -91,14 +96,14 @@ export default function PricingTaskPage() {
     }
     setSaving(true)
     try {
-      const created = await createPricingTask({
+      const created = await (v2 ? createPricingTaskV2 : createPricingTask)({
         name: taskName.trim(),
         boq_project_id: selectedProject,
         quota_library_ids: Array.from(selectedLibraries),
         manual_project_id: selectedManualProject,
       })
       setShowModal(false)
-      router.push(`/pricing-task/${created.id}`)
+      router.push(`/${v2 ? 'pricing-task-v2' : 'pricing-task'}/${created.id}`)
     } finally {
       setSaving(false)
     }
@@ -106,7 +111,7 @@ export default function PricingTaskPage() {
 
   const removeTask = async (id: number) => {
     if (!confirm('确定删除该单条组价任务？')) return
-    await deletePricingTask(id)
+    await (v2 ? deletePricingTaskV2 : deletePricingTask)(id)
     await bootstrap()
   }
 
@@ -119,8 +124,8 @@ export default function PricingTaskPage() {
       <div className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">单条组价</h1>
-            <p className="mt-2 text-sm text-gray-500">用于单条验证、Prompt/步骤调试和人工确认。</p>
+            <h1 className="text-3xl font-bold text-gray-900">{v2 ? '新版单条组价' : '单条组价'}</h1>
+            <p className="mt-2 text-sm text-gray-500">{v2 ? '独立试验A/B合并后的第五步，不影响原单条和批量组价。' : '用于单条验证、Prompt/步骤调试和人工确认。'}</p>
           </div>
           <button
             onClick={handleOpenModal}
@@ -188,8 +193,8 @@ export default function PricingTaskPage() {
                       </td>
                       <td className="px-4 py-3 text-xs text-gray-500">{new Date(task.created_at).toLocaleString()}</td>
                       <td className="px-4 py-3 text-right whitespace-nowrap">
-                        <Link href={`/pricing-task/${task.id}`} className="mr-3 text-blue-600 hover:text-blue-700">进入</Link>
-                        <Link href={`/pricing-task/${task.id}/preview`} className="mr-3 text-cyan-600 hover:text-cyan-700">预览</Link>
+                        <Link href={`/${v2 ? 'pricing-task-v2' : 'pricing-task'}/${task.id}`} className="mr-3 text-blue-600 hover:text-blue-700">进入</Link>
+                        <Link href={`/${v2 ? 'pricing-task-v2' : 'pricing-task'}/${task.id}/preview`} className="mr-3 text-cyan-600 hover:text-cyan-700">预览</Link>
                         <button onClick={() => removeTask(task.id)} className="text-gray-400 hover:text-red-600">删除</button>
                       </td>
                     </tr>

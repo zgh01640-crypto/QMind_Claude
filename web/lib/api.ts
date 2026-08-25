@@ -2303,6 +2303,79 @@ export async function streamPricingTaskRunItem(
   }
 }
 
+// ── 新版单条组价（独立任务/运行/结果表）────────────────────────────────────────
+export const fetchPricingTaskV2Tasks = () => req<PricingTask[]>('/api/pricing-task-v2/tasks')
+
+export const fetchPricingTaskV2 = (taskId: number) =>
+  req<PricingTask>(`/api/pricing-task-v2/tasks/${taskId}`)
+
+export const createPricingTaskV2 = (body: {
+  name: string
+  boq_project_id: number
+  quota_library_ids: number[]
+  manual_project_id?: number | null
+  kb_version_id?: number | null
+}) => req<{ id: number }>('/api/pricing-task-v2/tasks', { method: 'POST', body: JSON.stringify(body) })
+
+export const deletePricingTaskV2 = (taskId: number) =>
+  req<void>(`/api/pricing-task-v2/tasks/${taskId}`, { method: 'DELETE' })
+
+export const fetchPricingTaskV2ItemRuns = (taskId: number, boqItemId: number) =>
+  req<PricingTaskRun[]>(`/api/pricing-task-v2/tasks/${taskId}/items/${boqItemId}/runs`)
+
+export const fetchPricingTaskV2LatestRuns = (taskId: number) =>
+  req<Array<{ boq_item_id: number; run: PricingTaskRun }>>(`/api/pricing-task-v2/tasks/${taskId}/runs/latest`)
+
+async function streamPricingTaskV2Endpoint(path: string, onEvent: (e: PricingTaskEvent) => void): Promise<void> {
+  const response = await fetch(`${API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+  if (!response.ok) { onEvent({ type: 'error', error: `HTTP ${response.status}` }); return }
+  const reader = response.body?.getReader()
+  if (!reader) { onEvent({ type: 'error', error: 'No response body' }); return }
+  const decoder = new TextDecoder(); let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break
+      buffer += decoder.decode(value, { stream: true }); const chunks = buffer.split('\n\n'); buffer = chunks.pop() || ''
+      for (const chunk of chunks) if (chunk.startsWith('data: ')) {
+        try { onEvent(JSON.parse(chunk.slice(6)) as PricingTaskEvent) } catch (error) { console.error('V2 SSE parse error', error) }
+      }
+    }
+  } finally { reader.releaseLock() }
+}
+
+export const streamPricingTaskV2RunItem = (taskId: number, boqItemId: number, onEvent: (e: PricingTaskEvent) => void) =>
+  streamPricingTaskV2Endpoint(`/api/pricing-task-v2/tasks/${taskId}/items/${boqItemId}/run-stream`, onEvent)
+
+export const confirmPricingTaskV2Run = (runId: number, results?: QuotaMatch[]) =>
+  req<{ ok: boolean }>(`/api/pricing-task-v2/runs/${runId}/confirm`, { method: 'POST', body: JSON.stringify({ results }) })
+
+export const rejectPricingTaskV2Run = (runId: number) =>
+  req<{ ok: boolean }>(`/api/pricing-task-v2/runs/${runId}/reject`, { method: 'POST' })
+
+export const streamPricingTaskV2ConversionCheck = (runId: number, onEvent: (e: PricingTaskEvent) => void) =>
+  streamPricingTaskV2Endpoint(`/api/pricing-task-v2/runs/${runId}/conversion-check-stream`, onEvent)
+
+export const streamPricingTaskV2CoefficientCheck = (runId: number, onEvent: (e: PricingTaskEvent) => void) =>
+  streamPricingTaskV2Endpoint(`/api/pricing-task-v2/runs/${runId}/coefficient-check-stream`, onEvent)
+
+export const fetchPricingTaskV2DetailReport = (taskId: number) =>
+  req<PricingTaskDetailReport>(`/api/pricing-task-v2/tasks/${taskId}/detail-report`)
+
+export const generatePricingTaskV2AccuracyReport = (taskId: number) =>
+  req<PricingTaskAccuracyReport>(`/api/pricing-task-v2/tasks/${taskId}/accuracy-report`, { method: 'POST' })
+
+export async function exportPricingTaskV2DetailReportExcel(taskId: number) {
+  const response = await fetch(`${API}/api/pricing-task-v2/tasks/${taskId}/detail-report/export`)
+  if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `请求失败 ${response.status}`) }
+  return response.blob()
+}
+
+export const updatePricingTaskV2ManualComparison = (runId: number, input: PricingTaskManualComparisonInput) =>
+  req<PricingTaskManualComparisonResult>(`/api/pricing-task-v2/runs/${runId}/manual-comparison`, { method: 'PUT', body: JSON.stringify(input) })
+
+export const fetchPricingTaskV2ManualComparisonHistory = (runId: number) =>
+  req<PricingTaskManualComparisonReview[]>(`/api/pricing-task-v2/runs/${runId}/manual-comparison-history`)
+
 export async function streamPricingTaskConversionCheck(
   runId: number,
   onEvent: (e: PricingTaskEvent) => void,

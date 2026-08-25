@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { useParams } from 'next/navigation'
+import { useParams, usePathname } from 'next/navigation'
 import {
   BoqItem,
   PricingTask,
@@ -32,6 +32,19 @@ import {
   streamPricingTaskRunItem,
   updateBoqItemDescription,
   updatePricingTaskManualComparison,
+  confirmPricingTaskV2Run,
+  fetchPricingTaskV2,
+  fetchPricingTaskV2DetailReport,
+  fetchPricingTaskV2ItemRuns,
+  fetchPricingTaskV2LatestRuns,
+  rejectPricingTaskV2Run,
+  streamPricingTaskV2CoefficientCheck,
+  streamPricingTaskV2ConversionCheck,
+  streamPricingTaskV2RunItem,
+  exportPricingTaskV2DetailReportExcel,
+  fetchPricingTaskV2ManualComparisonHistory,
+  generatePricingTaskV2AccuracyReport,
+  updatePricingTaskV2ManualComparison,
 } from '@/lib/api'
 import ManualComparisonReviewModal from '@/components/pricing-task/ManualComparisonReviewModal'
 import AiUsageSummary from '@/components/AiUsageSummary'
@@ -851,7 +864,7 @@ function SelectedItemResultPanel({
   )
 }
 
-async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[]) {
+async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[], fetchRuns = fetchPricingTaskItemRuns) {
   const entries: Array<[number, ItemResult]> = []
   const batchSize = 12
 
@@ -860,7 +873,7 @@ async function fetchLatestRunsFallback(taskId: number, boqItems: BoqItem[]) {
     const results = await Promise.all(
       batch.map(async item => {
         try {
-          const runs = await fetchPricingTaskItemRuns(taskId, item.id)
+          const runs = await fetchRuns(taskId, item.id)
           return runs.length > 0 ? ([item.id, runToResult(runs[0])] as [number, ItemResult]) : null
         } catch {
           return null
@@ -974,7 +987,7 @@ function AccuracyReportPanel({
   )
 }
 
-function DetailReportPanel({ report }: { report: PricingTaskDetailReport }) {
+function DetailReportPanel({ report, exportReport = exportPricingTaskDetailReportExcel }: { report: PricingTaskDetailReport; exportReport?: (taskId: number) => Promise<Blob> }) {
   const metrics = report.metrics
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
@@ -983,7 +996,7 @@ function DetailReportPanel({ report }: { report: PricingTaskDetailReport }) {
     setExporting(true)
     setExportError('')
     try {
-      const blob = await exportPricingTaskDetailReportExcel(report.task.id)
+      const blob = await exportReport(report.task.id)
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -1128,7 +1141,22 @@ function DetailReportPanel({ report }: { report: PricingTaskDetailReport }) {
 
 export default function PricingTaskDetailPage() {
   const params = useParams()
+  const pathname = usePathname()
+  const v2 = pathname.startsWith('/pricing-task-v2')
   const taskId = Number(params.tid)
+  const taskApi = v2 ? fetchPricingTaskV2 : fetchPricingTask
+  const latestRunsApi = v2 ? fetchPricingTaskV2LatestRuns : fetchPricingTaskLatestRuns
+  const itemRunsApi = v2 ? fetchPricingTaskV2ItemRuns : fetchPricingTaskItemRuns
+  const streamRunApi = v2 ? streamPricingTaskV2RunItem : streamPricingTaskRunItem
+  const confirmRunApi = v2 ? confirmPricingTaskV2Run : confirmPricingTaskRun
+  const conversionApi = v2 ? streamPricingTaskV2ConversionCheck : streamPricingTaskConversionCheck
+  const coefficientApi = v2 ? streamPricingTaskV2CoefficientCheck : streamPricingTaskCoefficientCheck
+  const rejectRunApi = v2 ? rejectPricingTaskV2Run : rejectPricingTaskRun
+  const detailReportApi = v2 ? fetchPricingTaskV2DetailReport : fetchPricingTaskDetailReport
+  const accuracyReportApi = v2 ? generatePricingTaskV2AccuracyReport : generatePricingTaskAccuracyReport
+  const exportDetailReportApi = v2 ? exportPricingTaskV2DetailReportExcel : exportPricingTaskDetailReportExcel
+  const updateManualComparisonApi = v2 ? updatePricingTaskV2ManualComparison : updatePricingTaskManualComparison
+  const manualComparisonHistoryApi = v2 ? fetchPricingTaskV2ManualComparisonHistory : fetchPricingTaskManualComparisonHistory
 
   const [task, setTask] = useState<PricingTask | null>(null)
   const [items, setItems] = useState<BoqItem[]>([])
@@ -1186,12 +1214,12 @@ export default function PricingTaskDetailPage() {
   async function bootstrap() {
     setLoading(true)
     try {
-      const taskData = await fetchPricingTask(taskId)
+      const taskData = await taskApi(taskId)
       setTask(taskData)
       const boqItems = await fetchAllBoqItems(taskData.project_id)
       setItems(boqItems)
       try {
-        const latestRuns = await fetchPricingTaskLatestRuns(taskData.id)
+        const latestRuns = await latestRunsApi(taskData.id)
         setItemResults(() => {
           const next = new Map<number, ItemResult>()
           for (const itemRun of latestRuns) {
@@ -1201,7 +1229,7 @@ export default function PricingTaskDetailPage() {
         })
       } catch (err) {
         console.warn('加载最新组价状态失败', err)
-        const fallbackRuns = await fetchLatestRunsFallback(taskData.id, boqItems)
+        const fallbackRuns = await fetchLatestRunsFallback(taskData.id, boqItems, itemRunsApi)
         if (fallbackRuns.length > 0) {
           setItemResults(new Map(fallbackRuns))
         }
@@ -1284,7 +1312,7 @@ export default function PricingTaskDetailPage() {
     if (existing?.phase === 'reasoning' || existing?.runId) return
 
     try {
-      const runs = await fetchPricingTaskItemRuns(taskId, itemId)
+      const runs = await itemRunsApi(taskId, itemId)
       if (runs.length > 0) {
         setItemResults(m => new Map(m).set(itemId, runToResult(runs[0])))
       }
@@ -1301,7 +1329,7 @@ export default function PricingTaskDetailPage() {
       reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【自动确认】已完成套定额，正在确认全部匹配定额并继续后续换算。\n`,
     }))
     try {
-      await confirmPricingTaskRun(runId, matches)
+      await confirmRunApi(runId, matches)
       updateResult(itemId, s => ({ ...s, autoConfirming: false, phase: 'done', status: 'confirmed' }))
       await runConversionCheck(runId, itemId)
       await runCoefficientCheck(runId, itemId)
@@ -1325,7 +1353,7 @@ export default function PricingTaskDetailPage() {
     let streamCompleted = false
 
     try {
-      await streamPricingTaskRunItem(task.id, itemId, (evt: PricingTaskEvent) => {
+      await streamRunApi(task.id, itemId, (evt: PricingTaskEvent) => {
         if (evt.type === 'run_started') {
           streamRunId = evt.run_id
           updateResult(itemId, s => ({ ...s, runId: evt.run_id, status: 'running' }))
@@ -1423,7 +1451,7 @@ export default function PricingTaskDetailPage() {
   async function runConversionCheck(runId: number, itemId: number) {
     updateResult(itemId, s => ({ ...s, conversionChecking: true, conversionError: undefined }))
     try {
-      await streamPricingTaskConversionCheck(runId, (evt: PricingTaskEvent) => {
+      await conversionApi(runId, (evt: PricingTaskEvent) => {
         if (evt.type === 'conversion_check_start') {
           updateResult(itemId, s => ({
             ...s,
@@ -1469,7 +1497,7 @@ export default function PricingTaskDetailPage() {
   async function runCoefficientCheck(runId: number, itemId: number) {
     updateResult(itemId, s => ({ ...s, coefficientChecking: true, coefficientError: undefined }))
     try {
-      await streamPricingTaskCoefficientCheck(runId, (evt: PricingTaskEvent) => {
+      await coefficientApi(runId, (evt: PricingTaskEvent) => {
         if (evt.type === 'coefficient_check_start') {
           updateResult(itemId, s => ({
             ...s,
@@ -1517,7 +1545,7 @@ export default function PricingTaskDetailPage() {
     setAccuracyReportError('')
     setShowAccuracyReportModal(true)
     try {
-      const report = await generatePricingTaskAccuracyReport(task.id)
+      const report = await accuracyReportApi(task.id)
       setTask({ ...task, accuracy_report: report })
     } catch (err) {
       setAccuracyReportError(err instanceof Error ? err.message : '准确性分析报告生成失败')
@@ -1541,7 +1569,7 @@ export default function PricingTaskDetailPage() {
     setDetailReportError('')
     setDetailReportLoading(true)
     try {
-      const report = await fetchPricingTaskDetailReport(task.id)
+      const report = await detailReportApi(task.id)
       setDetailReport(report)
     } catch (err) {
       setDetailReportError(err instanceof Error ? err.message : '明细报表加载失败')
@@ -1554,7 +1582,7 @@ export default function PricingTaskDetailPage() {
     if (!selectedItemId || !currentResult?.runId) return
     setActionBusy(true)
     try {
-      await rejectPricingTaskRun(currentResult.runId)
+      await rejectRunApi(currentResult.runId)
       updateResult(selectedItemId, s => ({ ...s, status: 'rejected' }))
     } finally {
       setActionBusy(false)
@@ -1588,7 +1616,7 @@ export default function PricingTaskDetailPage() {
         <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-3">
-              <Link href="/pricing-task" className="shrink-0 rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50">
+              <Link href={v2 ? '/pricing-task-v2' : '/pricing-task'} className="shrink-0 rounded border border-gray-300 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-50">
                 返回单条列表
               </Link>
               <div className="truncate text-sm font-semibold text-gray-900" title={task.name}>
@@ -1600,7 +1628,7 @@ export default function PricingTaskDetailPage() {
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
               <span className="min-w-0 max-w-full truncate" title={task.project_name}>
-                组价工程：{task.project_name}
+                {v2 ? '新版单条组价' : '组价工程'}：{task.project_name}
               </span>
               <span className="min-w-0 max-w-full truncate" title={libraryNames}>
                 定额库：{libraryNames}
@@ -2277,8 +2305,8 @@ export default function PricingTaskDetailPage() {
           item={selectedItem}
           evaluation={currentResult.evaluation}
           matches={currentResult.quotaMatch.matches}
-          submitReview={input => updatePricingTaskManualComparison(currentResult.runId!, input)}
-          loadHistory={() => fetchPricingTaskManualComparisonHistory(currentResult.runId!)}
+          submitReview={input => updateManualComparisonApi(currentResult.runId!, input)}
+          loadHistory={() => manualComparisonHistoryApi(currentResult.runId!)}
           onClose={() => setShowManualComparisonModal(false)}
           onUpdated={handleManualComparisonUpdated}
         />
@@ -2359,7 +2387,7 @@ export default function PricingTaskDetailPage() {
                   正在加载单条组价明细报表...
                 </div>
               ) : detailReport ? (
-                <DetailReportPanel report={detailReport} />
+                <DetailReportPanel report={detailReport} exportReport={exportDetailReportApi} />
               ) : (
                 <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-10 text-center text-sm text-gray-500">
                   暂无报表数据
