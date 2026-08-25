@@ -36,6 +36,7 @@ export default function PricingTaskPage() {
   const [loading, setLoading] = useState(true)
   const [modalLoading, setModalLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [createError, setCreateError] = useState('')
 
   useEffect(() => {
     bootstrap()
@@ -72,6 +73,7 @@ export default function PricingTaskPage() {
   }
 
   const handleOpenModal = async () => {
+    setCreateError('')
     setShowModal(true)
     setModalLoading(true)
     try {
@@ -94,6 +96,7 @@ export default function PricingTaskPage() {
       alert('请填写工程和任务名称')
       return
     }
+    setCreateError('')
     setSaving(true)
     try {
       const created = await (v2 ? createPricingTaskV2 : createPricingTask)({
@@ -104,6 +107,8 @@ export default function PricingTaskPage() {
       })
       setShowModal(false)
       router.push(`/${v2 ? 'pricing-task-v2' : 'pricing-task'}/${created.id}`)
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : '创建任务失败，请稍后重试')
     } finally {
       setSaving(false)
     }
@@ -284,6 +289,9 @@ export default function PricingTaskPage() {
                 </div>
               )}
 
+              {createError && (
+                <p className="mt-5 text-sm text-red-600" role="alert">{createError}</p>
+              )}
               <div className="flex gap-3 mt-6">
                 <button
                   onClick={() => setShowModal(false)}

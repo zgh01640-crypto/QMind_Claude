@@ -2315,7 +2315,11 @@ export const createPricingTaskV2 = (body: {
   quota_library_ids: number[]
   manual_project_id?: number | null
   kb_version_id?: number | null
-}) => req<{ id: number }>('/api/pricing-task-v2/tasks', { method: 'POST', body: JSON.stringify(body) })
+}) => req<{ id: number }>('/api/pricing-task-v2/tasks', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
 
 export const deletePricingTaskV2 = (taskId: number) =>
   req<void>(`/api/pricing-task-v2/tasks/${taskId}`, { method: 'DELETE' })
@@ -2347,7 +2351,11 @@ export const streamPricingTaskV2RunItem = (taskId: number, boqItemId: number, on
   streamPricingTaskV2Endpoint(`/api/pricing-task-v2/tasks/${taskId}/items/${boqItemId}/run-stream`, onEvent)
 
 export const confirmPricingTaskV2Run = (runId: number, results?: QuotaMatch[]) =>
-  req<{ ok: boolean }>(`/api/pricing-task-v2/runs/${runId}/confirm`, { method: 'POST', body: JSON.stringify({ results }) })
+  req<{ ok: boolean }>(`/api/pricing-task-v2/runs/${runId}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ results }),
+  })
 
 export const rejectPricingTaskV2Run = (runId: number) =>
   req<{ ok: boolean }>(`/api/pricing-task-v2/runs/${runId}/reject`, { method: 'POST' })
@@ -2371,7 +2379,11 @@ export async function exportPricingTaskV2DetailReportExcel(taskId: number) {
 }
 
 export const updatePricingTaskV2ManualComparison = (runId: number, input: PricingTaskManualComparisonInput) =>
-  req<PricingTaskManualComparisonResult>(`/api/pricing-task-v2/runs/${runId}/manual-comparison`, { method: 'PUT', body: JSON.stringify(input) })
+  req<PricingTaskManualComparisonResult>(`/api/pricing-task-v2/runs/${runId}/manual-comparison`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
 
 export const fetchPricingTaskV2ManualComparisonHistory = (runId: number) =>
   req<PricingTaskManualComparisonReview[]>(`/api/pricing-task-v2/runs/${runId}/manual-comparison-history`)
