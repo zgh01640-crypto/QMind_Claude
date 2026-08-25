@@ -35,6 +35,55 @@ class SuccessorVersionConnection:
 
 
 class MainMaterialSnapshotTests(unittest.TestCase):
+    def test_feature_material_name_is_preserved_verbatim(self):
+        resources = [
+            {"name": "法兰阀门 DN100 Z45T-10", "zycl": True},
+            {"name": "其他材料费", "zycl": False},
+        ]
+
+        pricing_task._enrich_main_material_resources(
+            resources,
+            "1.类型:过滤活塞式遥控浮球阀\n2.规格:DN100\n3.材质:球墨铸铁",
+        )
+
+        self.assertEqual(resources[0]["name"], "法兰阀门 DN100 Z45T-10")
+        self.assertEqual(resources[0]["main_material_name"], "过滤活塞式遥控浮球阀")
+        self.assertEqual(resources[0]["main_material_specification"], "DN100")
+        self.assertEqual(resources[0]["main_material_material"], "球墨铸铁")
+        self.assertEqual(resources[0]["main_material_name_source"], "project_feature")
+
+    def test_missing_feature_name_falls_back_to_quota_name(self):
+        resources = [{"name": "法兰阀门 DN80 Z45T-10", "zycl": True}]
+
+        pricing_task._enrich_main_material_resources(resources, "1.规格:DN80\n2.连接形式:法兰")
+
+        self.assertEqual(resources[0]["main_material_name"], "法兰阀门 DN80 Z45T-10")
+        self.assertEqual(resources[0]["main_material_name_source"], "quota")
+
+    def test_multiple_main_materials_only_best_match_uses_feature_name(self):
+        resources = [
+            {"name": "螺纹闸板阀 DN25 Z15T-16", "zycl": True},
+            {"name": "螺纹水表 DN25 LXS-C", "zycl": True},
+        ]
+
+        pricing_task._enrich_main_material_resources(
+            resources, "1.类型：水表\n2.型号、规格：DN25"
+        )
+
+        self.assertEqual(resources[0]["main_material_name_source"], "quota")
+        self.assertEqual(resources[1]["main_material_name"], "水表")
+        self.assertEqual(resources[1]["main_material_specification"], "DN25")
+
+    def test_material_value_containing_product_name_can_supply_name(self):
+        resources = [{"name": "薄壁不锈钢管 DN100 δ=1.5mm", "zycl": True}]
+
+        pricing_task._enrich_main_material_resources(
+            resources, "1.材质：S31603薄壁不锈钢管\n2.规格：DN100"
+        )
+
+        self.assertEqual(resources[0]["main_material_name"], "S31603薄壁不锈钢管")
+        self.assertEqual(resources[0]["main_material_material"], "S31603薄壁不锈钢管")
+
     def test_conversion_check_preserves_main_material_flag(self):
         confirmed_items = [
             {
