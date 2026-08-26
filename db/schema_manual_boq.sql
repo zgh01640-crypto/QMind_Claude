@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS manual_boq_items (
     item_code        VARCHAR(100),
     item_name        VARCHAR(500),
     item_description TEXT,
-    unit             VARCHAR(50),
+    unit             TEXT,
     quantity         NUMERIC(20,6),
     unit_price       NUMERIC(20,6),
     total_price      NUMERIC(20,6)
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS manual_boq_quotas (
     boq_item_id   INT NOT NULL REFERENCES manual_boq_items(id) ON DELETE CASCADE,
     quota_code    VARCHAR(200),       -- 原始编码，可含公式如 120001-214+120001-215*25
     quota_name    VARCHAR(500),
-    quota_unit    VARCHAR(50),
+    quota_unit    TEXT,
     quantity      NUMERIC(20,6),      -- Excel 中归一化数量
     unit_price    NUMERIC(20,6),
     total_price   NUMERIC(20,6),

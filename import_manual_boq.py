@@ -138,10 +138,36 @@ def _lookup_quota_item_id(conn, code: str) -> int | None:
     return row[0] if row else None
 
 
+def _ensure_import_schema_compatibility(conn) -> None:
+    """Widen legacy unit columns before importing user-provided Excel text."""
+    columns = {
+        ("manual_boq_items", "unit"): "ALTER TABLE manual_boq_items ALTER COLUMN unit TYPE TEXT",
+        ("manual_boq_quotas", "quota_unit"): "ALTER TABLE manual_boq_quotas ALTER COLUMN quota_unit TYPE TEXT",
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT table_name, column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema='public'
+              AND (table_name, column_name) IN (
+                  ('manual_boq_items', 'unit'),
+                  ('manual_boq_quotas', 'quota_unit')
+              )
+            """
+        )
+        types = {(table, column): data_type for table, column, data_type in cur.fetchall()}
+        for key, statement in columns.items():
+            if types.get(key) != "text":
+                cur.execute(statement)
+    conn.commit()
+
+
 def import_to_db(
     conn, data: dict, source_file: str, tag: str | None, force: bool,
     project_name_override: str | None = None, allow_duplicate: bool = False, owner_user_id: int | None = None,
 ) -> int:
+    _ensure_import_schema_compatibility(conn)
     project_name = (project_name_override or "").strip() or data["project_name"]
 
     # 如已存在同文件名工程则删除（force）或跳过
@@ -154,7 +180,6 @@ def import_to_db(
             return existing[0]
         with conn.cursor() as cur:
             cur.execute("DELETE FROM manual_boq_projects WHERE id = %s", (existing[0],))
-        conn.commit()
         print(f'[覆盖] 已删除旧记录 id={existing[0]}')
 
     # 插入工程
@@ -166,7 +191,6 @@ def import_to_db(
             VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
         """, (project_name, data['bid_section'], source_file, tag, item_count, owner_user_id))
         project_id = cur.fetchone()[0]
-    conn.commit()
     print(f'  工程 id={project_id}，{item_count} 条清单项')
 
     # 插入分部
@@ -178,7 +202,6 @@ def import_to_db(
                 VALUES (%s, %s, %s) RETURNING id
             """, (project_id, sec['seq'], sec['section_name']))
             section_id_map[sec['section_name']] = cur.fetchone()[0]
-    conn.commit()
     print(f'  {len(section_id_map)} 个分部')
 
     # 插入清单项
@@ -197,8 +220,6 @@ def import_to_db(
                 item['quantity'], item['unit_price'], item['total_price'],
             ))
             item_id_list.append(cur.fetchone()[0])
-    conn.commit()
-
     # 插入定额子目
     n_quotas = 0
     n_linked = 0
