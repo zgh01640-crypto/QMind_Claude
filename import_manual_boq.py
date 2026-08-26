@@ -2,8 +2,8 @@
 """
 导入人工套定额的工程量清单（含子定额）Excel。
 
-Excel格式：单Sheet，8列：序号/项目代码/项目名称/项目规格/单位/数量/综合单价/合计
-行类型：分部标题 | BOQ清单项（C1为整数）| 定额子目行（C1空+C2有编码）| 汇总行（跳过）
+Excel格式：单Sheet，支持按表头识别字段，也兼容旧版固定列格式。
+行类型：分部标题 | BOQ清单项 | 定额/借用子目行 | 汇总行（跳过）
 
 用法：
   python import_manual_boq.py <excel_path> [--tag TAG] [--force]
@@ -50,16 +50,70 @@ def _is_skip_row(c3: str | None) -> bool:
     return any(kw in c3 for kw in keywords)
 
 
+_HEADER_ALIASES = {
+    'seq': {'序号'},
+    'row_type': {'类', '类型', '行类型'},
+    'code': {'子目编号', '子目编码', '项目编码', '项目代码'},
+    'name': {'子目名称', '项目名称'},
+    'description': {'项目特征', '项目规格', '项目描述'},
+    'quantity': {'工程量', '数量'},
+    'unit': {'单位', '计量单位'},
+    'unit_price': {'综合单价', '单价'},
+    'total_price': {'合价', '合计', '总价'},
+}
+
+
+def _normalize_header(value) -> str:
+    return re.sub(r'\s+', '', str(value or '')).strip()
+
+
+def _detect_columns(ws) -> tuple[int | None, dict[str, int]]:
+    """在前10行中查找表头，返回表头行号和零基列索引。"""
+    for row_number, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
+        start=1,
+    ):
+        columns: dict[str, int] = {}
+        for index, value in enumerate(row):
+            header = _normalize_header(value)
+            for field, aliases in _HEADER_ALIASES.items():
+                if header in aliases and field not in columns:
+                    columns[field] = index
+        if {'seq', 'code', 'name'}.issubset(columns):
+            return row_number, columns
+    return None, {}
+
+
+def _column_value(row, columns: dict[str, int], field: str):
+    index = columns.get(field)
+    if index is None or index >= len(row):
+        return None
+    return _clean(row[index])
+
+
 def parse_workbook(path: str) -> dict:
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
 
-    # 提取工程名称（行2）
-    row2 = [_clean(ws.cell(2, c).value) for c in range(1, 9)]
-    project_name = row2[2] or row2[0] or '未命名工程'
+    # 提取工程名称和标段；页面传入的工程名仍具有最高优先级。
+    project_name = '未命名工程'
     bid_section = None
-    if row2[3]:
-        bid_section = row2[3]
+    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True):
+        for value in row:
+            text = str(value).strip() if value is not None else ''
+            if text.startswith('工程名称'):
+                project_name = re.sub(r'^工程名称[：:]\s*', '', text) or project_name
+            elif text.startswith('标段'):
+                bid_section = re.sub(r'^标段[：:]\s*', '', text) or None
+
+    header_row, columns = _detect_columns(ws)
+    if header_row is None:
+        # 兼容没有可识别表头的历史8列模板。
+        header_row = 3
+        columns = {
+            'seq': 0, 'code': 1, 'name': 2, 'description': 3,
+            'unit': 4, 'quantity': 5, 'unit_price': 6, 'total_price': 7,
+        }
 
     sections = []
     items = []
@@ -69,56 +123,66 @@ def parse_workbook(path: str) -> dict:
     current_section_name = None
     current_item_index = None  # index into items[]
 
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        c1, c2, c3, c4, c5, c6, c7, c8 = [_clean(row[i]) if i < len(row) else None for i in range(8)]
-
-        c3_str = str(c3) if c3 is not None else ''
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        seq_value = _column_value(row, columns, 'seq')
+        row_type = str(_column_value(row, columns, 'row_type') or '').strip()
+        code = _column_value(row, columns, 'code')
+        name = _column_value(row, columns, 'name')
+        description = _column_value(row, columns, 'description')
+        unit = _column_value(row, columns, 'unit')
+        quantity = _column_value(row, columns, 'quantity')
+        unit_price = _column_value(row, columns, 'unit_price')
+        total_price = _column_value(row, columns, 'total_price')
+        name_str = str(name) if name is not None else ''
 
         # 汇总行 → 跳过
-        if _is_skip_row(c3_str):
+        if _is_skip_row(name_str):
             continue
 
-        # BOQ清单项：C1为整数
+        # 新模板用“类”明确区分；旧模板继续用序号判断清单项。
         try:
-            seq = int(c1)
-            is_boq = True
+            seq = int(seq_value)
+            is_boq = row_type == '清' or not row_type
         except (TypeError, ValueError):
+            seq = None
             is_boq = False
 
-        if is_boq:
+        if is_boq and seq is not None and code is not None:
             current_item_index = len(items)
             items.append({
                 'section_name': current_section_name,
                 'item_seq': seq,
-                'item_code': str(c2) if c2 is not None else None,
-                'item_name': c3_str or None,
-                'item_description': str(c4) if c4 is not None else None,
-                'unit': str(c5) if c5 is not None else None,
-                'quantity': _to_float(c6),
-                'unit_price': _to_float(c7),
-                'total_price': _to_float(c8),
+                'item_code': str(code),
+                'item_name': name_str or None,
+                'item_description': str(description) if description is not None else None,
+                'unit': str(unit) if unit is not None else None,
+                'quantity': _to_float(quantity),
+                'unit_price': _to_float(unit_price),
+                'total_price': _to_float(total_price),
             })
             continue
 
-        # C1空，C2非空 → 定额子目（含公式或中文特殊子目）
-        if c2 is not None and current_item_index is not None:
-            c2_str = str(c2).strip()
+        # 新模板中的“定/借”等子目，以及旧模板中序号为空且编码非空的子目。
+        is_quota = row_type not in {'', '部', '清'} or (not row_type and seq_value is None)
+        if is_quota and code is not None and current_item_index is not None:
+            code_str = str(code).strip()
             quotas.append({
                 'item_index': current_item_index,
-                'quota_code': c2_str,
-                'quota_name': c3_str or None,
-                'quota_unit': str(c5) if c5 is not None else None,
-                'quantity': _to_float(c6),
-                'unit_price': _to_float(c7),
-                'total_price': _to_float(c8),
+                'quota_code': code_str,
+                'quota_name': name_str or None,
+                'quota_unit': str(unit) if unit is not None else None,
+                'quantity': _to_float(quantity),
+                'unit_price': _to_float(unit_price),
+                'total_price': _to_float(total_price),
             })
             continue
 
-        # C1空，C2空，C3有名称 → 分部标题
-        if c2 is None and c3_str:
+        # 新模板“部”行，或旧模板中序号/编码为空的分部标题。
+        is_section = row_type == '部' or (not row_type and seq_value is None and code is None)
+        if is_section and name_str:
             current_section_seq += 1
-            current_section_name = c3_str
-            sections.append({'seq': current_section_seq, 'section_name': c3_str})
+            current_section_name = name_str
+            sections.append({'seq': current_section_seq, 'section_name': name_str})
 
     return {
         'project_name': project_name,
