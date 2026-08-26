@@ -52,37 +52,30 @@ class PricingTaskV2Tests(unittest.TestCase):
             patch.object(pricing_task, "_client", return_value=client),
             patch.object(pricing_task, "_model", return_value="test-model"),
         ):
-            events = list(pricing_task_v2._stream_combined_match([{"role": "user", "content": "匹配"}]))
+            reasoning, tool_result = pricing_task_v2._collect_combined_match([{"role": "user", "content": "匹配"}])
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0]["tool_choice"]["function"]["name"], "submit_quota_match")
         self.assertTrue(captured[0]["stream"])
-        self.assertEqual(events[-1], ("tool_result", {"matches": [], "issues": []}))
+        self.assertEqual(reasoning, "分析候选")
+        self.assertEqual(tool_result, {"matches": [], "issues": []})
         properties = captured[0]["tools"][0]["function"]["parameters"]["properties"]
-        self.assertIn("analysis_summary", properties)
-        self.assertIn("candidate_decisions", properties)
-        self.assertIn("combination_reason", properties)
-        self.assertIn("unit_factor_analysis", properties)
-        self.assertIn("rule_compliance", properties)
+        self.assertEqual(set(properties), {"matches", "issues"})
 
-    def test_normalize_preserves_explanation_and_filters_candidate_decisions(self):
-        result = pricing_task_v2._normalize_matches_v2({
-            "analysis_summary": "  整体判断  ",
-            "candidate_decisions": [
-                {"dekid": 12, "dezmid": 34, "decision": "accepted", "reason": "匹配工作内容"},
-                {"dekid": 99, "dezmid": 88, "decision": "accepted", "reason": "候选外"},
-            ],
-            "combination_reason": "无需组合",
-            "unit_factor_analysis": "单位一致，系数1",
-            "rule_compliance": "符合章节规则",
-            "matches": [],
-            "issues": [],
-        }, self.candidates)
+    def test_combined_match_allows_empty_reasoning_without_losing_tool_result(self):
+        function = SimpleNamespace(arguments='{"matches":[],"issues":[]}')
+        delta = SimpleNamespace(reasoning_content=None, content=None, tool_calls=[SimpleNamespace(function=function)])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=lambda **_kwargs: iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta)])])
+        )))
+        with (
+            patch.object(pricing_task, "_client", return_value=client),
+            patch.object(pricing_task, "_model", return_value="test-model"),
+        ):
+            reasoning, tool_result = pricing_task_v2._collect_combined_match([{"role": "user", "content": "匹配"}])
 
-        self.assertEqual(result["analysis_summary"], "整体判断")
-        self.assertEqual(len(result["candidate_decisions"]), 1)
-        self.assertEqual(result["candidate_decisions"][0]["zmbh"], "A-1")
-        self.assertTrue(any("候选决策包含候选外定额" in issue for issue in result["issues"]))
+        self.assertEqual(reasoning, "")
+        self.assertEqual(tool_result, {"matches": [], "issues": []})
 
     def test_v2_schema_uses_only_v2_management_tables(self):
         source = Path(pricing_task_v2.__file__).read_text(encoding="utf-8")

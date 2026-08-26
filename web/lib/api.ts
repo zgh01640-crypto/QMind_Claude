@@ -1364,23 +1364,6 @@ export interface QuotaMatch {
   match_reason: string
 }
 
-export interface PricingTaskQuotaMatchResult {
-  analysis_summary?: string
-  candidate_decisions?: Array<{
-    dekid: number
-    dezmid: number
-    zmbh?: string | null
-    zmmc?: string | null
-    decision: 'accepted' | 'rejected'
-    reason: string
-  }>
-  combination_reason?: string
-  unit_factor_analysis?: string
-  rule_compliance?: string
-  matches?: QuotaMatch[]
-  issues?: string[]
-}
-
 export interface PricingTask {
   id: number
   name: string
@@ -1429,7 +1412,7 @@ export interface PricingTaskRun {
   chapter_rule_check: PricingTaskChapterRuleCheck | null
   work_procedures: { procedures?: string[]; procedure_text?: string; found?: boolean; base_code?: string } | null
   quota_candidates: { candidates?: QuotaCandidate[]; total?: number } | null
-  quota_match: PricingTaskQuotaMatchResult | null
+  quota_match: { matches?: QuotaMatch[]; issues?: string[] } | null
   evaluation: PricingTaskEvaluation | null
   conversion_check: PricingTaskConversionCheck | null
   coefficient_check: PricingTaskCoefficientCheck | null
@@ -1899,6 +1882,7 @@ export type PricingTaskEvent =
   | { type: 'item_info'; item: BoqItem }
   | { type: 'reasoning_token'; token: string }
   | { type: 'quota_match_started'; message: string }
+  | { type: 'quota_match_reasoning'; text: string; available: boolean }
   | { type: 'code_check'; item_code: string; item_name: string; base_code: string; standard_name: string; found: boolean; is_consistent: boolean }
   | { type: 'judgment'; is_consistent: boolean; reasoning: string }
   | {
@@ -1960,7 +1944,7 @@ export type PricingTaskEvent =
       unresolved_features?: string[]
     }  | { type: 'quota_candidates'; item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
   | ({ type: 'chapter_rule_check' } & PricingTaskChapterRuleCheck)
-  | ({ type: 'quota_match' } & PricingTaskQuotaMatchResult & { matches: QuotaMatch[]; issues: string[] })
+  | { type: 'quota_match'; matches: QuotaMatch[]; issues: string[] }
   | { type: 'evaluation'; evaluation: PricingTaskEvaluation }
   | { type: 'conversion_check_start'; run_id: number; total: number }
   | { type: 'combo_adjustment_rules'; items: PricingTaskConversionItem[] }

@@ -118,7 +118,7 @@ interface ItemResult {
   featureCheck?: FeatureCheck
   chapterRuleCheck?: PricingTaskChapterRuleCheck
   quotaCandidates?: { item_code: string; base_code: string; candidates: QuotaCandidate[]; total: number }
-  quotaMatch?: NonNullable<PricingTaskRun['quota_match']> & { matches: QuotaMatch[]; issues: string[] }
+  quotaMatch?: { matches: QuotaMatch[]; issues: string[] }
   quotaMatchRunning?: boolean
   evaluation?: PricingTaskEvaluation
   comboAdjustmentPreview?: PricingTaskConversionCheck['items']
@@ -138,7 +138,7 @@ interface ItemResult {
 function runToResult(run: PricingTaskRun): ItemResult {
   const quotaMatch = run.quota_match as ItemResult['quotaMatch']
   const normalizedQuotaMatch = quotaMatch && Array.isArray(quotaMatch.matches)
-    ? { ...quotaMatch, matches: quotaMatch.matches, issues: Array.isArray(quotaMatch.issues) ? quotaMatch.issues : [] }
+    ? { matches: quotaMatch.matches, issues: Array.isArray(quotaMatch.issues) ? quotaMatch.issues : [] }
     : undefined
   return {
     phase: run.status === 'failed' ? 'error' : 'done',
@@ -1416,21 +1416,22 @@ export default function PricingTaskDetailPage() {
             quotaCandidates: { item_code: evt.item_code, base_code: evt.base_code, candidates: evt.candidates, total: evt.total },
           }))
         } else if (evt.type === 'quota_match_started') {
-          updateResult(itemId, s => ({ ...s, quotaMatchRunning: true }))
+          if (v2) updateResult(itemId, s => ({ ...s, quotaMatchRunning: true }))
+        } else if (evt.type === 'quota_match_reasoning') {
+          if (v2) {
+            const text = evt.text || '本次模型工具调用未返回可展示的原始推理信息。'
+            updateResult(itemId, s => ({
+              ...s,
+              quotaMatchRunning: false,
+              reasoning: `${s.reasoning}${s.reasoning ? '\n\n' : ''}【第五步：套定额分析】\n${text}\n`,
+            }))
+          }
         } else if (evt.type === 'quota_match') {
           matchedResults = evt.matches
           updateResult(itemId, s => ({
             ...s,
             quotaMatchRunning: false,
-            quotaMatch: {
-              analysis_summary: evt.analysis_summary,
-              candidate_decisions: evt.candidate_decisions,
-              combination_reason: evt.combination_reason,
-              unit_factor_analysis: evt.unit_factor_analysis,
-              rule_compliance: evt.rule_compliance,
-              matches: evt.matches,
-              issues: evt.issues,
-            },
+            quotaMatch: { matches: evt.matches, issues: evt.issues },
           }))
         } else if (evt.type === 'evaluation') {
           updateResult(itemId, s => ({ ...s, evaluation: evt.evaluation }))
@@ -1863,6 +1864,11 @@ export default function PricingTaskDetailPage() {
                     <div className="px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap font-mono">
                       {currentResult.reasoning || (currentResult.phase === 'reasoning' ? '等待模型流式输出...' : '本轮没有流式推理文本，结果见右侧结构化卡片。')}
                     </div>
+                    {v2 && currentResult.quotaMatchRunning && (
+                      <div className="mx-4 mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                        正在进行套定额分析，完成后将在此一次性展示原始推理。
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -2107,45 +2113,12 @@ export default function PricingTaskDetailPage() {
                     </section>
                   )}
 
-                  {currentResult.quotaMatchRunning && !currentResult.quotaMatch && (
-                    <section className="px-4 py-4 border-b bg-amber-50 border-amber-200">
-                      <div className="flex items-center gap-2 text-sm font-semibold text-amber-800">
-                        <span className="inline-block h-4 w-4 rounded-full border-2 border-amber-200 border-t-amber-600 animate-spin" />
-                        5. 正在进行套定额分析
-                      </div>
-                      <p className="mt-2 text-xs text-amber-700">分析完成后将一次性展示推理说明和匹配结果。</p>
-                    </section>
-                  )}
-
                   {currentResult.quotaMatch && (
                     <section className="px-4 py-4 border-b bg-emerald-50 border-emerald-200">
                       <h4 className="font-semibold text-sm text-emerald-900 mb-3">
                         5. 套定额结果 <span className="text-xs font-normal text-emerald-600">{currentResult.quotaMatch.matches.length} 条匹配</span>
                         <StepDuration result={currentResult} stepNo={5} />
                       </h4>
-                      {(currentResult.quotaMatch.analysis_summary || currentResult.quotaMatch.combination_reason || currentResult.quotaMatch.unit_factor_analysis || currentResult.quotaMatch.rule_compliance || currentResult.quotaMatch.candidate_decisions?.length) && (
-                        <div className="mb-3 rounded border border-emerald-200 bg-white p-3 text-xs text-gray-700 space-y-2">
-                          <div className="font-semibold text-emerald-800">推理说明</div>
-                          {currentResult.quotaMatch.analysis_summary && <p><span className="font-medium">整体判断：</span>{currentResult.quotaMatch.analysis_summary}</p>}
-                          {currentResult.quotaMatch.combination_reason && <p><span className="font-medium">组合判断：</span>{currentResult.quotaMatch.combination_reason}</p>}
-                          {currentResult.quotaMatch.unit_factor_analysis && <p><span className="font-medium">单位与系数：</span>{currentResult.quotaMatch.unit_factor_analysis}</p>}
-                          {currentResult.quotaMatch.rule_compliance && <p><span className="font-medium">章节规则：</span>{currentResult.quotaMatch.rule_compliance}</p>}
-                          {!!currentResult.quotaMatch.candidate_decisions?.length && (
-                            <div>
-                              <div className="font-medium mb-1">候选取舍：</div>
-                              <ul className="space-y-1">
-                                {currentResult.quotaMatch.candidate_decisions.map((decision, index) => (
-                                  <li key={`${decision.dekid}-${decision.dezmid}-${index}`}>
-                                    <span className={decision.decision === 'accepted' ? 'text-emerald-700 font-medium' : 'text-gray-500'}>
-                                      {decision.decision === 'accepted' ? '采用' : '排除'} {decision.zmbh || `${decision.dekid}/${decision.dezmid}`}{decision.zmmc ? ` ${decision.zmmc}` : ''}：
-                                    </span>{decision.reason || '未提供理由'}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                      )}
                       {currentResult.quotaMatch.matches.length === 0 ? (
                         <p className="text-xs text-gray-400">未找到匹配定额</p>
                       ) : (
