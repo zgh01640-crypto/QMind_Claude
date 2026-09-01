@@ -195,6 +195,33 @@ def _validate_effective_version(conn, version_id: int) -> dict[str, int]:
     return result
 
 
+def apply_known_feature_default_corrections(conn, version_id: int) -> int:
+    """Repair confirmed source-data defects before a KB version is published.
+
+    The source SQLite library currently carries an incorrect default range for
+    the 031005001 variable-frequency water-supply equipment weight feature.
+    Keep the correction in the import path so a later import cannot reintroduce
+    the same value after the one-off database migration has run.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE tqdk_tqdxmtz
+            SET defaulttzms='设备重量W(t) 1＜W≤1.2', updated_at=NOW()
+            WHERE kb_version_id=%s
+              AND qdkid=1020025
+              AND qdzmid=4067
+              AND id=10157
+              AND tzmc='质量'
+              AND defaulttzms='设备重量W(t) 0.4＜W≤0.6'
+            """,
+            (version_id,),
+        )
+        corrected = cur.rowcount
+    conn.commit()
+    return max(0, int(corrected or 0))
+
+
 def _process_job(conn, job: tuple[Any, ...]) -> int:
     job_id, upload_id, parent_id, config, change_note, stored_path, source_hash, inspection = job
     selected = set(config.get("selected_tables") or [])
@@ -312,6 +339,8 @@ def _process_job(conn, job: tuple[Any, ...]) -> int:
             for pg_table in sorted({SQLITE_TABLES[table][0] for table in KNOWN_TABLES}):
                 cur.execute(f"ANALYZE {pg_table}")
         conn.commit()
+
+        apply_known_feature_default_corrections(conn, version_id)
 
         with conn.cursor() as cur:
             parent_mapping: dict[str, int] = {}

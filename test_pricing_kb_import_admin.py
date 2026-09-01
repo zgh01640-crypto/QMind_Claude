@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from api.services.pricing_kb_import_admin import (
+    apply_known_feature_default_corrections,
     expand_dependencies,
     inspect_sqlite,
     require_admin,
@@ -15,6 +16,43 @@ from api.services.pricing_kb_import_admin import (
 
 
 class PricingKbImportAdminTests(unittest.TestCase):
+    def test_import_corrects_known_pump_weight_default(self):
+        class Cursor:
+            rowcount = 1
+
+            def __init__(self):
+                self.sql = ""
+                self.params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+
+        class Connection:
+            def __init__(self):
+                self.cursor_instance = Cursor()
+                self.committed = False
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def commit(self):
+                self.committed = True
+
+        conn = Connection()
+
+        self.assertEqual(1, apply_known_feature_default_corrections(conn, 25))
+        self.assertEqual((25,), conn.cursor_instance.params)
+        self.assertIn("设备重量W(t) 1＜W≤1.2", conn.cursor_instance.sql)
+        self.assertIn("设备重量W(t) 0.4＜W≤0.6", conn.cursor_instance.sql)
+        self.assertTrue(conn.committed)
+
     def test_inspection_classifies_known_and_unknown_tables(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sample.db"

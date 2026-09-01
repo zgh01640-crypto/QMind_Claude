@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
 
 from routers import pricing_task  # noqa: E402
+from db.migrations import MIGRATIONS  # noqa: E402
 
 
 class FeatureDefaultCursor:
@@ -45,6 +46,17 @@ class FeatureDefaultConnection:
 
 
 class FeatureDefaultTests(unittest.TestCase):
+    def test_pump_weight_default_correction_is_registered(self):
+        migrations = dict(MIGRATIONS)
+        correction = migrations["20260901_correct_pump_weight_default"]
+
+        self.assertTrue(correction.exists())
+        sql = correction.read_text(encoding="utf-8")
+        self.assertIn("qdkid = 1020025", sql)
+        self.assertIn("qdzmid = 4067", sql)
+        self.assertIn("设备重量W(t) 1＜W≤1.2", sql)
+        self.assertIn("设备重量W(t) 0.4＜W≤0.6", sql)
+
     def test_only_native_tqdxmtz_defaults_become_candidates(self):
         conn = FeatureDefaultConnection(
             [
