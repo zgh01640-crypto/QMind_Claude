@@ -74,6 +74,25 @@ def test_background_workspace_summary_counts_results_and_estimates_eta():
     assert summary["hit_rate"] == 0.75
 
 
+def test_background_workspace_item_consistency_rate_uses_all_completed_items():
+    items = [
+        {"execution_status": "completed", "consistency_status": "exact", "hit_count": 2,
+         "missed_count": 0, "extra_count": 0, "manual_count": 2, "ai_count": 2},
+        {"execution_status": "completed", "consistency_status": "partial", "hit_count": 1,
+         "missed_count": 1, "extra_count": 0, "manual_count": 2, "ai_count": 1},
+    ]
+
+    summary = pricing_task._background_workspace_summary(
+        items,
+        {"selected_count": 1},  # A partial rerun selected only one item.
+    )
+
+    assert summary["selected_count"] == 1
+    assert summary["completed_count"] == 2
+    assert summary["exact_count"] == 1
+    assert summary["item_consistency_rate"] == 0.5
+
+
 def test_background_worker_and_model_gates_never_expand_beyond_99(monkeypatch):
     monkeypatch.setenv("PRICING_BACKGROUND_BATCH_CONCURRENCY", "999")
     monkeypatch.setenv("PRICING_MODEL_CONCURRENCY", "999")

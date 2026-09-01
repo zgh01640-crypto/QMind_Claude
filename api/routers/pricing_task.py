@@ -4795,6 +4795,11 @@ def _background_workspace_summary(
         "manual_count": manual_count,
         "ai_count": ai_count,
         "hit_rate": round(hit_count / manual_count, 4) if manual_count else None,
+        # A later partial rerun only changes execution.selected_count.  The
+        # consistency rate must always use every completed item's latest result
+        # in this batch, rather than that most recent execution's selection.
+        "item_consistency_rate": round(consistency_counts["exact"] / completed_count, 4)
+        if completed_count else None,
         "elapsed_seconds": round(elapsed_seconds, 1),
         "throughput_per_minute": round(throughput, 2),
         "eta_seconds": round(eta_seconds, 1) if eta_seconds is not None else None,

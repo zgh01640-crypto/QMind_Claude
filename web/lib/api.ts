@@ -1531,6 +1531,7 @@ export interface BackgroundBatchWorkspaceSummary {
   manual_count: number
   ai_count: number
   hit_rate: number | null
+  item_consistency_rate: number | null
   elapsed_seconds: number
   throughput_per_minute: number
   eta_seconds: number | null

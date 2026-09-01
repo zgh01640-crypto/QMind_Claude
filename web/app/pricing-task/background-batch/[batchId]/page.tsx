@@ -78,9 +78,9 @@ function ResourceObservation({ label, value, detail, status = 'idle' }: { label:
 }
 function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summary'] }) {
   const quotaRate = summary.hit_rate == null ? null : Math.max(0, Math.min(1, summary.hit_rate))
-  const itemConsistencyRate = summary.selected_count > 0
-    ? Math.max(0, Math.min(1, summary.exact_count / summary.selected_count))
-    : null
+  const itemConsistencyRate = summary.item_consistency_rate == null
+    ? null
+    : Math.max(0, Math.min(1, summary.item_consistency_rate))
   return <section className="overflow-x-auto rounded-xl border border-emerald-200 bg-white">
     <div className="flex min-w-[1040px] items-stretch">
       <div className="flex w-[390px] shrink-0 items-center gap-4 bg-emerald-950 px-4 py-2 text-white">
@@ -91,7 +91,7 @@ function ResultAssessment({ summary }: { summary: BackgroundBatchWorkspace['summ
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2"><span className="text-[10px] font-semibold text-cyan-200">清单一致率</span><span className="text-lg font-bold tabular-nums">{percent(itemConsistencyRate)}</span></div>
           <div className="mt-0.5 h-0.5 overflow-hidden rounded-full bg-emerald-900"><div className="h-full rounded-full bg-cyan-300 transition-all duration-700" style={{ width: `${(itemConsistencyRate ?? 0) * 100}%` }} /></div>
-          <div className="mt-0.5 truncate text-[8px] text-emerald-500">完全一致清单数 ÷ 套取清单总数</div>
+          <div className="mt-0.5 truncate text-[8px] text-emerald-500">完全一致清单数 ÷ 全部已完成清单数</div>
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2"><span className="text-[10px] font-semibold text-emerald-200">定额命中率</span><span className="text-lg font-bold tabular-nums">{percent(quotaRate)}</span></div>
