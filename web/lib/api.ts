@@ -1484,7 +1484,6 @@ export interface PricingTaskBatchDetail {
 export interface BackgroundBatchExecution {
   id: number
   status: string
-  pipeline_version: 'legacy' | 'combined_v2'
   concurrency_limit: number
   selected_count: number
   completed_count: number

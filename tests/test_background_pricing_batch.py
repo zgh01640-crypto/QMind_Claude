@@ -1,5 +1,3 @@
-import inspect
-
 from api.routers import pricing_task
 from db import connection as db_connection
 
@@ -82,30 +80,6 @@ def test_background_worker_and_model_gates_never_expand_beyond_99(monkeypatch):
 
     assert pricing_task._background_worker_limit() == 99
     assert pricing_task._model_gate_limit() == 99
-
-
-def test_background_match_pipeline_defaults_to_legacy_and_rejects_invalid_values(monkeypatch):
-    monkeypatch.delenv("PRICING_BACKGROUND_MATCH_PIPELINE", raising=False)
-    assert pricing_task._background_match_pipeline() == "legacy"
-
-    monkeypatch.setenv("PRICING_BACKGROUND_MATCH_PIPELINE", "combined_v2")
-    assert pricing_task._background_match_pipeline() == "combined_v2"
-
-    monkeypatch.setenv("PRICING_BACKGROUND_MATCH_PIPELINE", "unknown")
-    assert pricing_task._background_match_pipeline() == "legacy"
-
-
-def test_shared_pricing_pipeline_keeps_legacy_default_for_existing_callers():
-    signature = inspect.signature(pricing_task._stream_pricing_item)
-    assert signature.parameters["match_pipeline"].default == "legacy"
-
-
-def test_background_execution_pins_pipeline_and_runner_uses_pinned_value():
-    source = inspect.getsource(pricing_task)
-    assert "pipeline_version VARCHAR(20) NOT NULL DEFAULT 'legacy'" in source
-    assert "e.pipeline_version" in source
-    assert "match_pipeline=pipeline_version" in source
-    assert '"pipeline_selected"' in source
 
 
 def test_model_rate_limit_is_recognized_without_entering_retry_policy():

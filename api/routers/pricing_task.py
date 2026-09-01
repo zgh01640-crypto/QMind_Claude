@@ -406,7 +406,6 @@ def _apply_schema(conn):
                 id BIGSERIAL PRIMARY KEY,
                 batch_id INTEGER NOT NULL REFERENCES pricing_task_batches(id) ON DELETE CASCADE,
                 status VARCHAR(20) NOT NULL DEFAULT 'queued',
-                pipeline_version VARCHAR(20) NOT NULL DEFAULT 'legacy',
                 concurrency_limit INTEGER NOT NULL,
                 selected_count INTEGER NOT NULL DEFAULT 0,
                 completed_count INTEGER NOT NULL DEFAULT 0,
@@ -418,15 +417,6 @@ def _apply_schema(conn):
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
             """
-        )
-        cur.execute("ALTER TABLE pricing_task_batch_executions ADD COLUMN IF NOT EXISTS pipeline_version VARCHAR(20) NOT NULL DEFAULT 'legacy'")
-        cur.execute(
-            """DO $$ BEGIN
-                   ALTER TABLE pricing_task_batch_executions
-                   ADD CONSTRAINT pricing_task_batch_executions_pipeline_version_check
-                   CHECK (pipeline_version IN ('legacy','combined_v2'));
-               EXCEPTION WHEN duplicate_object THEN NULL;
-               END $$"""
         )
         cur.execute(
             """
@@ -3852,10 +3842,7 @@ def _stream_pricing_item(
     kb_version_id: int,
     *,
     persist_run: bool = True,
-    match_pipeline: str = "legacy",
 ) -> Iterable[tuple[str, Any]]:
-    if match_pipeline not in {"legacy", "combined_v2"}:
-        raise ValueError(f"unsupported pricing match pipeline: {match_pipeline}")
     system_prompt = build_system_prompt()
     step_timings: dict[str, Any] = {}
 
@@ -3996,7 +3983,7 @@ def _stream_pricing_item(
         },
     ]
     quota_analysis = ""
-    if candidates and match_pipeline == "legacy":
+    if candidates:
         yield ("reasoning_token", "\n\n[第五轮A：套定额分析]\n")
         for event_type, data in _stream_text_completion(messages_r5_analysis, 6000):
             if event_type == "reasoning_token":
@@ -4022,24 +4009,8 @@ def _stream_pricing_item(
             ),
         },
     ]
-    if not candidates:
-        raw_match = {"matches": [], "issues": ["未找到候选定额子目"]}
-        match_result = _normalize_matches(raw_match, candidates)
-    elif match_pipeline == "combined_v2":
-        # Local import keeps the legacy single/batch module independent at import time.
-        from api.routers import pricing_task_v2
-
-        combined_messages = pricing_task_v2._combined_match_messages(
-            system_prompt, boq_item, code_check, feature_result, chapter_rule_check, candidates_data
-        )
-        raw_match = {}
-        for combined_event, combined_data in pricing_task_v2._stream_combined_match(combined_messages):
-            if combined_event == "tool_result":
-                raw_match = combined_data
-        match_result = pricing_task_v2._normalize_matches_v2(raw_match, candidates)
-    else:
-        raw_match = _run_submit_match(messages_r5_submit)
-        match_result = _normalize_matches(raw_match, candidates)
+    raw_match = _run_submit_match(messages_r5_submit) if candidates else {"matches": [], "issues": ["未找到候选定额子目"]}
+    match_result = _normalize_matches(raw_match, candidates)
     try:
         chapter_rule_check["validation"] = _validate_chapter_rules(chapter_rule_check, match_result["matches"])
     except ModelRateLimitError:
@@ -4666,7 +4637,7 @@ def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(curr
             if batch.get("status") in {"queued", "running", "stop_requested"} or batch.get("concurrency_limit"):
                 cur.execute(
                     """SELECT id,status,concurrency_limit,selected_count,completed_count,failed_count,
-                              created_at,started_at,finished_at,pipeline_version
+                              created_at,started_at,finished_at
                        FROM pricing_task_batch_executions WHERE batch_id=%s
                        ORDER BY id DESC LIMIT 1""",
                     (batch_id,),
@@ -4677,7 +4648,7 @@ def get_pricing_task_batch_items(batch_id: int, user: CurrentUser = Depends(curr
                         "id": int(erow[0]), "status": erow[1], "concurrency_limit": int(erow[2]),
                         "selected_count": int(erow[3]), "completed_count": int(erow[4]),
                         "failed_count": int(erow[5]), "created_at": erow[6], "started_at": erow[7],
-                        "finished_at": erow[8], "pipeline_version": erow[9] or "legacy",
+                        "finished_at": erow[8],
                     }
         return {"batch": batch, "items": items, "runs": runs, "execution": execution}
     finally:
@@ -4699,18 +4670,6 @@ def _background_event(conn, batch_id: int, execution_id: int | None, item_run_id
     return event_id
 
 
-def _background_match_pipeline() -> str:
-    value = os.getenv("PRICING_BACKGROUND_MATCH_PIPELINE", "legacy").strip().lower()
-    if value not in {"legacy", "combined_v2"}:
-        print(
-            f"[background-pricing] invalid PRICING_BACKGROUND_MATCH_PIPELINE={value!r}; falling back to legacy",
-            file=sys.stderr,
-            flush=True,
-        )
-        return "legacy"
-    return value
-
-
 @router.post("/pricing-task-background-batches/{batch_id}/executions")
 def start_background_batch_execution(
     batch_id: int,
@@ -4720,7 +4679,6 @@ def start_background_batch_execution(
     from db.connection import get_connection
 
     item_ids = list(dict.fromkeys(body.boq_item_ids))
-    pipeline_version = _background_match_pipeline()
     conn = get_connection()
     try:
         _ensure_schema(conn)
@@ -4750,9 +4708,9 @@ def start_background_batch_execution(
                 raise HTTPException(status_code=400, detail="部分清单不属于当前批次工程")
             cur.execute(
                 """INSERT INTO pricing_task_batch_executions(
-                       batch_id,status,pipeline_version,concurrency_limit,selected_count
-                   ) VALUES(%s,'queued',%s,%s,%s) RETURNING id""",
-                (batch_id, pipeline_version, int(batch_row[2]), len(item_ids)),
+                       batch_id,status,concurrency_limit,selected_count
+                   ) VALUES(%s,'queued',%s,%s) RETURNING id""",
+                (batch_id, int(batch_row[2]), len(item_ids)),
             )
             execution_id = int(cur.fetchone()[0])
             for item_id in item_ids:
@@ -4781,10 +4739,8 @@ def start_background_batch_execution(
                 (batch_id, batch_id, batch_id, batch_id),
             )
         conn.commit()
-        _background_event(conn, batch_id, execution_id, None, None, "execution_queued", {
-            "selected_count": len(item_ids), "pipeline_version": pipeline_version,
-        })
-        return {"id": execution_id, "status": "queued", "pipeline_version": pipeline_version, "concurrency_limit": int(batch_row[2])}
+        _background_event(conn, batch_id, execution_id, None, None, "execution_queued", {"selected_count": len(item_ids)})
+        return {"id": execution_id, "status": "queued", "concurrency_limit": int(batch_row[2])}
     except Exception:
         conn.rollback()
         raise
@@ -4876,7 +4832,7 @@ def get_background_pricing_task_workspace(batch_id: int, user: CurrentUser = Dep
             cur.execute(
                 """
                 SELECT id,status,concurrency_limit,selected_count,completed_count,failed_count,
-                       created_at,started_at,finished_at,pipeline_version
+                       created_at,started_at,finished_at
                 FROM pricing_task_batch_executions
                 WHERE batch_id=%s ORDER BY id DESC LIMIT 1
                 """,
@@ -4889,7 +4845,7 @@ def get_background_pricing_task_workspace(batch_id: int, user: CurrentUser = Dep
                     "id": int(erow[0]), "status": erow[1], "concurrency_limit": int(erow[2]),
                     "selected_count": int(erow[3]), "completed_count": int(erow[4]),
                     "failed_count": int(erow[5]), "created_at": erow[6], "started_at": erow[7],
-                    "finished_at": erow[8], "pipeline_version": erow[9] or "legacy",
+                    "finished_at": erow[8],
                 }
             cur.execute(
                 """
@@ -6526,11 +6482,9 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
             cur.execute(
                 """SELECT r.batch_id,r.execution_id,r.boq_item_id,b.quota_library_ids,b.manual_project_id,b.kb_version_id,
                           i.item_code,i.item_name,i.item_description,i.unit,i.quantity,i.project_id,r.attempt_count,
-                          b.owner_user_id,e.pipeline_version
+                          b.owner_user_id
                    FROM pricing_task_batch_item_runs r
-                   JOIN pricing_task_batches b ON b.id=r.batch_id
-                   JOIN pricing_task_batch_executions e ON e.id=r.execution_id
-                   JOIN boq_items i ON i.id=r.boq_item_id
+                   JOIN pricing_task_batches b ON b.id=r.batch_id JOIN boq_items i ON i.id=r.boq_item_id
                    WHERE r.id=%s""",
                 (item_run_id,),
             )
@@ -6548,19 +6502,12 @@ def _run_background_item(item_run_id: int, worker_id: str) -> None:
         profile_context.__enter__()
         usage_context = use_usage_context(business_type="background_pricing_batch", batch_id=batch_id, item_run_id=item_run_id, execution_id=execution_id)
         usage_context.__enter__()
-        pipeline_version = str(row[14] or "legacy")
-        _background_event(conn, batch_id, execution_id, item_run_id, boq_item_id, "pipeline_selected", {
-            "pipeline_version": pipeline_version,
-        })
         boq_item = {"id": boq_item_id, "item_code": row[6], "item_name": row[7], "item_description": row[8],
                     "unit": row[9], "quantity": float(row[10]) if row[10] is not None else None, "project_id": int(row[11])}
         _set_background_tool(conn, batch_id, execution_id, item_run_id, boq_item_id, "code_check", "running")
         fields: dict[str, Any] = {}
         chapter_seen = False
-        for event_type, data in _stream_pricing_item(
-            conn, boq_item, row[3] or [], row[4], None, None, int(row[5]),
-            persist_run=False, match_pipeline=pipeline_version,
-        ):
+        for event_type, data in _stream_pricing_item(conn, boq_item, row[3] or [], row[4], None, None, int(row[5]), persist_run=False):
             if event_type in {"reasoning_token", "judgment"}:
                 continue
             if event_type == "step_timing":
