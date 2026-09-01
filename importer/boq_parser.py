@@ -15,22 +15,52 @@ import openpyxl
 
 _SKIP_PATTERNS = re.compile(r'^(本页小计|合计|分部小计)$')
 
+_HEADER_ALIASES = {
+    'seq': {'序号'},
+    'row_type': {'类', '类型', '行类型'},
+    'code': {'子目编号', '子目编码', '项目编码', '项目代码'},
+    'name': {'子目名称', '项目名称'},
+    'description': {'项目特征', '项目规格', '项目描述'},
+    'unit': {'单位', '计量单位'},
+    'quantity': {'工程量', '数量'},
+    'unit_price': {'综合单价', '单价'},
+    'total_price': {'合价', '合计', '总价'},
+    'provisional_price': {'暂估价'},
+}
 
-def _detect_unit_quantity_columns(ws):
-    """Return zero-based unit/quantity indexes from the workbook header.
 
-    BOQ exports are not consistent about whether “单位” or “工程量” comes
-    first.  The legacy parser assumed E=单位 and F=工程量, which silently
-    swapped these fields for files that use E=工程量 and F=单位.
-    """
-    unit_index, quantity_index = 4, 5
-    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True):
-        normalized = [re.sub(r'\s+', '', str(value or '')) for value in row]
-        detected_unit = next((index for index, value in enumerate(normalized) if value in {'单位', '计量单位'}), None)
-        detected_quantity = next((index for index, value in enumerate(normalized) if value in {'工程量', '数量'}), None)
-        if detected_unit is not None and detected_quantity is not None:
-            return detected_unit, detected_quantity
-    return unit_index, quantity_index
+def _normalize_header(value) -> str:
+    return re.sub(r'\s+', '', str(value or '')).strip()
+
+
+def _detect_columns(ws) -> tuple[int, dict[str, int]]:
+    """Return the header row and zero-based indexes for recognized columns."""
+    for row_number, row in enumerate(
+        ws.iter_rows(min_row=1, max_row=min(ws.max_row, 10), values_only=True),
+        start=1,
+    ):
+        columns: dict[str, int] = {}
+        for index, value in enumerate(row):
+            header = _normalize_header(value)
+            for field, aliases in _HEADER_ALIASES.items():
+                if header in aliases and field not in columns:
+                    columns[field] = index
+        if {'seq', 'code', 'name'}.issubset(columns):
+            return row_number, columns
+
+    # Historical fallback: four title/header rows followed by fixed BOQ columns.
+    return 4, {
+        'seq': 0, 'code': 1, 'name': 2, 'description': 3,
+        'unit': 4, 'quantity': 5, 'unit_price': 6,
+        'total_price': 7, 'provisional_price': 8,
+    }
+
+
+def _column_value(row, columns: dict[str, int], field: str):
+    index = columns.get(field)
+    if index is None or index >= len(row):
+        return None
+    return row[index]
 
 
 def _parse_project_info(ws):
@@ -92,16 +122,19 @@ def parse_boq_workbook(path):
     items = []
     current_section_seq = 0
     section_seq_counter = 0
-    unit_index, quantity_index = _detect_unit_quantity_columns(ws)
+    header_row, columns = _detect_columns(ws)
 
-    for row in ws.iter_rows(min_row=5, values_only=True):
-        # 取前9列，不足则补 None
-        r = list(row) + [None] * 9
-        r = r[:9]
-        seq, code, name, desc = r[:4]
-        unit = row[unit_index] if unit_index < len(row) else None
-        qty = row[quantity_index] if quantity_index < len(row) else None
-        unit_price, total_price, prov_price = r[6:9]
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        seq = _column_value(row, columns, 'seq')
+        row_type = str(_column_value(row, columns, 'row_type') or '').strip()
+        code = _column_value(row, columns, 'code')
+        name = _column_value(row, columns, 'name')
+        desc = _column_value(row, columns, 'description')
+        unit = _column_value(row, columns, 'unit')
+        qty = _column_value(row, columns, 'quantity')
+        unit_price = _column_value(row, columns, 'unit_price')
+        total_price = _column_value(row, columns, 'total_price')
+        prov_price = _column_value(row, columns, 'provisional_price')
 
         name_s = str(name).strip() if name else ''
 
@@ -114,11 +147,16 @@ def parse_boq_workbook(path):
 
         row_data = [seq, code, name, desc, unit, qty]
 
-        if _is_section_row(row_data):
+        # The typed export uses 部/清/定/借. Normal project import retains
+        # sections and BOQ rows only; quota rows belong to manual import.
+        is_section = row_type == '部' or (not row_type and _is_section_row(row_data))
+        is_item = row_type == '清' or (not row_type and _is_item_row(row_data))
+
+        if is_section:
             section_seq_counter += 1
             sections.append({'seq': section_seq_counter, 'section_name': name_s})
             current_section_seq = section_seq_counter
-        elif _is_item_row(row_data):
+        elif is_item and _is_item_row(row_data):
             items.append({
                 'item_seq': int(str(seq).strip()),
                 'item_code': str(code).strip(),
