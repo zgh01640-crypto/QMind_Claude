@@ -2186,7 +2186,10 @@ export default function PricingTaskDetailPage() {
                           <div className="space-y-2">
                             {currentResult.evaluation.manual_quotas.map((q, i) => {
                               const manualCode = q.quota_code || ''
-                              const isHit = currentResult.evaluation!.hit_codes.some(aiCode => manualCode.includes(aiCode))
+                              const matchedIndexes = currentResult.evaluation!.matched_manual_indexes
+                              const isHit = matchedIndexes
+                                ? matchedIndexes.includes(i)
+                                : currentResult.evaluation!.hit_codes.some(aiCode => manualCode.includes(aiCode))
                               return (
                                 <div key={`${manualCode}-${i}`} className="bg-white border border-purple-100 rounded px-3 py-2 text-xs">
                                   <div className="flex items-center gap-2 mb-1">

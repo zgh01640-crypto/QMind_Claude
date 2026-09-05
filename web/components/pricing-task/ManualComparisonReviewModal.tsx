@@ -38,18 +38,27 @@ export default function ManualComparisonReviewModal({
   onClose,
   onUpdated,
 }: Props) {
-  const sharedManual = useMemo(
-    () => evaluation.manual_quotas.filter(quota => manualMatchesAi(quota.quota_code || '', matches)),
-    [evaluation.manual_quotas, matches],
-  )
-  const manualOnly = useMemo(
-    () => evaluation.manual_quotas.filter(quota => !manualMatchesAi(quota.quota_code || '', matches)),
-    [evaluation.manual_quotas, matches],
-  )
-  const aiOnly = useMemo(
-    () => matches.filter(match => !evaluation.manual_quotas.some(quota => match.zmbh && (quota.quota_code || '').includes(match.zmbh))),
-    [evaluation.manual_quotas, matches],
-  )
+  const sharedManual = useMemo(() => {
+    if (evaluation.matched_manual_indexes) {
+      const matched = new Set(evaluation.matched_manual_indexes)
+      return evaluation.manual_quotas.filter((_, index) => matched.has(index))
+    }
+    return evaluation.manual_quotas.filter(quota => manualMatchesAi(quota.quota_code || '', matches))
+  }, [evaluation.manual_quotas, evaluation.matched_manual_indexes, matches])
+  const manualOnly = useMemo(() => {
+    if (evaluation.missed_manual_indexes) {
+      const missed = new Set(evaluation.missed_manual_indexes)
+      return evaluation.manual_quotas.filter((_, index) => missed.has(index))
+    }
+    return evaluation.manual_quotas.filter(quota => !manualMatchesAi(quota.quota_code || '', matches))
+  }, [evaluation.manual_quotas, evaluation.missed_manual_indexes, matches])
+  const aiOnly = useMemo(() => {
+    if (evaluation.extra_ai_indexes) {
+      const extra = new Set(evaluation.extra_ai_indexes)
+      return matches.filter((_, index) => extra.has(index))
+    }
+    return matches.filter(match => !evaluation.manual_quotas.some(quota => match.zmbh && (quota.quota_code || '').includes(match.zmbh)))
+  }, [evaluation.extra_ai_indexes, evaluation.manual_quotas, matches])
   const [selectedManualIds, setSelectedManualIds] = useState<number[]>([])
   const [selectedAiKeys, setSelectedAiKeys] = useState<string[]>([])
   const [saving, setSaving] = useState(false)

@@ -127,6 +127,54 @@ class ManualComparisonReviewTests(unittest.TestCase):
         )
         self.assertEqual(streamlined.manual_project_id, 2)
 
+    def test_evaluation_matches_duplicate_codes_one_to_one(self):
+        matches = [
+            {"zmbh": "INSTALL"},
+            {"zmbh": "FLUSH"},
+            {"zmbh": "BOTTOM"},
+            {"zmbh": "OIL"},
+            {"zmbh": "CLOTH"},
+            {"zmbh": "RUST"},
+        ]
+        manual = [
+            {"id": 1, "quota_code": "INSTALL"},
+            {"id": 2, "quota_code": "FLUSH"},
+            {"id": 3, "quota_code": "BOTTOM"},
+            {"id": 4, "quota_code": "OIL"},
+            {"id": 5, "quota_code": "CLOTH"},
+            {"id": 6, "quota_code": "OIL"},
+            {"id": 7, "quota_code": "CLOTH"},
+            {"id": 8, "quota_code": "OIL"},
+            {"id": 9, "quota_code": "CLOTH"},
+        ]
+
+        evaluation = pricing_task._evaluate(matches, manual)
+
+        self.assertEqual(evaluation["manual_count"], 9)
+        self.assertEqual(evaluation["ai_count"], 6)
+        self.assertEqual(evaluation["hit_count"], 5)
+        self.assertEqual(evaluation["missed_count"], 4)
+        self.assertEqual(evaluation["extra_count"], 1)
+        self.assertEqual(evaluation["hit_codes"], ["INSTALL", "FLUSH", "BOTTOM", "OIL", "CLOTH"])
+        self.assertEqual(evaluation["missed_codes"], ["OIL", "CLOTH", "OIL", "CLOTH"])
+        self.assertEqual(evaluation["extra_codes"], ["RUST"])
+        self.assertEqual(evaluation["matched_manual_indexes"], [0, 1, 2, 3, 4])
+        self.assertEqual(evaluation["missed_manual_indexes"], [5, 6, 7, 8])
+        self.assertEqual(evaluation["matched_ai_indexes"], [0, 1, 2, 3, 4])
+        self.assertEqual(evaluation["extra_ai_indexes"], [5])
+        self.assertEqual(evaluation["matched_manual_quota_ids"], [1, 2, 3, 4, 5])
+        self.assertEqual(evaluation["missed_manual_quota_ids"], [6, 7, 8, 9])
+
+    def test_evaluation_keeps_manual_conversion_suffix_compatibility(self):
+        evaluation = pricing_task._evaluate(
+            [{"zmbh": "010001-32"}],
+            [{"id": 1, "quota_code": "010001-32换"}],
+        )
+
+        self.assertEqual(evaluation["hit_count"], 1)
+        self.assertEqual(evaluation["missed_count"], 0)
+        self.assertEqual(evaluation["extra_count"], 0)
+
     def test_batch_item_run_insert_has_one_value_for_every_column(self):
         conn = FakeConnection(batch_run_id=71)
 

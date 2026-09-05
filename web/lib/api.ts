@@ -1604,6 +1604,12 @@ export interface PricingTaskEvaluation {
   consistent_count?: number
   manual_only_count?: number
   ai_only_count?: number
+  matched_manual_indexes?: number[]
+  missed_manual_indexes?: number[]
+  matched_ai_indexes?: number[]
+  extra_ai_indexes?: number[]
+  matched_manual_quota_ids?: number[]
+  missed_manual_quota_ids?: number[]
 }
 
 export interface PricingTaskManualComparisonInput {

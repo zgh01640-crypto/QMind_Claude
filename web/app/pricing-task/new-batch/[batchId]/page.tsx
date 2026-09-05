@@ -353,11 +353,26 @@ function ManualComparisonStep({ result }: { result: ItemResult }) {
   const hitCodes = new Set(evaluation.hit_codes ?? evaluation.consistent_codes ?? [])
   const missedCodes = new Set(evaluation.missed_codes ?? evaluation.manual_only_codes ?? [])
   const extraCodes = new Set(evaluation.extra_codes ?? evaluation.ai_only_codes ?? [])
-  const consistentManualQuotas = evaluation.manual_quotas.filter(quota =>
-    Array.from(hitCodes).some(aiCode => quota.quota_code.includes(aiCode)),
+  const matchedManualIndexes = evaluation.matched_manual_indexes
+    ? new Set(evaluation.matched_manual_indexes)
+    : null
+  const missedManualIndexes = evaluation.missed_manual_indexes
+    ? new Set(evaluation.missed_manual_indexes)
+    : null
+  const extraAiIndexes = evaluation.extra_ai_indexes
+    ? new Set(evaluation.extra_ai_indexes)
+    : null
+  const consistentManualQuotas = evaluation.manual_quotas.filter((quota, index) =>
+    matchedManualIndexes
+      ? matchedManualIndexes.has(index)
+      : Array.from(hitCodes).some(aiCode => quota.quota_code.includes(aiCode)),
   )
-  const manualOnlyQuotas = evaluation.manual_quotas.filter(quota => missedCodes.has(quota.quota_code))
-  const aiOnlyMatches = matches.filter(match => extraCodes.has(match.zmbh))
+  const manualOnlyQuotas = evaluation.manual_quotas.filter((quota, index) =>
+    missedManualIndexes ? missedManualIndexes.has(index) : missedCodes.has(quota.quota_code),
+  )
+  const aiOnlyMatches = matches.filter((match, index) =>
+    extraAiIndexes ? extraAiIndexes.has(index) : extraCodes.has(match.zmbh),
+  )
 
   return (
     <section className="rounded-lg border border-purple-200 bg-purple-50 px-3 py-3 text-xs">

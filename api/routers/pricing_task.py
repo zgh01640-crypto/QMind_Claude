@@ -1954,14 +1954,74 @@ def _manual_quotas_by_code(conn, manual_project_id: int | None) -> dict[str, lis
 
 
 def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]) -> dict[str, Any]:
-    ai_codes = {str(m.get("zmbh")).strip() for m in matches if m.get("zmbh")}
-    manual_codes = {str(q.get("quota_code")).strip() for q in manual_quotas if q.get("quota_code")}
+    ai_entries = [
+        (index, str(match.get("zmbh") or "").strip())
+        for index, match in enumerate(matches)
+        if str(match.get("zmbh") or "").strip()
+    ]
+    manual_entries = [
+        (index, str(quota.get("quota_code") or "").strip())
+        for index, quota in enumerate(manual_quotas)
+        if str(quota.get("quota_code") or "").strip()
+    ]
 
-    # Manual exports may carry suffixes such as "换"; treat "010001-32" as hit
-    # when a manual code is "010001-32换".
-    hit_codes = sorted(ai_code for ai_code in ai_codes if any(ai_code in manual_code for manual_code in manual_codes))
-    missed_codes = sorted(manual_code for manual_code in manual_codes if not any(ai_code in manual_code for ai_code in ai_codes))
-    extra_codes = sorted(ai_code for ai_code in ai_codes if not any(ai_code in manual_code for manual_code in manual_codes))
+    # Compare quota rows one-to-one instead of comparing deduplicated code sets.
+    # Prefer an exact code match, then retain compatibility with manual export
+    # suffixes such as "换" (for example, "010001-32换").
+    unmatched_ai_indexes = {index for index, _ in ai_entries}
+    ai_code_by_index = dict(ai_entries)
+    matched_pairs: list[tuple[int, int]] = []
+    for manual_index, manual_code in manual_entries:
+        exact_index = next(
+            (
+                ai_index
+                for ai_index, ai_code in ai_entries
+                if ai_index in unmatched_ai_indexes and ai_code == manual_code
+            ),
+            None,
+        )
+        matched_ai_index = exact_index
+        if matched_ai_index is None:
+            matched_ai_index = next(
+                (
+                    ai_index
+                    for ai_index, ai_code in ai_entries
+                    if ai_index in unmatched_ai_indexes and ai_code in manual_code
+                ),
+                None,
+            )
+        if matched_ai_index is None:
+            continue
+        unmatched_ai_indexes.remove(matched_ai_index)
+        matched_pairs.append((manual_index, matched_ai_index))
+
+    matched_manual_indexes = [manual_index for manual_index, _ in matched_pairs]
+    matched_ai_indexes = [ai_index for _, ai_index in matched_pairs]
+    matched_manual_index_set = set(matched_manual_indexes)
+    missed_manual_indexes = [
+        manual_index
+        for manual_index, _ in manual_entries
+        if manual_index not in matched_manual_index_set
+    ]
+    extra_ai_indexes = [
+        ai_index
+        for ai_index, _ in ai_entries
+        if ai_index in unmatched_ai_indexes
+    ]
+    manual_code_by_index = dict(manual_entries)
+    hit_codes = [ai_code_by_index[ai_index] for ai_index in matched_ai_indexes]
+    missed_codes = [manual_code_by_index[index] for index in missed_manual_indexes]
+    extra_codes = [ai_code_by_index[index] for index in extra_ai_indexes]
+    matched_manual_quota_ids = [
+        int(manual_quotas[index]["id"])
+        for index in matched_manual_indexes
+        if manual_quotas[index].get("id") is not None
+    ]
+    missed_manual_quota_ids = [
+        int(manual_quotas[index]["id"])
+        for index in missed_manual_indexes
+        if manual_quotas[index].get("id") is not None
+    ]
     return {
         "manual_quotas": manual_quotas,
         "hit_codes": hit_codes,
@@ -1976,8 +2036,14 @@ def _evaluate(matches: list[dict[str, Any]], manual_quotas: list[dict[str, Any]]
         "consistent_count": len(hit_codes),
         "manual_only_count": len(missed_codes),
         "ai_only_count": len(extra_codes),
-        "manual_count": len(manual_codes),
-        "ai_count": len(ai_codes),
+        "manual_count": len(manual_entries),
+        "ai_count": len(ai_entries),
+        "matched_manual_indexes": matched_manual_indexes,
+        "missed_manual_indexes": missed_manual_indexes,
+        "matched_ai_indexes": matched_ai_indexes,
+        "extra_ai_indexes": extra_ai_indexes,
+        "matched_manual_quota_ids": matched_manual_quota_ids,
+        "missed_manual_quota_ids": missed_manual_quota_ids,
     }
 
 
@@ -5386,18 +5452,21 @@ def list_item_runs(task_id: int, boq_item_id: int, user: CurrentUser = Depends(c
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, status, code_check, feature_check, chapter_rule_check, work_procedures, quota_candidates,
-                       quota_match, evaluation, conversion_check, coefficient_check,
-                       step_timings, error_message, created_at, finished_at, reasoning_text,
-                       kb_version_id
-                FROM pricing_task_runs
-                WHERE task_id=%s AND boq_item_id=%s
-                ORDER BY created_at DESC
+                SELECT r.id, r.status, r.code_check, r.feature_check, r.chapter_rule_check, r.work_procedures, r.quota_candidates,
+                       r.quota_match, r.evaluation, r.conversion_check, r.coefficient_check,
+                       r.step_timings, r.error_message, r.created_at, r.finished_at, r.reasoning_text,
+                       r.kb_version_id, t.manual_project_id, i.item_code
+                FROM pricing_task_runs r
+                JOIN pricing_tasks t ON t.id=r.task_id
+                JOIN boq_items i ON i.id=r.boq_item_id
+                WHERE r.task_id=%s AND r.boq_item_id=%s
+                ORDER BY r.created_at DESC
                 """,
                 (task_id, boq_item_id),
             )
             rows = cur.fetchall()
         confirmed_results = _load_confirmed_results(conn, [int(r[0]) for r in rows])
+        manual_quotas = _manual_quotas(conn, rows[0][17], rows[0][18]) if rows else []
         return [
             {
                 "id": r[0],
@@ -5408,7 +5477,10 @@ def list_item_runs(task_id: int, boq_item_id: int, user: CurrentUser = Depends(c
                 "work_procedures": r[5],
                 "quota_candidates": r[6],
                 "quota_match": r[7],
-                "evaluation": r[8],
+                "evaluation": _evaluate(
+                    r[7].get("matches", []) if isinstance(r[7], dict) else [],
+                    manual_quotas,
+                ),
                 "conversion_check": _hydrate_conversion_for_run(conn, int(r[0]), r[9]),
                 "coefficient_check": r[10],
                 "step_timings": r[11],
@@ -6849,11 +6921,10 @@ def _apply_manual_comparison_review(
         if unknown_ai_keys:
             raise HTTPException(status_code=400, detail="AI quota does not belong to this run")
 
-        ai_codes = [str(item.get("zmbh") or "").strip() for item in matches]
         locked_manual_ids = {
-            int(item["id"])
-            for item in current_manual
-            if any(ai_code and ai_code in str(item.get("quota_code") or "") for ai_code in ai_codes)
+            int(current_manual[index]["id"])
+            for index in before_evaluation.get("matched_manual_indexes", [])
+            if current_manual[index].get("id") is not None
         }
         if not locked_manual_ids.issubset(retained_ids):
             raise HTTPException(status_code=400, detail="consistent manual quotas must be retained")
