@@ -12,4 +12,4 @@ Configure these repository secrets or variables:
 
 Create `/opt/qmind/shared/.env.production` manually on the server before the first workflow run. The workflow deliberately does not transmit application secrets.
 
-Triggering a push to `main` performs the build checks and deployment. `workflow_dispatch` supports a manual release. A failed health check fails the job; it does not delete data or automatically roll back. Review logs, then run the server rollback script when the previous release is known to be safe.
+The no-source workflow is `.github/workflows/image-deploy.yml`; it triggers on `codex/kb-versioning` and supports `workflow_dispatch`. It builds and pushes `qmind-api` and `qmind-web` to TCR, transfers only the Compose file and deployment scripts, logs the server into TCR, then pulls the commit-SHA images. A failed health check fails the job; it does not delete data or automatically roll back. Review logs, then run `image-rollback.sh <commit-sha>` on the server when the previous release is known to be safe.

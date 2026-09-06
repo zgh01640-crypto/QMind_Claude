@@ -17,6 +17,7 @@ Use this skill when the user asks to deploy, update, migrate, back up, roll back
 - Before a data migration, create a PostgreSQL custom-format dump and archive `data/api/pricing-kb-uploads` separately.
 - For OpenCloudOS/SELinux, preserve the `:Z` bind-mount labels in `docker-compose.prod.yml`.
 - Use `deploy/tencent-cloud/deploy.sh` for idempotent deployment and health validation. Use `backup.sh` before migrations or risky releases and `rollback.sh` only after a failed release or explicit rollback request.
+- For no-source releases, use `docker-compose.images.yml`, `image-deploy.sh`, and `image-rollback.sh`; the server must only pull prebuilt images.
 
 ## Modes
 
@@ -24,10 +25,12 @@ Use this skill when the user asks to deploy, update, migrate, back up, roll back
 2. **Data migration**: stop API/Web writes, run `pg_dump -Fc` locally, transfer the dump and knowledge-base archive, restore with `pg_restore`, extract uploads into `/opt/qmind/data/api`, and redeploy. Verify record counts and `/api/periods` before reopening traffic.
 3. **Continuous deployment**: use `.github/workflows/deploy.yml`. Configure `TENCENT_HOST`, `TENCENT_USER`, `TENCENT_SSH_KEY`, and optionally `TENCENT_PORT`/`TENCENT_APP_DIR` as GitHub secrets or variables. Keep `.env.production` on the server.
 4. **Operations**: run `backup.sh` for a timestamped dump and checksum; inspect Compose logs and the health endpoint after every release; use `rollback.sh` to switch to the previous release.
+5. **Image deployment**: build and push images from CI, then invoke `image-deploy.sh IMAGE_TAG=<commit-sha>` on the server. Keep TCR credentials in the server's Docker credential store or use a short-lived CI login.
 
 ## Repository resources
 
 - Production services and persistence: `docker-compose.prod.yml`
+- No-source image services: `docker-compose.images.yml`
 - Secret template: `.env.production.example`
 - Server scripts: `deploy/tencent-cloud/*.sh`
 - Nginx entrypoint: `deploy/nginx/qmind.conf`

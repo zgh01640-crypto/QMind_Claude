@@ -1,0 +1,84 @@
+name: QMind image CI and Tencent Cloud deploy
+
+on:
+  push:
+    branches: [codex/kb-versioning]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TCR_REGISTRY: ccr.ccs.tencentyun.com
+  TCR_NAMESPACE: qmind
+  API_IMAGE: ccr.ccs.tencentyun.com/qmind/qmind-api
+  WEB_IMAGE: ccr.ccs.tencentyun.com/qmind/qmind-web
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate image Compose
+        run: |
+          docker compose --env-file .env.images.example \
+            -f docker-compose.images.yml config -q
+      - name: Log in to Tencent TCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.TCR_REGISTRY }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:${{ github.sha }}
+            ${{ env.API_IMAGE }}:${{ github.ref_name }}
+      - name: Build and push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          file: web/Dockerfile
+          build-args: NEXT_PUBLIC_API_URL=.
+          push: true
+          tags: |
+            ${{ env.WEB_IMAGE }}:${{ github.sha }}
+            ${{ env.WEB_IMAGE }}:${{ github.ref_name }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    env:
+      TENCENT_HOST: ${{ secrets.TENCENT_HOST }}
+      TENCENT_USER: ${{ secrets.TENCENT_USER }}
+      TENCENT_PORT: ${{ vars.TENCENT_PORT || '22' }}
+      TENCENT_APP_DIR: ${{ vars.TENCENT_APP_DIR || '/opt/qmind' }}
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' '${{ secrets.TENCENT_SSH_KEY }}' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$TENCENT_PORT" "$TENCENT_HOST" >> ~/.ssh/known_hosts
+      - name: Install deployment files without source
+        run: |
+          ssh -p "$TENCENT_PORT" "$TENCENT_USER@$TENCENT_HOST" \
+            "mkdir -p '$TENCENT_APP_DIR/bin' '$TENCENT_APP_DIR/shared' '$TENCENT_APP_DIR/data'"
+          scp -P "$TENCENT_PORT" docker-compose.images.yml \
+            "$TENCENT_USER@$TENCENT_HOST:$TENCENT_APP_DIR/"
+          scp -P "$TENCENT_PORT" deploy/tencent-cloud/image-deploy.sh \
+            deploy/tencent-cloud/image-rollback.sh \
+            "$TENCENT_USER@$TENCENT_HOST:$TENCENT_APP_DIR/bin/"
+      - name: Log in to TCR on server and deploy image
+        run: |
+          printf '%s' "$TCR_PASSWORD" | ssh -p "$TENCENT_PORT" "$TENCENT_USER@$TENCENT_HOST" \
+            "docker login '$TCR_REGISTRY' --username '$TCR_USERNAME' --password-stdin"
+          ssh -p "$TENCENT_PORT" "$TENCENT_USER@$TENCENT_HOST" \
+            "chmod +x '$TENCENT_APP_DIR/bin/'*.sh && IMAGE_TAG='$GITHUB_SHA' APP_DIR='$TENCENT_APP_DIR' bash '$TENCENT_APP_DIR/bin/image-deploy.sh'"
