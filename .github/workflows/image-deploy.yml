@@ -37,7 +37,7 @@ jobs:
           push: true
           tags: |
             ${{ env.API_IMAGE }}:${{ github.sha }}
-            ${{ env.API_IMAGE }}:${{ github.ref_name }}
+            ${{ env.API_IMAGE }}:codex-kb-versioning
       - name: Build and push Web image
         uses: docker/build-push-action@v6
         with:
@@ -47,7 +47,7 @@ jobs:
           push: true
           tags: |
             ${{ env.WEB_IMAGE }}:${{ github.sha }}
-            ${{ env.WEB_IMAGE }}:${{ github.ref_name }}
+            ${{ env.WEB_IMAGE }}:codex-kb-versioning
 
   deploy:
     needs: build-and-push
